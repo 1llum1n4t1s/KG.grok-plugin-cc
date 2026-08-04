@@ -67,6 +67,8 @@ const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 // grok-4.5 の initialize が申告する reasoningEfforts（実測: high が既定）。
 const VALID_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
+// 言語タグの形。`ja`, `en-US`, `zh-Hans-CN` などを想定した緩めの BCP 47。
+const BCP47_PATTERN = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,4}$/;
 // 打ちやすい別名。右辺は `grok models` / session/new が返す実 ID。
 const MODEL_ALIASES = new Map([
   ["fast", "grok-4.20-0309-non-reasoning"],
@@ -275,7 +277,9 @@ function reviewTemplateNameFor(reviewName) {
  */
 function buildResponseLanguageRule(language, focusText) {
   const fields = "every human-readable field (summary, finding titles and bodies, recommendations, next steps)";
-  if (language) {
+  // タグはそのまま命令文へ埋まるので、BCP 47 の形をしたものだけ通す。
+  // 検証しないと、任意の文章を指示としてプロンプトへ差し込めてしまう。
+  if (language && BCP47_PATTERN.test(language)) {
     return `Write ${fields} in the language identified by the BCP 47 tag "${language}".`;
   }
   if (focusText) {
@@ -451,7 +455,7 @@ async function executeTaskRun(request) {
     resumeLast: request.resumeLast
   });
 
-  let resumeThreadId = null;
+  let resumeSessionId = null;
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
       excludeJobId: request.jobId
@@ -459,23 +463,25 @@ async function executeTaskRun(request) {
     if (!latestThread) {
       throw new Error("No previous Grok task thread was found for this repository.");
     }
-    resumeThreadId = latestThread.id;
+    resumeSessionId = latestThread.id;
   }
 
-  if (!request.prompt && !resumeThreadId) {
+  if (!request.prompt && !resumeSessionId) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
+  // キー名は runGrokTurn が読む名前と必ずそろえる。
+  // ここがずれると読み取り専用の判定とセッション再開が黙って無効になる。
   const result = await runGrokTurn(workspaceRoot, {
-    resumeThreadId,
+    resumeSessionId,
     prompt: request.prompt,
-    defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
+    defaultPrompt: resumeSessionId ? DEFAULT_CONTINUE_PROMPT : "",
     model: request.model,
     effort: request.effort,
-    sandbox: request.write ? "workspace-write" : "read-only",
+    readOnly: !request.write,
     onProgress: request.onProgress,
     persistThread: true,
-    sessionTitle: resumeThreadId ? null : buildPersistentTaskSessionName(request.prompt || DEFAULT_CONTINUE_PROMPT)
+    sessionTitle: resumeSessionId ? null : buildPersistentTaskSessionName(request.prompt || DEFAULT_CONTINUE_PROMPT)
   });
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
@@ -675,9 +681,12 @@ function enqueueBackgroundTask(cwd, job, request) {
 }
 
 async function handleReviewCommand(argv, config) {
+  // フラグは自由記述より前に置く契約（commands/*.md にもそう書いてある）。
+  // 本文に紛れた `--...` をフラグとして拾わないよう、最初の非オプションで打ち切る。
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["base", "scope", "model", "cwd", "language"],
     booleanOptions: ["json", "background", "wait"],
+    stopAtFirstPositional: true,
     aliasMap: {
       m: "model"
     }
@@ -727,9 +736,12 @@ async function handleReview(argv) {
 }
 
 async function handleTask(argv) {
+  // プロンプト本文に `--write` などが現れてもフラグとして解釈しない。
+  // ここを緩めると、読み取り専用のつもりの依頼が書き込み許可で走る。
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
     booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    stopAtFirstPositional: true,
     aliasMap: {
       m: "model"
     }
@@ -925,15 +937,22 @@ async function handleCancel(argv) {
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
   const existing = readStoredJob(workspaceRoot, job.id) ?? {};
   const grokSessionId = existing.grokSessionId ?? job.grokSessionId ?? null;
-  const interrupt = await interruptGrokTurn(cwd, { sessionId: grokSessionId });
-  if (interrupt.attempted) {
-    appendLogLine(
-      job.logFile,
-      interrupt.interrupted
-        ? `Requested Grok turn interrupt on ${grokSessionId}.`
-        : `Grok turn interrupt failed${interrupt.detail ? `: ${interrupt.detail}` : "."}`
-    );
+
+  // キャンセルは安全弁なので、割り込みが何で失敗しても
+  // この下のプロセス停止とジョブ状態の確定までは必ず通す。
+  let interrupt;
+  try {
+    interrupt = await interruptGrokTurn(cwd, { sessionId: grokSessionId });
+  } catch (error) {
+    interrupt = { attempted: true, interrupted: false, detail: error?.message ?? String(error), sessionId: grokSessionId };
   }
+
+  appendLogLine(
+    job.logFile,
+    interrupt.interrupted
+      ? `Requested Grok turn interrupt on ${grokSessionId}.`
+      : `Grok turn interrupt skipped${interrupt.detail ? `: ${interrupt.detail}` : "."}`
+  );
 
   terminateProcessTree(job.pid ?? Number.NaN);
   appendLogLine(job.logFile, "Cancelled by user.");

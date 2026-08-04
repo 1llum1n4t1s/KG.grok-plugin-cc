@@ -62,12 +62,18 @@ const MUTATING_TOOL_PATTERN = /(write|edit|create|delete|remove|rename|patch|app
  * 読み取り専用として許可するコマンド。
  * git はサブコマンドまで見て、履歴や作業ツリーを変えないものだけ通す。
  */
+/**
+ * 汎用インタプリタ（node / python など）は載せない。
+ * `-e` や `-c` の引数一つで任意の書き込みができてしまい、
+ * コマンド名だけでは読み取り専用を保証できないため。
+ * 情報を取りたいときは Grok 自身のファイル読み取りツールを使わせる。
+ */
 const READ_ONLY_COMMANDS = new Set([
   "cat", "head", "tail", "less", "more", "type",
   "ls", "dir", "pwd", "find", "tree", "stat", "file", "wc",
   "rg", "grep", "egrep", "fgrep", "ack", "ag",
   "echo", "which", "where", "basename", "dirname", "realpath",
-  "node", "python", "python3", "jq", "sort", "uniq", "cut", "awk", "sed", "tr", "diff"
+  "jq", "sort", "uniq", "cut", "awk", "sed", "tr", "diff"
 ]);
 
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
@@ -77,6 +83,24 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 
 /** ファイルへ書き出すリダイレクトと、その場編集を示す痕跡。 */
 const WRITE_SIDE_EFFECT_PATTERN = /(^|\s)(>>?|\btee\b)(\s|$)|(^|\s)-i(\s|$)/;
+
+/**
+ * コマンド置換。`git log $(rm -rf .)` のように、許可コマンドの引数へ
+ * 埋め込むだけで別のコマンドが先に走るため、中身を見ずに一律で拒否する。
+ */
+const COMMAND_SUBSTITUTION_PATTERN = /\$\(|\$\{|`/;
+
+/**
+ * 許可コマンドの中でも、引数次第でシェルへ抜けたり書き込んだりできるもの。
+ * `git` と同じく、名前だけでなく引数まで見て判定する。
+ */
+const ARGUMENT_SENSITIVE_COMMANDS = new Map([
+  // awk の system() / exec() / シェルへのパイプ、sed の e（実行）・w（書き出し）コマンド。
+  ["awk", /\b(system|exec)\s*\(|\|\s*["']/],
+  ["sed", /\b(system|exec)\s*\(|\|\s*["']|(^|[;{'"\s])[0-9,$~\/]*\s*[ewW](\s|$)/],
+  // find は -exec / -delete で読み取り専用ではなくなる。
+  ["find", /(^|\s)-(exec|execdir|ok|okdir|delete|fls|fprint|fprintf|fprint0)(\s|$)/]
+]);
 
 function cleanGrokStderr(stderr) {
   return String(stderr ?? "")
@@ -160,6 +184,11 @@ export function classifyShellCommand(command) {
     return { allowed: false, reason: "writes to a file or edits in place" };
   }
 
+  // 置換の中身は先頭トークンの判定が届かないので、セグメント分割より前に弾く。
+  if (COMMAND_SUBSTITUTION_PATTERN.test(text)) {
+    return { allowed: false, reason: "uses command substitution" };
+  }
+
   const segments = text.split(/\|\||&&|[;|]/).map((segment) => segment.trim()).filter(Boolean);
   for (const segment of segments) {
     // 環境変数の前置き（FOO=bar cmd）を読み飛ばす。
@@ -183,6 +212,11 @@ export function classifyShellCommand(command) {
 
     if (!READ_ONLY_COMMANDS.has(head)) {
       return { allowed: false, reason: `${head} is not on the read-only allowlist` };
+    }
+
+    const sensitivePattern = ARGUMENT_SENSITIVE_COMMANDS.get(head);
+    if (sensitivePattern && sensitivePattern.test(segment)) {
+      return { allowed: false, reason: `${head} is being used in a way that can write or run other commands` };
     }
   }
 
@@ -403,12 +437,187 @@ async function withDirectGrok(cwd, handler, options = {}) {
   return withGrok(cwd, handler, { ...options, disableBroker: true });
 }
 
+/** JSON-RPC の method not found。ACP v1 で消えた RPC を呼ぶとこれが返る。 */
+const RPC_METHOD_NOT_FOUND = -32601;
+
 /**
- * セッションを開始し、必要ならモデルを差し替える。
+ * `session/new` が返した設定項目から、指定カテゴリのものを探す。
+ * ACP 仕様上 category はあくまで UX ヒントで必須ではないため、
+ * 見つからないことを異常扱いにしない。
+ */
+function findSessionConfigOption(response, category) {
+  const configOptions = Array.isArray(response?.configOptions) ? response.configOptions : [];
+  return configOptions.find((option) => option?.category === category) ?? null;
+}
+
+/** select 型の選択肢はフラットにもグループにもなるので、両方から value を集める。 */
+function collectConfigValueIds(option) {
+  const ids = [];
+  for (const entry of Array.isArray(option?.options) ? option.options : []) {
+    if (typeof entry?.value === "string") {
+      ids.push(entry.value);
+      continue;
+    }
+    for (const nested of Array.isArray(entry?.options) ? entry.options : []) {
+      if (typeof nested?.value === "string") {
+        ids.push(nested.value);
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * セッション設定を 1 件反映する。反映できなければ理由を返して呼び出し側に委ねる。
+ */
+async function applySessionConfigOption(client, sessionId, option, wanted) {
+  const available = collectConfigValueIds(option);
+  const value =
+    available.find((id) => id === wanted) ??
+    available.find((id) => id.toLowerCase() === String(wanted).toLowerCase()) ??
+    null;
+
+  if (!value) {
+    const detail = available.length ? `not offered (available: ${available.join(", ")})` : "no selectable values";
+    return { applied: false, value: null, reason: detail };
+  }
+
+  if (option.currentValue !== value) {
+    await client.request("session/set_config_option", { sessionId, configId: option.id, value });
+  }
+  return { applied: true, value, reason: null };
+}
+
+/**
+ * 要求されたモデルへ差し替え、実効モデルを返す。
  *
  * `session/new` の既定モデルは認証方式によって変わる（API キーだと
- * 推論なしモデルになる）ため、要求されたモデルが現在値と違えば
- * `session/set_model` で明示的に合わせる。
+ * 推論なしモデルになる）ため、現在値と違えば明示的に合わせる。
+ * ACP v1 は `session/set_model` を廃止して `session/set_config_option` へ
+ * 統合したので、旧 RPC を先に試し method not found のときだけ新経路へ落ちる。
+ */
+async function applyRequestedModel(client, response, options) {
+  const requested = options.model ?? null;
+  const current = response.models?.currentModelId ?? null;
+
+  if (!requested || requested === current) {
+    return current;
+  }
+
+  const available = response.models?.availableModels?.map((model) => model.modelId) ?? [];
+  if (available.length && !available.includes(requested)) {
+    emitProgress(
+      options.onProgress,
+      `Model ${requested} is not available; staying on ${current ?? "the session default"}.`,
+      "starting"
+    );
+    return current;
+  }
+
+  try {
+    await client.request("session/set_model", { sessionId: response.sessionId, modelId: requested });
+    emitProgress(options.onProgress, `Model set to ${requested}.`, "starting");
+    return requested;
+  } catch (error) {
+    if (error?.rpcCode !== RPC_METHOD_NOT_FOUND) {
+      throw error;
+    }
+  }
+
+  const option = findSessionConfigOption(response, "model");
+  if (!option) {
+    emitProgress(
+      options.onProgress,
+      `This Grok build exposes no model selector; staying on ${current ?? "the session default"}.`,
+      "starting"
+    );
+    return current;
+  }
+
+  const result = await applySessionConfigOption(client, response.sessionId, option, requested);
+  if (!result.applied) {
+    emitProgress(
+      options.onProgress,
+      `Model ${requested} is ${result.reason}; staying on ${current ?? "the session default"}.`,
+      "starting"
+    );
+    return current;
+  }
+
+  emitProgress(options.onProgress, `Model set to ${result.value}.`, "starting");
+  return result.value;
+}
+
+/**
+ * 要求された推論レベルを反映する。
+ * ACP に専用 RPC は無く、`thought_level` カテゴリの設定項目として扱う。
+ * 反映可否は本題（レビューや委任タスク）の成否と無関係なので、
+ * 失敗しても turn を止めず理由だけ進捗へ流す。
+ */
+async function applyRequestedEffort(client, response, options) {
+  const requested = options.effort ?? null;
+  if (!requested) {
+    return null;
+  }
+
+  const option = findSessionConfigOption(response, "thought_level");
+  if (!option) {
+    emitProgress(
+      options.onProgress,
+      `This Grok build exposes no reasoning effort selector; --effort ${requested} was not applied.`,
+      "starting"
+    );
+    return null;
+  }
+
+  try {
+    const result = await applySessionConfigOption(client, response.sessionId, option, requested);
+    if (!result.applied) {
+      emitProgress(
+        options.onProgress,
+        `Reasoning effort ${requested} is ${result.reason}; leaving it unchanged.`,
+        "starting"
+      );
+      return null;
+    }
+    emitProgress(options.onProgress, `Reasoning effort set to ${result.value}.`, "starting");
+    return result.value;
+  } catch (error) {
+    emitProgress(
+      options.onProgress,
+      `Could not set reasoning effort ${requested}: ${error?.message ?? error}`,
+      "starting"
+    );
+    return null;
+  }
+}
+
+/**
+ * 再開したセッションへモデルと推論レベルを反映する。
+ *
+ * `session/load` の応答は `session/new` と違ってモデル一覧を含まない
+ * （ACP v1 の LoadSessionResponse は modes と configOptions だけ）。
+ * 現在値と比べられないので、要求された値をそのまま当てにいく。
+ *
+ * ここでの失敗は再開そのものを壊すべきではない。設定が当たらなくても
+ * 元のセッションの値が残るだけで、続きを話すという目的は果たせる。
+ */
+async function applyResumedSessionSettings(client, response, options) {
+  try {
+    await applyRequestedModel(client, response, options);
+  } catch (error) {
+    emitProgress(
+      options.onProgress,
+      `Could not set model ${options.model} on the resumed session: ${error?.message ?? error}`,
+      "starting"
+    );
+  }
+
+  await applyRequestedEffort(client, response, options);
+}
+
+/**
+ * セッションを開始し、必要ならモデルと推論レベルを差し替える。
  */
 async function startSession(client, cwd, options = {}) {
   const response = await client.request("session/new", {
@@ -416,29 +625,11 @@ async function startSession(client, cwd, options = {}) {
     mcpServers: options.mcpServers ?? []
   });
 
-  const requested = options.model ?? null;
-  const current = response.models?.currentModelId ?? null;
-  const available = response.models?.availableModels?.map((model) => model.modelId) ?? [];
+  // session/new が返す currentModelId は差し替え前の値なので、実効モデルを別に持つ。
+  const effectiveModel = await applyRequestedModel(client, response, options);
+  const effectiveEffort = await applyRequestedEffort(client, response, options);
 
-  // session/new が返す currentModelId は差し替え前の値なので、
-  // set_model が通ったかどうかを見て実効モデルを別に持つ。
-  let effectiveModel = current;
-
-  if (requested && requested !== current) {
-    if (available.length && !available.includes(requested)) {
-      emitProgress(
-        options.onProgress,
-        `Model ${requested} is not available; staying on ${current ?? "the session default"}.`,
-        "starting"
-      );
-    } else {
-      await client.request("session/set_model", { sessionId: response.sessionId, modelId: requested });
-      effectiveModel = requested;
-      emitProgress(options.onProgress, `Model set to ${requested}.`, "starting");
-    }
-  }
-
-  return { ...response, effectiveModel };
+  return { ...response, effectiveModel, effectiveEffort };
 }
 
 /**
@@ -581,23 +772,43 @@ export async function getGrokAuthStatus(cwd, options = {}) {
   }
 }
 
+/**
+ * 進行中の Grok ターンへ割り込む。
+ *
+ * ACP の `session/cancel` は notification なので応答は返らない。
+ * `request` で送ると解決しない Promise を待ち続けるため `notify` を使う。
+ *
+ * ここは `/grok:cancel` の途中経路でしかないので、失敗しても投げずに
+ * 結果として返す。投げてしまうと呼び出し側がプロセス停止とジョブ状態の
+ * 確定まで進めず、止めたはずのジョブが走り続ける。
+ */
 export async function interruptGrokTurn(cwd, { sessionId }) {
   if (!sessionId) {
-    throw new Error("A sessionId is required to interrupt a Grok turn.");
-  }
-  const availability = getGrokAvailability(cwd);
-  if (!availability.available) {
-    throw new Error(grokMissingMessage(availability));
+    return {
+      attempted: false,
+      interrupted: false,
+      detail: "no Grok session was recorded for this job yet",
+      sessionId: null
+    };
   }
 
-  return withGrok(
-    cwd,
-    async (client) => {
-      await client.request("session/cancel", { sessionId });
-      return { cancelled: true, sessionId };
-    },
-    { grokBin: availability.bin, reuseExistingBroker: true }
-  );
+  const availability = getGrokAvailability(cwd);
+  if (!availability.available) {
+    return { attempted: false, interrupted: false, detail: grokMissingMessage(availability), sessionId };
+  }
+
+  try {
+    await withGrok(
+      cwd,
+      async (client) => {
+        client.notify("session/cancel", { sessionId });
+      },
+      { grokBin: availability.bin, reuseExistingBroker: true }
+    );
+    return { attempted: true, interrupted: true, detail: null, sessionId };
+  } catch (error) {
+    return { attempted: true, interrupted: false, detail: error?.message ?? String(error), sessionId };
+  }
 }
 
 function grokMissingMessage(availability) {
@@ -771,18 +982,39 @@ export async function runGrokTurn(cwd, options = {}) {
     async (client) => {
       let sessionId;
 
-      if (options.resumeSessionId) {
+      // session/load はエージェントが loadSession capability を宣言した
+      // ときだけ使える。未対応の相手には投げずに新規セッションへ落とす。
+      const canLoadSession = client.initializeResult?.agentCapabilities?.loadSession === true;
+
+      if (options.resumeSessionId && !canLoadSession) {
+        emitProgress(
+          options.onProgress,
+          "This Grok build cannot resume sessions; starting a fresh one instead.",
+          "starting"
+        );
+      }
+
+      if (options.resumeSessionId && canLoadSession) {
         emitProgress(options.onProgress, `Resuming session ${options.resumeSessionId}.`, "starting");
-        await client.request("session/load", {
+        const loaded = await client.request("session/load", {
           sessionId: options.resumeSessionId,
           cwd,
           mcpServers: options.mcpServers ?? []
         });
         sessionId = options.resumeSessionId;
+
+        // 再開だと startSession を通らないため、以前は --model と --effort が
+        // 黙って無視されていた。読み込んだセッションにも同じ設定を当てる。
+        await applyResumedSessionSettings(
+          client,
+          { ...loaded, sessionId },
+          { model, effort: options.effort, onProgress: options.onProgress }
+        );
       } else {
         emitProgress(options.onProgress, "Starting Grok task session.", "starting");
         const session = await startSession(client, cwd, {
           model,
+          effort: options.effort,
           onProgress: options.onProgress,
           mcpServers: options.mcpServers ?? []
         });

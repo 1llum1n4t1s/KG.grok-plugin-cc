@@ -35,6 +35,8 @@ const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"))
 
 export const BROKER_ENDPOINT_ENV = "GROK_COMPANION_ACP_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
+/** ブローカーがエージェントの stderr を中継するときの通知メソッド。 */
+export const BROKER_AGENT_STDERR_METHOD = "broker/agent_stderr";
 
 /** ACP のプロトコル版。grok 0.2.x は 1 を返す。 */
 export const ACP_PROTOCOL_VERSION = 1;
@@ -216,13 +218,20 @@ class AcpClientBase {
   }
 
   handleChunk(chunk) {
+    // 走査済みの位置から探す。先頭から探し直すと、改行を含まない巨大な
+    // 1 行（大きなツール出力）を組み立てる間、受信のたびに全体を
+    // 再走査して O(N^2) になる。
+    const scanFrom = this.lineBuffer.length;
     this.lineBuffer += chunk;
-    let newlineIndex = this.lineBuffer.indexOf("\n");
+
+    let searchFrom = scanFrom;
+    let newlineIndex = this.lineBuffer.indexOf("\n", searchFrom);
     while (newlineIndex !== -1) {
       const line = this.lineBuffer.slice(0, newlineIndex);
       this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
       this.handleLine(line);
-      newlineIndex = this.lineBuffer.indexOf("\n");
+      searchFrom = 0;
+      newlineIndex = this.lineBuffer.indexOf("\n", searchFrom);
     }
   }
 
@@ -256,6 +265,13 @@ class AcpClientBase {
       } else {
         pending.resolve(message.result ?? {});
       }
+      return;
+    }
+
+    // ブローカーが中継してくるエージェントの stderr。直接起動と同じように
+    // client.stderr へ溜め、失敗時の診断がどちらの経路でも同じ内容になるようにする。
+    if (message.method === BROKER_AGENT_STDERR_METHOD) {
+      this.stderr += String(message.params?.chunk ?? "");
       return;
     }
 
@@ -404,6 +420,7 @@ class SpawnedAcpClient extends AcpClientBase {
 
     this.proc.stderr.on("data", (chunk) => {
       this.stderr += chunk;
+      this.options.onStderr?.(chunk);
     });
 
     this.proc.on("error", (error) => {

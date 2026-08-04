@@ -25,7 +25,7 @@ import path from "node:path";
 import process from "node:process";
 
 import { parseArgs } from "./lib/args.mjs";
-import { BROKER_BUSY_RPC_CODE, GrokAcpClient } from "./lib/acp.mjs";
+import { BROKER_AGENT_STDERR_METHOD, BROKER_BUSY_RPC_CODE, GrokAcpClient } from "./lib/acp.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 
 /** 実行中に別ソケットから割り込めるメソッド。 */
@@ -72,7 +72,13 @@ async function main() {
   const pidFile = options["pid-file"] ? path.resolve(options["pid-file"]) : null;
   writePidFile(pidFile);
 
-  const agent = await GrokAcpClient.connect(cwd, { disableBroker: true });
+  // エージェントの stderr は broker.log にしか残らず、クライアント側の
+  // client.stderr が常に空になっていた。占有中のソケットへ中継する。
+  let forwardAgentStderr = () => {};
+  const agent = await GrokAcpClient.connect(cwd, {
+    disableBroker: true,
+    onStderr: (chunk) => forwardAgentStderr(chunk)
+  });
 
   /** 今このソケットがエージェントを占有している。 */
   let activeSocket = null;
@@ -92,6 +98,16 @@ async function main() {
       }
     }
   }
+
+  forwardAgentStderr = (chunk) => {
+    if (activeSocket) {
+      send(activeSocket, {
+        jsonrpc: "2.0",
+        method: BROKER_AGENT_STDERR_METHOD,
+        params: { chunk: String(chunk) }
+      });
+    }
+  };
 
   // 通知は占有中のソケットへ素通しする。
   agent.setNotificationHandler((message) => {
@@ -164,7 +180,14 @@ async function main() {
           process.exit(0);
         }
 
+        // 通知は応答を返さないので、そのままエージェントへ素通しする。
+        // ACP の `session/cancel` は通知なので、ここで捨てると
+        // `/grok:cancel` が Grok 側のターンに一切届かなくなる。
+        // 占有ロックも取らない（実行中の別セッションを止めるのが本来の用途）。
         if (message.id === undefined) {
+          if (message.method) {
+            agent.notify(message.method, message.params ?? {});
+          }
           continue;
         }
 
@@ -228,6 +251,14 @@ async function main() {
   process.on("SIGINT", async () => {
     await shutdown(server);
     process.exit(0);
+  });
+
+  // listen 失敗（名前付きパイプの衝突、残骸ソケットの権限など）を
+  // 未捕捉例外にすると、原因がスタックトレースにしか残らない。
+  // ここで理由を書き出してから終わることで broker.log から追える。
+  server.on("error", (error) => {
+    process.stderr.write(`Grok broker could not listen on ${endpoint}: ${error?.message ?? error}\n`);
+    process.exit(1);
   });
 
   server.listen(listenTarget.path);
