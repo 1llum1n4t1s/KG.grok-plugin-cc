@@ -59,6 +59,25 @@ Reload plugins:
 /reload-plugins
 ```
 
+### What the plugin runs on your machine
+
+Worth knowing before you install, because this plugin does more than add prompts:
+
+- It starts `grok agent stdio` as a child process and talks to it over the Agent
+  Client Protocol. Grok Build itself comes from x.ai, not from this repository.
+- Runs in the same repository share one Grok process through a small broker that
+  stays resident between commands. `/grok:status` shows what is running and
+  `/grok:cancel` stops it.
+- Job records and Grok's output are written under the plugin's own data
+  directory, scoped per repository.
+- Grok reads your repository to answer, so the code it opens goes to xAI under
+  the account Grok Build is signed in with. Nothing is sent anywhere else, and
+  this plugin has no backend of its own.
+- The stop-time review gate is **off by default**. If you turn it on with
+  `/grok:setup --enable-review-gate`, ending a Claude session runs a fresh review
+  first and can block until it finishes. Turn it back off with
+  `/grok:setup --disable-review-gate`.
+
 Then run:
 
 ```bash
@@ -203,8 +222,9 @@ Checks the local install and optionally toggles the stop-time review gate.
 /grok:setup --disable-review-gate
 ```
 
-With the gate enabled, ending a Claude session triggers a fresh adversarial review and blocks if it
-finds something.
+The gate is off unless you enable it. With it enabled, ending a Claude session triggers a fresh
+adversarial review and blocks until that review finishes, so session exit can take a while on a
+large change. Turn it back off with `/grok:setup --disable-review-gate`.
 
 ## Typical Flows
 

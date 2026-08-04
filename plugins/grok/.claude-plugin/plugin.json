@@ -4,5 +4,9 @@
   "description": "Use Grok Build from Claude Code to review code or delegate tasks.",
   "author": {
     "name": "Kagayoi"
-  }
+  },
+  "homepage": "https://github.com/1llum1n4t1s/KG.grok-plugin-cc#readme",
+  "repository": "https://github.com/1llum1n4t1s/KG.grok-plugin-cc",
+  "license": "Apache-2.0",
+  "keywords": ["grok", "xai", "code-review", "delegation", "acp", "second-opinion"]
 }

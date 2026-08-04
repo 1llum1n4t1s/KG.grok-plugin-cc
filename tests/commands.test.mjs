@@ -4,6 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
+import { parseArgs } from "../plugins/grok/scripts/lib/args.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "grok");
 
@@ -158,6 +160,61 @@ test("plugin and marketplace manifests agree on name and version", () => {
   assert.equal(pkg.version, plugin.version);
 });
 
+// コミュニティマーケットプレイスに出す以上、掲載カードに出る情報は
+// 欠けたままリリースしたくない。bump-version は version しか触らないので、
+// 他のフィールドが落ちても気づけるようにここで固定する。
+test("both manifests carry the metadata a marketplace listing needs", () => {
+  const plugin = JSON.parse(read(".claude-plugin/plugin.json"));
+  const marketplace = JSON.parse(fs.readFileSync(path.join(ROOT, ".claude-plugin", "marketplace.json"), "utf8"));
+  const entry = marketplace.plugins[0];
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
+
+  for (const manifest of [plugin, entry]) {
+    assert.equal(manifest.license, "Apache-2.0");
+    assert.match(manifest.homepage, /^https:\/\/github\.com\//);
+    assert.match(manifest.repository, /^https:\/\/github\.com\//);
+    assert.ok(Array.isArray(manifest.keywords) && manifest.keywords.length > 0);
+    assert.ok(manifest.description);
+  }
+
+  // 宣言したライセンスが実際のライセンスと食い違わないこと。
+  assert.equal(pkg.license, plugin.license);
+  assert.ok(fs.existsSync(path.join(ROOT, "LICENSE")));
+
+  // owner はマーケットプレイスの必須フィールド。
+  assert.ok(marketplace.owner?.name);
+});
+
+test("the marketplace name does not collide with the reserved Anthropic names", () => {
+  const marketplace = JSON.parse(fs.readFileSync(path.join(ROOT, ".claude-plugin", "marketplace.json"), "utf8"));
+
+  // https://code.claude.com/docs/en/plugin-marketplaces の予約名一覧。
+  const reserved = new Set([
+    "claude-code-marketplace",
+    "claude-code-plugins",
+    "claude-plugins-official",
+    "claude-plugins-community",
+    "claude-community",
+    "anthropic-marketplace",
+    "anthropic-plugins",
+    "agent-skills",
+    "anthropic-agent-skills",
+    "knowledge-work-plugins",
+    "life-sciences",
+    "claude-for-legal",
+    "claude-for-financial-services",
+    "financial-services-plugins",
+    "first-party-plugins",
+    "healthcare"
+  ]);
+
+  assert.equal(reserved.has(marketplace.name), false);
+  // 公式を騙る形の名前もブロックされる。
+  assert.doesNotMatch(marketplace.name, /^(official|anthropic)-/);
+  assert.match(marketplace.name, /^[a-z0-9]+(-[a-z0-9]+)*$/, "marketplace name must be kebab-case");
+  assert.match(marketplace.plugins[0].name, /^[a-z0-9]+(-[a-z0-9]+)*$/, "plugin name must be kebab-case");
+});
+
 test("the NOTICE records the upstream attribution and the modifications", () => {
   const notice = fs.readFileSync(path.join(ROOT, "NOTICE"), "utf8");
   assert.match(notice, /Copyright 2026 OpenAI/);
@@ -177,4 +234,21 @@ test("the README documents every exposed command", () => {
   // 禁じるのは、この plugin では動かない `/codex:` コマンドの案内。
   assert.doesNotMatch(readme, /\/codex:/);
   assert.match(readme, /openai\/codex-plugin-cc/, "README should credit the upstream project");
+});
+
+test("自由記述より後ろのダッシュ付きトークンはフラグとして解釈しない", () => {
+  const { options, positionals } = parseArgs(
+    ["--wait", "explain the", "--write", "flag"],
+    { booleanOptions: ["wait", "write"], stopAtFirstPositional: true }
+  );
+
+  assert.equal(options.wait, true);
+  assert.equal(options.write, undefined);
+  assert.deepEqual(positionals, ["explain the", "--write", "flag"]);
+});
+
+test("stopAtFirstPositional を付けなければ従来どおり後ろのフラグも拾う", () => {
+  const { options } = parseArgs(["job-1", "--wait"], { booleanOptions: ["wait"] });
+
+  assert.equal(options.wait, true);
 });
