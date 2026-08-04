@@ -5,7 +5,14 @@ disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
 
-!`node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" status "$ARGUMENTS"`
+Show job status for this repository.
+
+- Run:
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" status "<arguments>"
+```
+- Substitute what the user typed: an optional job id plus any of `--wait`, `--timeout-ms <ms>`, `--all`.
+- A job id is a plain identifier: letters, digits, `.`, `_`, and `-` only. If the user typed anything that is not a job id or one of those flags, drop it rather than passing it through.
 
 If the user did not pass a job ID:
 - Render the command output as a single Markdown table for the current and past runs in this session.

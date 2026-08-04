@@ -1,7 +1,23 @@
+/**
+ * @param {string[]} argv
+ * @param {{
+ *   valueOptions?: string[],
+ *   booleanOptions?: string[],
+ *   aliasMap?: Record<string, string>,
+ *   stopAtFirstPositional?: boolean
+ * }} [config]
+ *
+ * `stopAtFirstPositional` を立てると、最初の非オプションが出た時点で
+ * 解析を打ち切り、残りを丸ごと positionals にする。自由記述を受け取る
+ * コマンド（review / audit / rescue）で使う。これが無いと、利用者が
+ * 本文中に書いた `--write` のような語がフラグとして解釈され、
+ * 読み取り専用のつもりの実行が書き込み許可へ昇格してしまう。
+ */
 export function parseArgs(argv, config = {}) {
   const valueOptions = new Set(config.valueOptions ?? []);
   const booleanOptions = new Set(config.booleanOptions ?? []);
   const aliasMap = config.aliasMap ?? {};
+  const stopAtFirstPositional = config.stopAtFirstPositional === true;
   const options = {};
   const positionals = [];
   let passthrough = false;
@@ -21,6 +37,9 @@ export function parseArgs(argv, config = {}) {
 
     if (!token.startsWith("-") || token === "-") {
       positionals.push(token);
+      if (stopAtFirstPositional) {
+        passthrough = true;
+      }
       continue;
     }
 

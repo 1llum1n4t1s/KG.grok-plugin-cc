@@ -188,10 +188,23 @@ export function readStoredJob(workspaceRoot, jobId) {
   return readJobFile(jobFile);
 }
 
+/**
+ * ジョブ ID として受け付ける形。
+ * 参照はスラッシュコマンドの自由記述から来るので、ID になり得ない文字列は
+ * 検索する前に弾く。シェルのメタ文字が紛れ込んだまま先へ流れるのも防ぐ。
+ */
+const JOB_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 function matchJobReference(jobs, reference, predicate = () => true) {
   const filtered = jobs.filter(predicate);
   if (!reference) {
     return filtered[0] ?? null;
+  }
+
+  if (!JOB_REFERENCE_PATTERN.test(reference)) {
+    throw new Error(
+      `"${reference}" is not a valid job id. Run /grok:status to list known jobs.`
+    );
   }
 
   const exact = filtered.find((job) => job.id === reference);
