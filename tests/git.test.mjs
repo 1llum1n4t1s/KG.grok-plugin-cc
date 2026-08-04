@@ -3,7 +3,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { collectReviewContext, resolveReviewTarget } from "../plugins/codex/scripts/lib/git.mjs";
+import { collectReviewContext, resolveReviewTarget } from "../plugins/grok/scripts/lib/git.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
 test("resolveReviewTarget prefers working tree when repo is dirty", () => {
@@ -98,6 +98,40 @@ test("resolveReviewTarget requires an explicit base when no default branch can b
   );
 });
 
+test("repo scope audits the whole source even when the working tree is dirty", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('DIRTY_DIFF_MARKER');\n");
+  fs.writeFileSync(path.join(cwd, "notes.txt"), "untracked\n");
+
+  const target = resolveReviewTarget(cwd, { scope: "repo" });
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(target.mode, "repo");
+  assert.equal(context.inputMode, "self-collect");
+  assert.match(context.content, /## Tracked Files/);
+  assert.match(context.content, /^app\.js$/m);
+  assert.match(context.content, /## Untracked Files/);
+  assert.match(context.content, /^notes\.txt$/m);
+  assert.match(context.collectionGuidance, /ignore the current uncommitted diff/i);
+  // 監査コンテキストには差分もファイル内容も入れない。中身は Grok が自分で読む。
+  assert.doesNotMatch(context.content, /DIRTY_DIFF_MARKER/);
+  assert.doesNotMatch(context.content, /Unstaged Diff/);
+});
+
+test("repo scope rejects --base because an audit is not a diff", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+
+  assert.throws(() => resolveReviewTarget(cwd, { scope: "repo", base: "main" }), /--base does not apply to --scope repo/);
+});
+
 test("collectReviewContext keeps inline diffs for tiny adversarial reviews", () => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
@@ -132,13 +166,24 @@ test("collectReviewContext skips untracked directories in working tree review", 
   assert.match(context.content, /### \.claude\/worktrees\/agent-test\/\n\(skipped: directory\)/);
 });
 
-test("collectReviewContext skips broken untracked symlinks instead of crashing", () => {
+test("collectReviewContext skips broken untracked symlinks instead of crashing", (t) => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
   run("git", ["commit", "-m", "init"], { cwd });
-  fs.symlinkSync("missing-target", path.join(cwd, "broken-link"));
+
+  try {
+    fs.symlinkSync("missing-target", path.join(cwd, "broken-link"));
+  } catch (error) {
+    // Windows は開発者モードか管理者権限が無いとシンボリックリンクを作れない。
+    // テスト対象の挙動ではなく前提条件が満たせないだけなので、飛ばして通す。
+    if (error.code === "EPERM" || error.code === "EACCES") {
+      t.skip("creating symlinks requires elevated permissions on this platform");
+      return;
+    }
+    throw error;
+  }
 
   const target = resolveReviewTarget(cwd, {});
   const context = collectReviewContext(cwd, target);
