@@ -59,3 +59,40 @@ test("空のコマンドと不明なコマンドは拒否側へ倒す", () => {
   assert.equal(classifyShellCommand("   ").allowed, false);
   assert.equal(classifyShellCommand("some-unknown-tool --do-it").allowed, false);
 });
+
+test("汎用インタプリタは許可しない", () => {
+  for (const command of [
+    'python3 -c "open(\'x\',\'w\').write(\'y\')"',
+    'python -c "print(1)"',
+    'node -e "require(\'fs\').writeFileSync(\'x\',\'y\')"'
+  ]) {
+    assert.equal(classifyShellCommand(command).allowed, false, command);
+  }
+});
+
+test("コマンド置換を拒否する", () => {
+  for (const command of [
+    "git log $(touch pwned)",
+    "cat ${HOME}/.netrc",
+    "echo `whoami`",
+    "git diff --stat $(rm -rf .)"
+  ]) {
+    assert.equal(classifyShellCommand(command).allowed, false, command);
+  }
+});
+
+test("許可コマンドでもシェルへ抜ける使い方は拒否する", () => {
+  for (const command of [
+    "awk 'BEGIN{system(\"touch pwned\")}'",
+    "find . -name '*.js' -exec rm {} ;",
+    "find . -delete"
+  ]) {
+    assert.equal(classifyShellCommand(command).allowed, false, command);
+  }
+});
+
+test("素直な awk / sed / find は引き続き許可する", () => {
+  for (const command of ["awk '{print $1}' auth.js", "sed -n '1,20p' auth.js", "find . -name '*.js'"]) {
+    assert.equal(classifyShellCommand(command).allowed, true, command);
+  }
+});

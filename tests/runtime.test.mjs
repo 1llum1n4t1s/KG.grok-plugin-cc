@@ -283,3 +283,167 @@ ${result.stderr}`);
   assert.match(result.stdout, /Grok session ID: fake-session-/);
   assert.match(result.stdout, /Resume in Grok: grok --resume fake-session-/);
 });
+
+// --- task（/grok:rescue の実体）---------------------------------------
+// ここは書き込みを許しうる唯一の経路なので、権限分岐を実プロセスで確かめる。
+
+test("task without --write denies write permission requests", () => {
+  const { repo, env } = setupWorkspace({
+    replies: [
+      {
+        requestPermissionFor: { title: "Write `notes.txt`", rawInput: { command: "echo hi > notes.txt" } },
+        text: "wrote the file",
+        onDenied: { text: "permission denied" }
+      }
+    ]
+  });
+
+  const result = companion(["task", "add a note"], { repo, env });
+
+  assert.equal(result.status, 0, `stdout:
+${result.stdout}
+stderr:
+${result.stderr}`);
+  assert.match(result.stdout, /permission denied/);
+});
+
+test("task with --write allows write permission requests", () => {
+  const { repo, env } = setupWorkspace({
+    replies: [
+      {
+        requestPermissionFor: { title: "Write `notes.txt`", rawInput: { command: "echo hi > notes.txt" } },
+        text: "wrote the file",
+        onDenied: { text: "permission denied" }
+      }
+    ]
+  });
+
+  const result = companion(["task", "--write", "add a note"], { repo, env });
+
+  assert.equal(result.status, 0, `stdout:
+${result.stdout}
+stderr:
+${result.stderr}`);
+  assert.match(result.stdout, /wrote the file/);
+});
+
+test("task does not treat --write inside the prompt text as a flag", () => {
+  const { repo, env } = setupWorkspace({
+    replies: [
+      {
+        requestPermissionFor: { title: "Write `notes.txt`", rawInput: { command: "echo hi > notes.txt" } },
+        text: "wrote the file",
+        onDenied: { text: "permission denied" }
+      }
+    ]
+  });
+
+  const result = companion(["task", "explain what the --write flag does"], { repo, env });
+
+  assert.equal(result.status, 0, `stdout:
+${result.stdout}
+stderr:
+${result.stderr}`);
+  assert.match(result.stdout, /permission denied/);
+});
+
+test("task forwards the requested model to the session", () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+
+  const result = companion(["task", "--model", "grok-4.5", "do a thing"], { repo, env });
+
+  assert.equal(result.status, 0, `stdout:
+${result.stdout}
+stderr:
+${result.stderr}`);
+  assert.deepEqual(fake.readState().models, ["grok-4.5"]);
+});
+
+const THOUGHT_LEVEL_OPTION = {
+  id: "thought-level",
+  name: "Thought level",
+  category: "thought_level",
+  type: "select",
+  currentValue: "high",
+  options: [
+    { value: "low", name: "Low" },
+    { value: "medium", name: "Medium" },
+    { value: "high", name: "High" }
+  ]
+};
+
+test("task leaves reasoning effort alone when --effort is absent", () => {
+  const { fake, repo, env } = setupWorkspace({
+    replies: [{ text: "done" }],
+    configOptions: [THOUGHT_LEVEL_OPTION]
+  });
+
+  const result = companion(["task", "do a thing"], { repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(fake.readState().configs, []);
+});
+
+test("task applies --effort through session/set_config_option", () => {
+  const { fake, repo, env } = setupWorkspace({
+    replies: [{ text: "done" }],
+    configOptions: [THOUGHT_LEVEL_OPTION]
+  });
+
+  const result = companion(["task", "--effort", "low", "do a thing"], { repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(fake.readState().configs, [{ configId: "thought-level", value: "low" }]);
+});
+
+test("task falls back to set_config_option when session/set_model is gone", () => {
+  const { fake, repo, env } = setupWorkspace({
+    replies: [{ text: "done" }],
+    setModelUnsupported: true,
+    configOptions: [
+      {
+        id: "model",
+        name: "Model",
+        category: "model",
+        type: "select",
+        currentValue: "grok-fake-nonreasoning",
+        options: [{ value: "grok-fake-nonreasoning", name: "fast" }, { value: "grok-4.5", name: "4.5" }]
+      }
+    ]
+  });
+
+  const result = companion(["task", "--model", "grok-4.5", "do a thing"], { repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  const state = fake.readState();
+  assert.deepEqual(state.models, []);
+  assert.deepEqual(state.configs, [{ configId: "model", value: "grok-4.5" }]);
+});
+
+test("resuming a task reloads the previous session and reapplies --effort", () => {
+  // 偽 grok はコマンドごとに新しいプロセスとして起動するので、応答は
+  // 1 種類にしておき、検証は記録された RPC 側で行う。
+  const { fake, repo, env } = setupWorkspace({
+    replies: [{ text: "carrying on" }],
+    configOptions: [THOUGHT_LEVEL_OPTION]
+  });
+
+  const first = companion(["task", "start the work"], { repo, env });
+  assert.equal(first.status, 0, first.stderr);
+  assert.deepEqual(fake.readState().loads, []);
+
+  const resumed = companion(["task", "--resume-last", "--effort", "medium", "keep going"], { repo, env });
+  assert.equal(resumed.status, 0, `stdout:
+${resumed.stdout}
+stderr:
+${resumed.stderr}`);
+  assert.match(resumed.stdout, /carrying on/);
+
+  const state = fake.readState();
+  // 新しいセッションを作らず、前回のセッションを読み直している。
+  assert.equal(state.sessions, 0);
+  assert.deepEqual(state.loads, ["fake-session-1"]);
+  assert.deepEqual(state.prompts, ["keep going"]);
+  // 再開でも --effort が当たる（以前は startSession を通らず無視されていた）。
+  assert.deepEqual(state.configs, [{ configId: "thought-level", value: "medium" }]);
+});

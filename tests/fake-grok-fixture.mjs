@@ -48,7 +48,7 @@ if (!(argv[0] === "agent" && argv[1] === "stdio")) {
 }
 
 // 呼び出しの記録。テストから何が起きたか検証できるようにする。
-const state = { prompts: [], models: [], cancels: [], sessions: 0 };
+const state = { prompts: [], models: [], cancels: [], loads: [], configs: [], sessions: 0 };
 function persist() {
   if (STATE_PATH) {
     fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), "utf8");
@@ -93,13 +93,32 @@ function handle(message) {
         models: {
           currentModelId: scenario.defaultModel ?? "grok-fake-nonreasoning",
           availableModels: (scenario.availableModels ?? ["grok-fake-nonreasoning", "grok-4.5"]).map((m) => ({ modelId: m, name: m }))
-        }
+        },
+        configOptions: scenario.configOptions ?? []
       }});
       return;
     }
 
+    // LoadSessionResponse はモデル一覧を返さない。ACP v1 に合わせて
+    // modes と configOptions だけを返す。
+    case "session/load":
+      state.loads.push(params.sessionId);
+      persist();
+      send({ jsonrpc: "2.0", id, result: { configOptions: scenario.configOptions ?? [] } });
+      return;
+
     case "session/set_model":
+      if (scenario.setModelUnsupported) {
+        send({ jsonrpc: "2.0", id, error: { code: -32601, message: "unsupported: session/set_model" } });
+        return;
+      }
       state.models.push(params.modelId);
+      persist();
+      send({ jsonrpc: "2.0", id, result: {} });
+      return;
+
+    case "session/set_config_option":
+      state.configs.push({ configId: params.configId, value: params.value });
       persist();
       send({ jsonrpc: "2.0", id, result: {} });
       return;
