@@ -13,11 +13,10 @@
     "types": ["node"]
   },
   "include": [
-    "plugins/codex/scripts/lib/app-server.mjs",
-    "plugins/codex/scripts/lib/codex.mjs",
-    "plugins/codex/scripts/lib/fs.mjs",
-    "plugins/codex/scripts/lib/process.mjs",
-    "plugins/codex/scripts/lib/app-server-protocol.d.ts",
-    "plugins/codex/.generated/app-server-types/**/*.ts"
+    "plugins/grok/scripts/lib/acp.mjs",
+    "plugins/grok/scripts/lib/grok.mjs",
+    "plugins/grok/scripts/lib/fs.mjs",
+    "plugins/grok/scripts/lib/process.mjs",
+    "plugins/grok/scripts/lib/acp-protocol.d.ts"
   ]
 }

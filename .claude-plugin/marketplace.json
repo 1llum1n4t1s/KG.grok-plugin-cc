@@ -1,21 +1,21 @@
 {
-  "name": "openai-codex",
+  "name": "kagayoi-grok",
   "owner": {
-    "name": "OpenAI"
+    "name": "Kagayoi"
   },
   "metadata": {
-    "description": "Codex plugins to use in Claude Code for delegation and code review.",
-    "version": "1.0.6"
+    "description": "Grok plugins to use in Claude Code for delegation and code review.",
+    "version": "0.1.0"
   },
   "plugins": [
     {
-      "name": "codex",
-      "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.0.6",
+      "name": "grok",
+      "description": "Use Grok Build from Claude Code to review code or delegate tasks.",
+      "version": "0.1.0",
       "author": {
-        "name": "OpenAI"
+        "name": "Kagayoi"
       },
-      "source": "./plugins/codex"
+      "source": "./plugins/grok"
     }
   ]
 }
