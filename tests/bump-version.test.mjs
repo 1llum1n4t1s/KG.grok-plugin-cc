@@ -25,17 +25,6 @@ function makeVersionFixture() {
     name: "kg-grok-plugin-cc",
     version: "1.0.2"
   });
-  writeJson(path.join(root, "package-lock.json"), {
-    name: "kg-grok-plugin-cc",
-    version: "1.0.2",
-    lockfileVersion: 3,
-    packages: {
-      "": {
-        name: "kg-grok-plugin-cc",
-        version: "1.0.2"
-      }
-    }
-  });
   writeJson(path.join(root, "plugins", "grok", ".claude-plugin", "plugin.json"), {
     name: "grok",
     version: "1.0.2"
@@ -64,8 +53,6 @@ test("bump-version updates every release manifest", () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(readJson(path.join(root, "package.json")).version, "1.2.3");
-  assert.equal(readJson(path.join(root, "package-lock.json")).version, "1.2.3");
-  assert.equal(readJson(path.join(root, "package-lock.json")).packages[""].version, "1.2.3");
   assert.equal(readJson(path.join(root, "plugins", "grok", ".claude-plugin", "plugin.json")).version, "1.2.3");
   assert.equal(readJson(path.join(root, ".claude-plugin", "marketplace.json")).metadata.version, "1.2.3");
   assert.equal(readJson(path.join(root, ".claude-plugin", "marketplace.json")).plugins[0].version, "1.2.3");
@@ -85,4 +72,15 @@ test("bump-version check mode reports stale metadata", () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /plugins\/grok\/\.claude-plugin\/plugin\.json version/);
   assert.match(result.stderr, /\.claude-plugin\/marketplace\.json metadata\.version/);
+});
+
+// フィクスチャだけで検証していると、実リポジトリに存在しないファイルを
+// TARGETS に残したまま気づけない。実際のルートに対しても走らせる。
+test("bump-version check mode runs against the real repository", () => {
+  const result = run("node", [SCRIPT, "--root", ROOT, "--check"], {
+    cwd: ROOT
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /ENOENT/);
 });

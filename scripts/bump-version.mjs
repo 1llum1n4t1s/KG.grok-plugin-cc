@@ -19,26 +19,6 @@ const TARGETS = [
     ]
   },
   {
-    file: "package-lock.json",
-    values: [
-      {
-        label: "version",
-        get: (json) => json.version,
-        set: (json, version) => {
-          json.version = version;
-        }
-      },
-      {
-        label: "packages[\"\"].version",
-        get: (json) => json.packages?.[""]?.version,
-        set: (json, version) => {
-          requireObject(json.packages?.[""], "package-lock.json packages[\"\"]");
-          json.packages[""].version = version;
-        }
-      }
-    ]
-  },
-  {
     file: "plugins/grok/.claude-plugin/plugin.json",
     values: [
       {

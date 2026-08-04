@@ -20,16 +20,17 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: 22
-          cache: npm
+
+      # このリポジトリの lockfile は pnpm-lock.yaml のみ。
+      # npm ci は package-lock.json が要るので使えない。
+      - name: Install pnpm
+        run: npm install -g pnpm@11
 
       - name: Install dependencies
-        run: npm ci
-
-      - name: Install Codex CLI
-        run: npm install -g @openai/codex
+        run: pnpm install --frozen-lockfile
 
       - name: Run test suite
-        run: npm test
+        run: pnpm test
 
       - name: Run build
-        run: npm run build
+        run: pnpm build
