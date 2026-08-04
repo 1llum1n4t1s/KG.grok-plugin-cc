@@ -8,11 +8,11 @@ import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { resolveStateDir } from "./state.mjs";
 
-export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
-export const LOG_FILE_ENV = "CODEX_COMPANION_APP_SERVER_LOG_FILE";
+export const PID_FILE_ENV = "GROK_COMPANION_APP_SERVER_PID_FILE";
+export const LOG_FILE_ENV = "GROK_COMPANION_APP_SERVER_LOG_FILE";
 const BROKER_STATE_FILE = "broker.json";
 
-export function createBrokerSessionDir(prefix = "cxc-") {
+export function createBrokerSessionDir(prefix = "gkc-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
@@ -135,7 +135,7 @@ export async function ensureBrokerSession(cwd, options = {}) {
   const logFile = path.join(sessionDir, "broker.log");
   const scriptPath =
     options.scriptPath ??
-    fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
+    fileURLToPath(new URL("../acp-broker.mjs", import.meta.url));
 
   const child = spawnBrokerProcess({
     scriptPath,

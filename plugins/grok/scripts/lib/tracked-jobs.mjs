@@ -3,7 +3,7 @@ import process from "node:process";
 
 import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
-export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
+export const SESSION_ID_ENV = "GROK_COMPANION_SESSION_ID";
 
 export function nowIso() {
   return new Date().toISOString();
@@ -14,8 +14,7 @@ function normalizeProgressEvent(value) {
     return {
       message: String(value.message ?? "").trim(),
       phase: typeof value.phase === "string" && value.phase.trim() ? value.phase.trim() : null,
-      threadId: typeof value.threadId === "string" && value.threadId.trim() ? value.threadId.trim() : null,
-      turnId: typeof value.turnId === "string" && value.turnId.trim() ? value.turnId.trim() : null,
+      grokSessionId: typeof value.grokSessionId === "string" && value.grokSessionId.trim() ? value.grokSessionId.trim() : null,
       stderrMessage: value.stderrMessage == null ? null : String(value.stderrMessage).trim(),
       logTitle: typeof value.logTitle === "string" && value.logTitle.trim() ? value.logTitle.trim() : null,
       logBody: value.logBody == null ? null : String(value.logBody).trimEnd()
@@ -25,8 +24,7 @@ function normalizeProgressEvent(value) {
   return {
     message: String(value ?? "").trim(),
     phase: null,
-    threadId: null,
-    turnId: null,
+    grokSessionId: null,
     stderrMessage: String(value ?? "").trim(),
     logTitle: null,
     logBody: null
@@ -70,7 +68,6 @@ export function createJobRecord(base, options = {}) {
 export function createJobProgressUpdater(workspaceRoot, jobId) {
   let lastPhase = null;
   let lastThreadId = null;
-  let lastTurnId = null;
 
   return (event) => {
     const normalized = normalizeProgressEvent(event);
@@ -83,15 +80,9 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       changed = true;
     }
 
-    if (normalized.threadId && normalized.threadId !== lastThreadId) {
-      lastThreadId = normalized.threadId;
-      patch.threadId = normalized.threadId;
-      changed = true;
-    }
-
-    if (normalized.turnId && normalized.turnId !== lastTurnId) {
-      lastTurnId = normalized.turnId;
-      patch.turnId = normalized.turnId;
+    if (normalized.grokSessionId && normalized.grokSessionId !== lastThreadId) {
+      lastThreadId = normalized.grokSessionId;
+      patch.grokSessionId = normalized.grokSessionId;
       changed = true;
     }
 
@@ -123,7 +114,7 @@ export function createProgressReporter({ stderr = false, logFile = null, onEvent
     const event = normalizeProgressEvent(eventOrMessage);
     const stderrMessage = event.stderrMessage ?? event.message;
     if (stderr && stderrMessage) {
-      process.stderr.write(`[codex] ${stderrMessage}\n`);
+      process.stderr.write(`[grok] ${stderrMessage}\n`);
     }
     appendLogLine(logFile, event.message);
     appendLogBlock(logFile, event.logTitle, event.logBody);
@@ -153,13 +144,15 @@ export async function runTrackedJob(job, runner, options = {}) {
 
   try {
     const execution = await runner();
-    const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
+    // exitStatus はランタイムの status 文字列（"completed" / "failed" ほか）。
+    // 本家 Codex 版は数値の終了コードだったので `=== 0` で比較していたが、
+    // そのままだと全ジョブが failed として記録されてしまう。
+    const completionStatus = execution.exitStatus === "completed" ? "completed" : "failed";
     const completedAt = nowIso();
     writeJobFile(job.workspaceRoot, job.id, {
       ...runningRecord,
       status: completionStatus,
-      threadId: execution.threadId ?? null,
-      turnId: execution.turnId ?? null,
+      grokSessionId: execution.grokSessionId ?? null,
       pid: null,
       phase: completionStatus === "completed" ? "done" : "failed",
       completedAt,
@@ -169,8 +162,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     upsertJob(job.workspaceRoot, {
       id: job.id,
       status: completionStatus,
-      threadId: execution.threadId ?? null,
-      turnId: execution.turnId ?? null,
+      grokSessionId: execution.grokSessionId ?? null,
       summary: execution.summary,
       phase: completionStatus === "completed" ? "done" : "failed",
       pid: null,

@@ -7,6 +7,7 @@ import { formatCommandFailure, runCommand, runCommandChecked } from "./process.m
 const MAX_UNTRACKED_BYTES = 24 * 1024;
 const DEFAULT_INLINE_DIFF_MAX_FILES = 2;
 const DEFAULT_INLINE_DIFF_MAX_BYTES = 256 * 1024;
+const MAX_REPO_LISTING_ENTRIES = 2000;
 
 // Git is directly executable on Windows. Repository-derived arguments must never pass through a shell.
 function git(cwd, args, options = {}) {
@@ -138,7 +139,18 @@ export function resolveReviewTarget(cwd, options = {}) {
   const requestedScope = options.scope ?? "auto";
   const baseRef = options.base ?? null;
   const state = getWorkingTreeState(cwd);
-  const supportedScopes = new Set(["auto", "working-tree", "branch"]);
+  const supportedScopes = new Set(["auto", "working-tree", "branch", "repo"]);
+
+  if (requestedScope === "repo") {
+    if (baseRef) {
+      throw new Error("--base does not apply to --scope repo. A repository audit reviews the whole source, not a diff.");
+    }
+    return {
+      mode: "repo",
+      label: "full repository",
+      explicit: true
+    };
+  }
 
   if (baseRef) {
     return {
@@ -159,7 +171,7 @@ export function resolveReviewTarget(cwd, options = {}) {
 
   if (!supportedScopes.has(requestedScope)) {
     throw new Error(
-      `Unsupported review scope "${requestedScope}". Use one of: auto, working-tree, branch, or pass --base <ref>.`
+      `Unsupported review scope "${requestedScope}". Use one of: auto, working-tree, branch, repo, or pass --base <ref>.`
     );
   }
 
@@ -289,6 +301,33 @@ function collectBranchContext(cwd, baseRef, options = {}) {
   };
 }
 
+function formatCappedListing(entries) {
+  if (entries.length <= MAX_REPO_LISTING_ENTRIES) {
+    return entries.join("\n");
+  }
+  const shown = entries.slice(0, MAX_REPO_LISTING_ENTRIES);
+  return [...shown, `(+${entries.length - shown.length} more files - run \`git ls-files\` for the full list)`].join("\n");
+}
+
+// リポジトリ監査は差分を渡さない。棚卸し（ファイル一覧と直近ログ）だけを渡し、
+// 中身は Grok が read-only コマンドで自分で読む前提にする。
+function collectRepoContext(cwd) {
+  const trackedFiles = gitChecked(cwd, ["ls-files"]).stdout.trim().split("\n").filter(Boolean);
+  const untrackedFiles = gitChecked(cwd, ["ls-files", "--others", "--exclude-standard"]).stdout.trim().split("\n").filter(Boolean);
+  const logOutput = git(cwd, ["log", "--oneline", "--decorate", "-n", "15"]).stdout.trim();
+
+  return {
+    mode: "repo",
+    summary: `Auditing the full repository: ${trackedFiles.length} tracked and ${untrackedFiles.length} untracked file(s).`,
+    content: [
+      formatSection("Tracked Files", formatCappedListing(trackedFiles)),
+      formatSection("Untracked Files", formatCappedListing(untrackedFiles)),
+      formatSection("Recent Commits", logOutput)
+    ].join("\n"),
+    changedFiles: trackedFiles
+  };
+}
+
 function buildAdversarialCollectionGuidance(options = {}) {
   if (options.includeDiff !== false) {
     return "Use the repository context below as primary evidence.";
@@ -305,6 +344,22 @@ export function collectReviewContext(cwd, target, options = {}) {
   let details;
   let includeDiff;
   let diffBytes;
+
+  if (target.mode === "repo") {
+    const repoDetails = collectRepoContext(repoRoot);
+    return {
+      cwd: repoRoot,
+      repoRoot,
+      branch: currentBranch,
+      target,
+      fileCount: repoDetails.changedFiles.length,
+      diffBytes: 0,
+      inputMode: "self-collect",
+      collectionGuidance:
+        "The repository context below is only a file inventory. Ignore the current uncommitted diff entirely and audit the source as it exists on disk, reading files yourself with read-only commands.",
+      ...repoDetails
+    };
+  }
 
   if (target.mode === "working-tree") {
     const state = getWorkingTreeState(repoRoot);

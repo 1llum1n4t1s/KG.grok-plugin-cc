@@ -8,20 +8,18 @@ import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import {
-    buildPersistentTaskThreadName,
+    buildPersistentTaskSessionName,
     DEFAULT_CONTINUE_PROMPT,
-    findLatestTaskThread,
-    getCodexAuthStatus,
-    getCodexAvailability,
+    findLatestTaskSession,
+    getGrokAuthStatus,
+    getGrokAvailability,
     getSessionRuntimeStatus,
-    importExternalAgentSession,
-    interruptAppServerTurn,
+    interruptGrokTurn,
     parseStructuredOutput,
     readOutputSchema,
-    runAppServerReview,
-    runAppServerTurn
-  } from "./lib/codex.mjs";
-import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
+    runGrokReview,
+    runGrokTurn
+  } from "./lib/grok.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
@@ -54,7 +52,6 @@ import {
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
-  renderNativeReviewResult,
   renderReviewResult,
   renderStoredJobResult,
   renderCancelReport,
@@ -68,22 +65,30 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
-const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
-const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
+// grok-4.5 の initialize が申告する reasoningEfforts（実測: high が既定）。
+const VALID_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
+// 打ちやすい別名。右辺は `grok models` / session/new が返す実 ID。
+const MODEL_ALIASES = new Map([
+  ["fast", "grok-4.20-0309-non-reasoning"],
+  ["reasoning", "grok-4.20-0309-reasoning"],
+  ["multi", "grok-4.20-multi-agent-0309"],
+  ["build", "grok-build-0.1"],
+  ["latest", "grok-4.5"]
+]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
 function printUsage() {
   console.log(
     [
       "Usage:",
-      "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
-      "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
-      "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
-      "  node scripts/codex-companion.mjs result [job-id] [--json]",
-      "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
+      "  node scripts/grok-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
+      "  node scripts/grok-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--language <bcp47>] [focus text]",
+      "  node scripts/grok-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--language <bcp47>] [focus text]",
+      "  node scripts/grok-companion.mjs audit [--wait|--background] [--language <bcp47>] [focus text]",
+      "  node scripts/grok-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|fast|reasoning|multi|build|latest>] [--effort <low|medium|high>] [prompt]",
+      "  node scripts/grok-companion.mjs status [job-id] [--all] [--json]",
+      "  node scripts/grok-companion.mjs result [job-id] [--json]",
+      "  node scripts/grok-companion.mjs cancel [job-id] [--json]"
     ].join("\n")
   );
 }
@@ -121,7 +126,7 @@ function normalizeReasoningEffort(effort) {
   }
   if (!VALID_REASONING_EFFORTS.has(normalized)) {
     throw new Error(
-      `Unsupported reasoning effort "${effort}". Use one of: none, minimal, low, medium, high, xhigh.`
+      `Unsupported reasoning effort "${effort}". Use one of: low, medium, high.`
     );
   }
   return normalized;
@@ -182,28 +187,34 @@ function firstMeaningfulLine(text, fallback) {
 async function buildSetupReport(cwd, actionsTaken = []) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
-  const npmStatus = binaryAvailable("npm", ["--version"], { cwd });
-  const codexStatus = getCodexAvailability(cwd);
-  const authStatus = await getCodexAuthStatus(cwd);
+  const grokStatus = getGrokAvailability(cwd);
+  const authStatus = await getGrokAuthStatus(cwd);
   const config = getConfig(workspaceRoot);
 
   const nextSteps = [];
-  if (!codexStatus.available) {
-    nextSteps.push("Install Codex with `npm install -g @openai/codex`.");
+  if (!grokStatus.available) {
+    nextSteps.push(
+      process.platform === "win32"
+        ? "Install Grok Build with `irm https://x.ai/cli/install.ps1 | iex`."
+        : "Install Grok Build with `curl -fsSL https://x.ai/cli/install.sh | bash`."
+    );
   }
-  if (codexStatus.available && !authStatus.loggedIn && authStatus.requiresOpenaiAuth) {
-    nextSteps.push("Run `!codex login`.");
-    nextSteps.push("If browser login is blocked, retry with `!codex login --device-auth` or `!codex login --with-api-key`.");
+  if (grokStatus.available && grokStatus.reason === "missing-agent-stdio") {
+    nextSteps.push("Update Grok Build with `!grok update` so that `grok agent stdio` is available.");
+  }
+  if (grokStatus.available && !authStatus.authenticated) {
+    nextSteps.push("Run `!grok login` to sign in with your SuperGrok or X Premium+ account.");
+    nextSteps.push("If browser login is blocked, retry with `!grok login --device-auth`.");
+    nextSteps.push("For headless or metered use instead, set the `XAI_API_KEY` environment variable (it takes precedence over browser credentials).");
   }
   if (!config.stopReviewGate) {
-    nextSteps.push("Optional: run `/codex:setup --enable-review-gate` to require a fresh review before stop.");
+    nextSteps.push("Optional: run `/grok:setup --enable-review-gate` to require a fresh review before stop.");
   }
 
   return {
-    ready: nodeStatus.available && codexStatus.available && authStatus.loggedIn,
+    ready: nodeStatus.available && grokStatus.available && authStatus.authenticated,
     node: nodeStatus,
-    npm: npmStatus,
-    codex: codexStatus,
+    grok: grokStatus,
     auth: authStatus,
     sessionRuntime: getSessionRuntimeStatus(process.env, workspaceRoot),
     reviewGateEnabled: Boolean(config.stopReviewGate),
@@ -238,49 +249,58 @@ async function handleSetup(argv) {
   outputResult(options.json ? finalReport : renderSetupReport(finalReport), options.json);
 }
 
-function buildAdversarialReviewPrompt(context, focusText) {
-  const template = loadPromptTemplate(ROOT_DIR, "adversarial-review");
+/**
+ * レビュー用プロンプトを組み立てる。
+ *
+ * 本家では `/codex:review` が Codex 組み込みの `review/start` へ直結していたが、
+ * Grok に相当 API が無いため、標準レビューもテンプレート経由の構造化レビューにした。
+ * その結果、標準レビューでも focus text を受け付けられるようになっている。
+ */
+function reviewTemplateNameFor(reviewName) {
+  if (reviewName === "Adversarial Review") {
+    return "adversarial-review";
+  }
+  if (reviewName === "Audit") {
+    return "audit";
+  }
+  return "review";
+}
+
+/**
+ * findings など人間が読む欄の言語ルールを組み立てる。
+ *
+ * 送信元の言語に動的に合わせるのが狙い。slash コマンド側の Claude が会話言語を
+ * `--language <BCP 47>` で渡してくるのが正、CLI 直叩きで無指定なら focus text の
+ * 言語 → 英語の順でフォールバックする。
+ */
+function buildResponseLanguageRule(language, focusText) {
+  const fields = "every human-readable field (summary, finding titles and bodies, recommendations, next steps)";
+  if (language) {
+    return `Write ${fields} in the language identified by the BCP 47 tag "${language}".`;
+  }
+  if (focusText) {
+    return `Write ${fields} in the same language as the user focus above.`;
+  }
+  return `Write ${fields} in English.`;
+}
+
+function buildReviewPromptFor(reviewName, context, focusText, language) {
+  const template = loadPromptTemplate(ROOT_DIR, reviewTemplateNameFor(reviewName));
   return interpolateTemplate(template, {
-    REVIEW_KIND: "Adversarial Review",
+    REVIEW_KIND: reviewName,
     TARGET_LABEL: context.target.label,
     USER_FOCUS: focusText || "No extra focus provided.",
     REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
+    RESPONSE_LANGUAGE_RULE: buildResponseLanguageRule(language, focusText),
     REVIEW_INPUT: context.content
   });
 }
 
-function ensureCodexAvailable(cwd) {
-  const availability = getCodexAvailability(cwd);
+function ensureGrokAvailable(cwd) {
+  const availability = getGrokAvailability(cwd);
   if (!availability.available) {
-    throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
+    throw new Error("Grok Build is not installed or is missing `grok agent stdio`. Install it from https://x.ai/cli, then rerun `/grok:setup`.");
   }
-}
-
-function buildNativeReviewTarget(target) {
-  if (target.mode === "working-tree") {
-    return { type: "uncommittedChanges" };
-  }
-
-  if (target.mode === "branch") {
-    return { type: "baseBranch", branch: target.baseRef };
-  }
-
-  return null;
-}
-
-function validateNativeReviewRequest(target, focusText) {
-  if (focusText.trim()) {
-    throw new Error(
-      `\`/codex:review\` now maps directly to the built-in reviewer and does not support custom focus text. Retry with \`/codex:adversarial-review ${focusText.trim()}\` for focused review instructions.`
-    );
-  }
-
-  const nativeTarget = buildNativeReviewTarget(target);
-  if (!nativeTarget) {
-    throw new Error("This `/codex:review` target is not supported by the built-in reviewer. Retry with `/codex:adversarial-review` for custom targeting.");
-  }
-
-  return nativeTarget;
 }
 
 function renderStatusPayload(report, asJson) {
@@ -308,7 +328,7 @@ function findLatestResumableTaskJob(jobs) {
     jobs.find(
       (job) =>
         job.jobClass === "task" &&
-        job.threadId &&
+        job.grokSessionId &&
         job.status !== "queued" &&
         job.status !== "running"
     ) ?? null
@@ -340,23 +360,23 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
   const activeTask = visibleJobs.find((job) => job.jobClass === "task" && (job.status === "queued" || job.status === "running"));
   if (activeTask) {
-    throw new Error(`Task ${activeTask.id} is still running. Use /codex:status before continuing it.`);
+    throw new Error(`Task ${activeTask.id} is still running. Use /grok:status before continuing it.`);
   }
 
   const trackedTask = findLatestResumableTaskJob(visibleJobs);
   if (trackedTask) {
-    return { id: trackedTask.threadId };
+    return { id: trackedTask.grokSessionId };
   }
 
   if (sessionId) {
     return null;
   }
 
-  return findLatestTaskThread(workspaceRoot);
+  return findLatestTaskSession(workspaceRoot);
 }
 
 async function executeReviewRun(request) {
-  ensureCodexAvailable(request.cwd);
+  ensureGrokAvailable(request.cwd);
   ensureGitRepository(request.cwd);
 
   const target = resolveReviewTarget(request.cwd, {
@@ -365,73 +385,36 @@ async function executeReviewRun(request) {
   });
   const focusText = request.focusText?.trim() ?? "";
   const reviewName = request.reviewName ?? "Review";
-  if (reviewName === "Review") {
-    const reviewTarget = validateNativeReviewRequest(target, focusText);
-    const result = await runAppServerReview(request.cwd, {
-      target: reviewTarget,
-      model: request.model,
-      onProgress: request.onProgress
-    });
-    const payload = {
-      review: reviewName,
-      target,
-      threadId: result.threadId,
-      sourceThreadId: result.sourceThreadId,
-      codex: {
-        status: result.status,
-        stderr: result.stderr,
-        stdout: result.reviewText,
-        reasoning: result.reasoningSummary
-      }
-    };
-    const rendered = renderNativeReviewResult(
-      {
-        status: result.status,
-        stdout: result.reviewText,
-        stderr: result.stderr
-      },
-      { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
-    );
-
-    return {
-      exitStatus: result.status,
-      threadId: result.threadId,
-      turnId: result.turnId,
-      payload,
-      rendered,
-      summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
-      jobTitle: `Codex ${reviewName}`,
-      jobClass: "review",
-      targetLabel: target.label
-    };
-  }
 
   const context = collectReviewContext(request.cwd, target);
-  const prompt = buildAdversarialReviewPrompt(context, focusText);
-  const result = await runAppServerTurn(context.repoRoot, {
-    prompt,
+  const prompt = buildReviewPromptFor(reviewName, context, focusText, request.language);
+  const result = await runGrokReview(context.repoRoot, {
+    instructions: prompt,
     model: request.model,
-    sandbox: "read-only",
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
     onProgress: request.onProgress
   });
-  const parsed = parseStructuredOutput(result.finalMessage, {
+  const parsed = parseStructuredOutput(result.reviewText, {
     status: result.status,
     failureMessage: result.error?.message ?? result.stderr
   });
   const payload = {
     review: reviewName,
     target,
-    threadId: result.threadId,
+    // ランタイムは ACP の用語で sessionId を返す。ジョブ側では Claude の
+    // セッション ID と紛れないよう grokSessionId という名前で持つ。
+    grokSessionId: result.sessionId,
+    model: result.model,
+    usage: result.usage,
     context: {
       repoRoot: context.repoRoot,
       branch: context.branch,
       summary: context.summary
     },
-    codex: {
+    grok: {
       status: result.status,
       stderr: result.stderr,
-      stdout: result.finalMessage,
+      stdout: result.reviewText,
       reasoning: result.reasoningSummary
     },
     result: parsed.parsed,
@@ -441,9 +424,10 @@ async function executeReviewRun(request) {
   };
 
   return {
-    exitStatus: result.status,
-    threadId: result.threadId,
-    turnId: result.turnId,
+    // 構造化出力を読めなかったレビューは、走り切っていても成果物として
+    // 使えないので失敗扱いにする。呼び出し側のゲートがすり抜けないように。
+    exitStatus: parsed.parseError ? "failed" : result.status,
+    grokSessionId: result.sessionId,
     payload,
     rendered: renderReviewResult(parsed, {
       reviewLabel: reviewName,
@@ -451,7 +435,7 @@ async function executeReviewRun(request) {
       reasoningSummary: result.reasoningSummary
     }),
     summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
-    jobTitle: `Codex ${reviewName}`,
+    jobTitle: `Grok ${reviewName}`,
     jobClass: "review",
     targetLabel: context.target.label
   };
@@ -460,7 +444,7 @@ async function executeReviewRun(request) {
 
 async function executeTaskRun(request) {
   const workspaceRoot = resolveWorkspaceRoot(request.cwd);
-  ensureCodexAvailable(request.cwd);
+  ensureGrokAvailable(request.cwd);
 
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
@@ -473,7 +457,7 @@ async function executeTaskRun(request) {
       excludeJobId: request.jobId
     });
     if (!latestThread) {
-      throw new Error("No previous Codex task thread was found for this repository.");
+      throw new Error("No previous Grok task thread was found for this repository.");
     }
     resumeThreadId = latestThread.id;
   }
@@ -482,7 +466,7 @@ async function executeTaskRun(request) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
-  const result = await runAppServerTurn(workspaceRoot, {
+  const result = await runGrokTurn(workspaceRoot, {
     resumeThreadId,
     prompt: request.prompt,
     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
@@ -491,7 +475,7 @@ async function executeTaskRun(request) {
     sandbox: request.write ? "workspace-write" : "read-only",
     onProgress: request.onProgress,
     persistThread: true,
-    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
+    sessionTitle: resumeThreadId ? null : buildPersistentTaskSessionName(request.prompt || DEFAULT_CONTINUE_PROMPT)
   });
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
@@ -510,7 +494,7 @@ async function executeTaskRun(request) {
   );
   const payload = {
     status: result.status,
-    threadId: result.threadId,
+    grokSessionId: result.sessionId,
     rawOutput,
     touchedFiles: result.touchedFiles,
     reasoningSummary: result.reasoningSummary
@@ -518,8 +502,7 @@ async function executeTaskRun(request) {
 
   return {
     exitStatus: result.status,
-    threadId: result.threadId,
-    turnId: result.turnId,
+    grokSessionId: result.sessionId,
     payload,
     rendered,
     summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
@@ -531,8 +514,8 @@ async function executeTaskRun(request) {
 
 function buildReviewJobMetadata(reviewName, target) {
   return {
-    kind: reviewName === "Adversarial Review" ? "adversarial-review" : "review",
-    title: reviewName === "Review" ? "Codex Review" : `Codex ${reviewName}`,
+    kind: reviewTemplateNameFor(reviewName),
+    title: reviewName === "Review" ? "Grok Review" : `Grok ${reviewName}`,
     summary: `${reviewName} ${target.label}`
   };
 }
@@ -540,12 +523,12 @@ function buildReviewJobMetadata(reviewName, target) {
 function buildTaskRunMetadata({ prompt, resumeLast = false }) {
   if (!resumeLast && String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)) {
     return {
-      title: "Codex Stop Gate Review",
+      title: "Grok Stop Gate Review",
       summary: "Stop-gate review of previous Claude turn"
     };
   }
 
-  const title = resumeLast ? "Codex Resume" : "Codex Task";
+  const title = resumeLast ? "Grok Resume" : "Grok Task";
   const fallbackSummary = resumeLast ? DEFAULT_CONTINUE_PROMPT : "Task";
   return {
     title,
@@ -554,12 +537,12 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
 }
 
 function renderQueuedTaskLaunch(payload) {
-  return `${payload.title} started in the background as ${payload.jobId}. Check /codex:status ${payload.jobId} for progress.\n`;
+  return `${payload.title} started in the background as ${payload.jobId}. Check /grok:status ${payload.jobId} for progress.\n`;
 }
 
 function getJobKindLabel(kind, jobClass) {
-  if (kind === "adversarial-review") {
-    return "adversarial-review";
+  if (kind === "adversarial-review" || kind === "audit") {
+    return kind;
   }
   return jobClass === "review" ? "review" : "rescue";
 }
@@ -613,33 +596,6 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
   };
 }
 
-function renderTransferResult(payload) {
-  const lines = [
-    "Transferred the Claude session into a Codex thread with visible turn history.",
-    `Codex session ID: ${payload.threadId}`,
-    `Resume in Codex: ${payload.resumeCommand}`
-  ];
-  return `${lines.join("\n")}\n`;
-}
-
-async function executeTransfer(cwd, options = {}) {
-  const sourcePath = resolveClaudeSessionPath(cwd, {
-    source: options.source
-  });
-  const result = await importExternalAgentSession(cwd, { sourcePath });
-  const payload = {
-    threadId: result.threadId,
-    resumeCommand: `codex resume ${result.threadId}`,
-    sourcePath,
-    sessionId: path.basename(sourcePath, ".jsonl")
-  };
-
-  return {
-    payload,
-    rendered: renderTransferResult(payload)
-  };
-}
-
 function readTaskPrompt(cwd, options, positionals) {
   if (options["prompt-file"]) {
     return fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
@@ -655,6 +611,17 @@ function requireTaskRequest(prompt, resumeLast) {
   }
 }
 
+/**
+ * ランタイムの status 文字列をプロセス終了コードへ写す。
+ *
+ * 本家 Codex 版は数値の終了コードをそのまま流していたが、ACP 版の status は
+ * "completed" などの文字列なので、そのまま代入すると Node が
+ * 「code must be of type number」で落ちる。
+ */
+function exitCodeForStatus(status) {
+  return status === "completed" ? 0 : 1;
+}
+
 async function runForegroundCommand(job, runner, options = {}) {
   const { logFile, progress } = createTrackedProgress(job, {
     logFile: options.logFile,
@@ -662,14 +629,12 @@ async function runForegroundCommand(job, runner, options = {}) {
   });
   const execution = await runTrackedJob(job, () => runner(progress), { logFile });
   outputResult(options.json ? execution.payload : execution.rendered, options.json);
-  if (execution.exitStatus !== 0) {
-    process.exitCode = execution.exitStatus;
-  }
+  process.exitCode = exitCodeForStatus(execution.exitStatus);
   return execution;
 }
 
 function spawnDetachedTaskWorker(cwd, jobId) {
-  const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
+  const scriptPath = path.join(ROOT_DIR, "scripts", "grok-companion.mjs");
   const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
     cwd,
     env: process.env,
@@ -711,7 +676,7 @@ function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd"],
+    valueOptions: ["base", "scope", "model", "cwd", "language"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -721,12 +686,13 @@ async function handleReviewCommand(argv, config) {
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   const focusText = positionals.join(" ").trim();
+  // audit のようにサブコマンド側で scope が決まっているときは、それを優先する。
+  const scope = config.scope ?? options.scope;
   const target = resolveReviewTarget(cwd, {
     base: options.base,
-    scope: options.scope
+    scope
   });
 
-  config.validateRequest?.(target, focusText);
   const metadata = buildReviewJobMetadata(config.reviewName, target);
   const job = createCompanionJob({
     prefix: "review",
@@ -742,8 +708,9 @@ async function handleReviewCommand(argv, config) {
       executeReviewRun({
         cwd,
         base: options.base,
-        scope: options.scope,
+        scope,
         model: options.model,
+        language: options.language,
         focusText,
         reviewName: config.reviewName,
         onProgress: progress
@@ -753,10 +720,10 @@ async function handleReviewCommand(argv, config) {
 }
 
 async function handleReview(argv) {
-  return handleReviewCommand(argv, {
-    reviewName: "Review",
-    validateRequest: validateNativeReviewRequest
-  });
+  // Grok には Codex の `review/start` に相当する組み込みレビュアーが無く、
+  // 標準レビューもテンプレート経由の構造化レビューで実行する。
+  // そのため本家にあった「focus text を渡せない」制約は無くなっている。
+  return handleReviewCommand(argv, { reviewName: "Review" });
 }
 
 async function handleTask(argv) {
@@ -786,7 +753,7 @@ async function handleTask(argv) {
   });
 
   if (options.background) {
-    ensureCodexAvailable(cwd);
+    ensureGrokAvailable(cwd);
     requireTaskRequest(prompt, resumeLast);
 
     const job = buildTaskJob(workspaceRoot, taskMetadata, write);
@@ -820,19 +787,6 @@ async function handleTask(argv) {
       }),
     { json: options.json }
   );
-}
-
-async function handleTransfer(argv) {
-  const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "source"],
-    booleanOptions: ["json"]
-  });
-
-  const cwd = resolveCommandCwd(options);
-  const { payload, rendered } = await executeTransfer(cwd, {
-    source: options.source
-  });
-  outputCommandResult(payload, rendered, options.json);
 }
 
 async function handleTaskWorker(argv) {
@@ -948,7 +902,7 @@ function handleTaskResumeCandidate(argv) {
             status: candidate.status,
             title: candidate.title ?? null,
             summary: candidate.summary ?? null,
-            threadId: candidate.threadId,
+            grokSessionId: candidate.grokSessionId,
             completedAt: candidate.completedAt ?? null,
             updatedAt: candidate.updatedAt ?? null
           }
@@ -970,16 +924,14 @@ async function handleCancel(argv) {
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
   const existing = readStoredJob(workspaceRoot, job.id) ?? {};
-  const threadId = existing.threadId ?? job.threadId ?? null;
-  const turnId = existing.turnId ?? job.turnId ?? null;
-
-  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
+  const grokSessionId = existing.grokSessionId ?? job.grokSessionId ?? null;
+  const interrupt = await interruptGrokTurn(cwd, { sessionId: grokSessionId });
   if (interrupt.attempted) {
     appendLogLine(
       job.logFile,
       interrupt.interrupted
-        ? `Requested Codex turn interrupt for ${turnId} on ${threadId}.`
-        : `Codex turn interrupt failed${interrupt.detail ? `: ${interrupt.detail}` : "."}`
+        ? `Requested Grok turn interrupt on ${grokSessionId}.`
+        : `Grok turn interrupt failed${interrupt.detail ? `: ${interrupt.detail}` : "."}`
     );
   }
 
@@ -1040,11 +992,15 @@ async function main() {
         reviewName: "Adversarial Review"
       });
       break;
+    case "audit":
+      // 差分ではなく、いま存在するソース全体を監査する。scope は常に repo。
+      await handleReviewCommand(argv, {
+        reviewName: "Audit",
+        scope: "repo"
+      });
+      break;
     case "task":
       await handleTask(argv);
-      break;
-    case "transfer":
-      await handleTransfer(argv);
       break;
     case "task-worker":
       await handleTaskWorker(argv);

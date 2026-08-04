@@ -9,11 +9,14 @@ function sanitizePipeName(value) {
 
 export function createBrokerEndpoint(sessionDir, platform = process.platform) {
   if (platform === "win32") {
-    const pipeName = sanitizePipeName(`${path.win32.basename(sessionDir)}-codex-app-server`);
+    const pipeName = sanitizePipeName(`${path.win32.basename(sessionDir)}-grok-acp`);
     return `pipe:\\\\.\\pipe\\${pipeName}`;
   }
 
-  return `unix:${path.join(sessionDir, "broker.sock")}`;
+  // platform を引数で受け取る関数なので、パスの組み立ても実行環境ではなく
+  // その platform に従う。path.join だと Windows 上で unix 用の値を作ったときに
+  // 区切りがバックスラッシュになってしまう。
+  return `unix:${path.posix.join(sessionDir, "broker.sock")}`;
 }
 
 export function parseBrokerEndpoint(endpoint) {
