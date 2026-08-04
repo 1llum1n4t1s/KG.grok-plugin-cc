@@ -54,7 +54,7 @@ When a conclusion rests on an inference, say so in the finding body and keep the
 
 <response_language>
 {{RESPONSE_LANGUAGE_RULE}}
-Keep JSON keys, verdict values such as `needs-attention`, file paths, and code identifiers unchanged.
+Keep JSON keys, `severity` values (`critical`, `high`, `medium`, `low`), verdict values such as `needs-attention`, file paths, and code identifiers unchanged.
 </response_language>
 
 <read_only_contract>

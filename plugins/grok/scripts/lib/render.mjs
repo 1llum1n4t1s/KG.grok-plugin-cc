@@ -1,11 +1,20 @@
+/**
+ * severity の並び順。
+ *
+ * 応答言語を追従させている都合上、schema の enum を守らず severity を
+ * 訳してくることがある。未知の値を一律で最下位に落とすと、重大な指摘が
+ * 一覧の末尾へ沈んで見落とされるため、未知は medium 相当として扱う。
+ */
 function severityRank(severity) {
-  switch (severity) {
+  switch (String(severity ?? "").trim().toLowerCase()) {
     case "critical":
       return 0;
     case "high":
       return 1;
     case "medium":
       return 2;
+    case "low":
+      return 4;
     default:
       return 3;
   }

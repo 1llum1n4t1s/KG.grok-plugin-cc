@@ -9,6 +9,11 @@ const DEFAULT_INLINE_DIFF_MAX_FILES = 2;
 const DEFAULT_INLINE_DIFF_MAX_BYTES = 256 * 1024;
 const MAX_REPO_LISTING_ENTRIES = 2000;
 
+// spawnSync の maxBuffer 既定は 1MiB しかなく、数万ファイルのリポジトリでは
+// `git ls-files` の出力がそれを超えて ENOBUFS で監査ごと落ちる。
+// 一覧は表示前に MAX_REPO_LISTING_ENTRIES で切るので、取得側は広めに取る。
+const MAX_FILE_LISTING_BYTES = 64 * 1024 * 1024;
+
 // Git is directly executable on Windows. Repository-derived arguments must never pass through a shell.
 function git(cwd, args, options = {}) {
   return runCommand("git", args, { cwd, ...options, shell: false });
@@ -123,7 +128,12 @@ export function getCurrentBranch(cwd) {
 export function getWorkingTreeState(cwd) {
   const staged = gitChecked(cwd, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n").filter(Boolean);
   const unstaged = gitChecked(cwd, ["diff", "--name-only"]).stdout.trim().split("\n").filter(Boolean);
-  const untracked = gitChecked(cwd, ["ls-files", "--others", "--exclude-standard"]).stdout.trim().split("\n").filter(Boolean);
+  const untracked = gitChecked(cwd, ["ls-files", "--others", "--exclude-standard"], {
+    maxBuffer: MAX_FILE_LISTING_BYTES
+  })
+    .stdout.trim()
+    .split("\n")
+    .filter(Boolean);
 
   return {
     staged,
@@ -312,8 +322,12 @@ function formatCappedListing(entries) {
 // リポジトリ監査は差分を渡さない。棚卸し（ファイル一覧と直近ログ）だけを渡し、
 // 中身は Grok が read-only コマンドで自分で読む前提にする。
 function collectRepoContext(cwd) {
-  const trackedFiles = gitChecked(cwd, ["ls-files"]).stdout.trim().split("\n").filter(Boolean);
-  const untrackedFiles = gitChecked(cwd, ["ls-files", "--others", "--exclude-standard"]).stdout.trim().split("\n").filter(Boolean);
+  const listingOptions = { maxBuffer: MAX_FILE_LISTING_BYTES };
+  const trackedFiles = gitChecked(cwd, ["ls-files"], listingOptions).stdout.trim().split("\n").filter(Boolean);
+  const untrackedFiles = gitChecked(cwd, ["ls-files", "--others", "--exclude-standard"], listingOptions)
+    .stdout.trim()
+    .split("\n")
+    .filter(Boolean);
   const logOutput = git(cwd, ["log", "--oneline", "--decorate", "-n", "15"]).stdout.trim();
 
   return {
