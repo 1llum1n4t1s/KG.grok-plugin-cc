@@ -1,36 +1,56 @@
-# Codex plugin for Claude Code
+# Grok plugin for Claude Code
 
-Use Codex from inside Claude Code for code reviews or to delegate tasks to Codex.
+Use Grok Build from inside Claude Code for code reviews or to delegate tasks.
 
-This plugin is for Claude Code users who want an easy way to start using Codex from the workflow
-they already have.
+This plugin is for Claude Code users who already have Grok Build installed and want to reach it
+from the workflow they are already in.
 
-<video src="./docs/plugin-demo.webm" controls muted playsinline autoplay></video>
+It is a fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), retargeted
+from the OpenAI Codex CLI to xAI's Grok Build CLI. See [NOTICE](./NOTICE) for attribution and a
+summary of what changed.
 
 ## What You Get
 
-- `/codex:review` for a normal read-only Codex review
-- `/codex:adversarial-review` for a steerable challenge review
-- `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
+- `/grok:review` for a read-only Grok review of your local git state
+- `/grok:adversarial-review` for a deliberately skeptical ship/no-ship review
+- `/grok:audit` for a read-only audit of the entire existing codebase, ignoring the current diff
+- `/grok:rescue` to hand a problem to Grok and get a worked answer back
+- `/grok:status`, `/grok:result`, and `/grok:cancel` to manage background jobs
+- `/grok:setup` to check that everything is wired up
 
 ## Requirements
 
-- **ChatGPT subscription (incl. Free) or OpenAI API key.**
-  - Usage will contribute to your Codex usage limits. [Learn more](https://developers.openai.com/codex/pricing).
+- **Grok Build**, signed in with a SuperGrok or X Premium+ account, or an `XAI_API_KEY`.
+  Usage counts against whichever one you use.
 - **Node.js 18.18 or later**
+
+Install Grok Build from [x.ai/cli](https://x.ai/cli):
+
+```bash
+irm https://x.ai/cli/install.ps1 | iex
+```
+
+On macOS or Linux:
+
+```bash
+curl -fsSL https://x.ai/cli/install.sh | bash
+```
+
+The plugin talks to Grok over `grok agent stdio`, so you need a build recent enough to expose that
+subcommand. `/grok:setup` tells you if yours is too old.
 
 ## Install
 
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add openai/codex-plugin-cc
+/plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc
 ```
 
 Install the plugin:
 
 ```bash
-/plugin install codex@openai-codex
+/plugin install grok@kagayoi-grok
 ```
 
 Reload plugins:
@@ -42,279 +62,215 @@ Reload plugins:
 Then run:
 
 ```bash
-/codex:setup
+/grok:setup
 ```
 
-`/codex:setup` will tell you whether Codex is ready. If Codex is missing and npm is available, it can offer to install Codex for you.
+`/grok:setup` reports whether Grok Build is installed, whether `grok agent stdio` is available,
+and whether you are signed in. It does not install anything for you — Grok Build ships from x.ai,
+not from a package registry.
 
-If you prefer to install Codex yourself, use:
+### Signing in
+
+Either sign in interactively:
 
 ```bash
-npm install -g @openai/codex
+grok login
 ```
 
-If Codex is installed but not logged in yet, run:
+...or set an API key from [console.x.ai](https://console.x.ai) for headless or metered use:
 
 ```bash
-!codex login
+$env:XAI_API_KEY = "xai-..."
 ```
 
-After install, you should see:
-
-- the slash commands listed below
-- the `codex:codex-rescue` subagent in `/agents`
-
-One simple first run is:
-
-```bash
-/codex:review --background
-/codex:status
-/codex:result
-```
+The API key takes precedence over browser credentials.
 
 ## Usage
 
-### `/codex:review`
+### `/grok:review`
 
-Runs a normal Codex review on your current work. It gives you the same quality of code review as running `/review` inside Codex directly.
-
-> [!NOTE]
-> Code review especially for multi-file changes might take a while. It's generally recommended to run it in the background.
-
-Use it when you want:
-
-- a review of your current uncommitted changes
-- a review of your branch compared to a base branch like `main`
-
-Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when you want to challenge a specific decision or risk area.
-
-Examples:
+Runs a read-only review of your local git state and returns Grok's findings verbatim.
 
 ```bash
-/codex:review
-/codex:review --base main
-/codex:review --background
+/grok:review
+/grok:review --wait
+/grok:review --background
+/grok:review --base main
+/grok:review --scope working-tree
+/grok:review focus on the retry logic
 ```
 
-This command is read-only and will not perform any changes. When run in the background you can use [`/codex:status`](#codexstatus) to check on the progress and [`/codex:cancel`](#codexcancel) to cancel the ongoing task.
+Any text left after the flags is passed to Grok as review focus.
 
-### `/codex:adversarial-review`
+Findings come back in your language: when run as a slash command, Claude forwards the conversation
+language with `--language <bcp47>` automatically. When calling the companion script directly, pass
+`--language` yourself, or the review falls back to the language of the focus text, then English.
+This applies to `/grok:adversarial-review` and `/grok:audit` as well.
 
-Runs a **steerable** review that questions the chosen implementation and design.
+The review is read-only: Grok may read files and run read-only commands such as `git diff` and
+`git log`, but the plugin denies anything that would write to disk. Grok reports what it thinks
+should change; it does not change it.
 
-It can be used to pressure-test assumptions, tradeoffs, failure modes, and whether a different approach would have been safer or simpler.
+Without `--wait` or `--background`, Claude estimates the size of the change and asks which mode
+you want.
 
-It uses the same review target selection as `/codex:review`, including `--base <ref>` for branch review.
-It also supports `--wait` and `--background`. Unlike `/codex:review`, it can take extra focus text after the flags.
+### `/grok:adversarial-review`
 
-Use it when you want:
-
-- a review before shipping that challenges the direction, not just the code details
-- review focused on design choices, tradeoffs, hidden assumptions, and alternative approaches
-- pressure-testing around specific risk areas like auth, data loss, rollback, race conditions, or reliability
-
-Examples:
+Same targeting as `/grok:review`, but Grok is told to argue against shipping and to report the
+strongest reasons the change should not land yet.
 
 ```bash
-/codex:adversarial-review
-/codex:adversarial-review --base main challenge whether this was the right caching and retry design
-/codex:adversarial-review --background look for race conditions and question the chosen approach
+/grok:adversarial-review
+/grok:adversarial-review --base main
+/grok:adversarial-review focus on the migration path
 ```
 
-This command is read-only. It does not fix code.
+Use this when you want pushback rather than a balanced summary.
 
-### `/codex:rescue`
+### `/grok:audit`
 
-Hands a task to Codex through the `codex:codex-rescue` subagent.
-
-Use it when you want Codex to:
-
-- investigate a bug
-- try a fix
-- continue a previous Codex task
-- take a faster or cheaper pass with a smaller model
-
-> [!NOTE]
-> Depending on the task and the model you choose these tasks might take a long time and it's generally recommended to force the task to be in the background or move the agent to the background.
-
-It supports `--background`, `--wait`, `--resume`, and `--fresh`. If you omit `--resume` and `--fresh`, the plugin can offer to continue the latest rescue thread for this repo.
-
-Examples:
+Audits the entire existing codebase instead of a diff. Use it when you want Grok's opinion on the
+source as it stands, independent of whatever you are currently changing.
 
 ```bash
-/codex:rescue investigate why the tests started failing
-/codex:rescue fix the failing test with the smallest safe patch
-/codex:rescue --resume apply the top fix from the last run
-/codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky integration test
-/codex:rescue --model spark fix the issue quickly
-/codex:rescue --background investigate the regression
+/grok:audit
+/grok:audit --background
+/grok:audit focus on the auth module
 ```
 
-You can also just ask for a task to be delegated to Codex:
+The audit context deliberately contains no diff and no file contents, only a file inventory; Grok
+reads the files it decides to inspect with read-only commands. That makes an audit noticeably more
+token-hungry than a diff review, and a focus is strongly recommended on large repositories so the
+audit stays deep instead of broad.
 
-```text
-Ask Codex to redesign the database connection to be more resilient.
-```
+The same read-only guarantees as `/grok:review` apply.
 
-**Notes:**
+### `/grok:rescue`
 
-- if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
-- if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
-- follow-up rescue requests can continue the latest Codex task in the repo
-
-### `/codex:transfer`
-
-Creates a persistent Codex thread from the current Claude Code session and prints a `codex resume <session-id>` command.
-
-Use it when you started a debugging or implementation conversation in Claude Code and want to continue that same context directly in Codex.
-
-Examples:
+Hands a problem to Grok and returns its answer. This is the command for "I am stuck, get another
+set of eyes on it."
 
 ```bash
-/codex:transfer
-/codex:transfer --source ~/.claude/projects/-Users-me-repo/<session-id>.jsonl
+/grok:rescue why does the upload retry loop never terminate?
+/grok:rescue --background investigate the flaky auth test
+/grok:rescue --resume
+/grok:rescue --model latest --effort high
 ```
 
-The plugin's existing `SessionStart` hook supplies the current transcript path automatically; `--source` is available as a manual override. The transfer uses Codex's external-agent session importer, so it follows the same conversion rules as importing Claude history in the Codex App and creates visible turns that can be continued in the App or TUI. The source must be under `~/.claude/projects`, and older Codex versions that do not expose session import must be upgraded before using this command.
+By default the run is read-only. Pass `--write` when you want Grok to change files.
 
-### `/codex:status`
+Model aliases: `fast`, `reasoning`, `multi`, `build`, `latest`. Anything else is passed through as
+a model ID, so `--model grok-4.5` works too. `--effort` accepts `low`, `medium`, or `high`.
 
-Shows running and recent Codex jobs for the current repository.
+### `/grok:status`
 
-Examples:
+Shows active and recent Grok jobs for the repository, plus the state of the review gate.
 
 ```bash
-/codex:status
-/codex:status task-abc123
+/grok:status
+/grok:status --all
+/grok:status <job-id> --wait
 ```
 
-Use it to:
+### `/grok:result`
 
-- check progress on background work
-- see the latest completed job
-- confirm whether a task is still running
-
-### `/codex:result`
-
-Shows the final stored Codex output for a finished job.
-When available, it also includes the Codex session ID so you can reopen that run directly in Codex with `codex resume <session-id>`.
-
-Examples:
+Prints the stored final output of a finished job.
 
 ```bash
-/codex:result
-/codex:result task-abc123
+/grok:result
+/grok:result <job-id>
 ```
 
-### `/codex:cancel`
+Each result includes the Grok session ID and the `grok --resume <id>` command, so you can pick the
+conversation back up in Grok's own TUI.
 
-Cancels an active background Codex job.
+### `/grok:cancel`
 
-Examples:
+Cancels a running background job and stops the Grok turn behind it.
 
 ```bash
-/codex:cancel
-/codex:cancel task-abc123
+/grok:cancel
+/grok:cancel <job-id>
 ```
 
-### `/codex:setup`
+### `/grok:setup`
 
-Checks whether Codex is installed and authenticated.
-If Codex is missing and npm is available, it can offer to install Codex for you.
-
-You can also use `/codex:setup` to manage the optional review gate.
-
-#### Enabling review gate
+Checks the local install and optionally toggles the stop-time review gate.
 
 ```bash
-/codex:setup --enable-review-gate
-/codex:setup --disable-review-gate
+/grok:setup
+/grok:setup --enable-review-gate
+/grok:setup --disable-review-gate
 ```
 
-When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Codex review based on Claude's response. If that review finds issues, the stop is blocked so Claude can address them first.
-
-> [!WARNING]
-> The review gate can create a long-running Claude/Codex loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
+With the gate enabled, ending a Claude session triggers a fresh adversarial review and blocks if it
+finds something.
 
 ## Typical Flows
 
-### Review Before Shipping
+### Review before shipping
 
 ```bash
-/codex:review
+/grok:review --wait
 ```
 
-### Hand A Problem To Codex
+Read the findings, fix what matters, then run it again.
+
+### Hand a problem to Grok
 
 ```bash
-/codex:rescue investigate why the build is failing in CI
+/grok:rescue the websocket reconnect drops messages under load
 ```
 
-### Start Something Long-Running
+### Start something long-running
 
 ```bash
-/codex:adversarial-review --background
-/codex:rescue --background investigate the flaky test
+/grok:rescue --background port the settings screen to the new form API
+/grok:status
+/grok:result
 ```
 
-Then check in with:
+## How It Talks To Grok
 
-```bash
-/codex:status
-/codex:result
-```
+The plugin runs `grok agent stdio` and speaks the Agent Client Protocol to it. That means Grok
+reads your repository itself rather than being handed a pasted diff, and you see its tool calls as
+they happen.
 
-## Codex Integration
+Runs in the same repository share one Grok process through a small broker, so a review and a
+delegated task do not each pay startup cost. If the broker is unreachable the plugin falls back to
+starting its own Grok process.
 
-The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses the global `codex` binary installed in your environment and [applies the same configuration](https://developers.openai.com/codex/config-basic).
+### Choosing a model
 
-### Common Configurations
+The plugin asks for `grok-4.5` by default. Override it for a single run with `--model`, or for
+every run by setting `GROK_PLUGIN_MODEL`.
 
-If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example to always use `gpt-5.4-mini` on `high` for a specific project you can add the following to a `.codex/config.toml` file at the root of the directory you started Claude in:
-
-```toml
-model = "gpt-5.4-mini"
-model_reasoning_effort = "high"
-```
-
-Your configuration will be picked up based on:
-
-- user-level config in `~/.codex/config.toml`
-- project-level overrides in `.codex/config.toml`
-- project-level overrides only load when the [project is trusted](https://developers.openai.com/codex/config-advanced#project-config-files-codexconfigtoml)
-
-Check out the Codex docs for more [configuration options](https://developers.openai.com/codex/config-reference).
-
-### Moving The Work Over To Codex
-
-Delegated tasks and any [stop gate](#what-does-the-review-gate-do) run can also be directly resumed inside Codex by running `codex resume` either with the specific session ID you received from running `/codex:result` or `/codex:status` or by selecting it from the list.
-
-This way you can review the Codex work or continue the work there.
+This matters more than it looks: when you authenticate with `XAI_API_KEY`, Grok's own default for a
+new session is a non-reasoning model, which reviews noticeably worse.
 
 ## FAQ
 
-### Do I need a separate Codex account for this plugin?
+### Do I need a separate account for this plugin?
 
-If you are already signed into Codex on this machine, that account should work immediately here too. This plugin uses your local Codex CLI authentication.
+No. It uses whatever Grok Build on your machine is already signed in with.
 
-If you only use Claude Code today and have not used Codex yet, you will also need to sign in to Codex with either a ChatGPT account or an API key. [Codex is available with your ChatGPT subscription](https://developers.openai.com/codex/pricing/), and [`codex login`](https://developers.openai.com/codex/cli/reference/#codex-login) supports both ChatGPT and API key sign-in. Run `/codex:setup` to check whether Codex is ready, and use `!codex login` if it is not.
+### Does it use my existing Grok configuration?
 
-### Does the plugin use a separate Codex runtime?
+Yes, with one exception: reviews start with no MCP servers attached, so your global MCP setup does
+not get loaded into every review and inflate the token count. Delegated `/grok:rescue` runs use
+your normal configuration.
 
-No. This plugin delegates through your local [Codex CLI](https://developers.openai.com/codex/cli/) and [Codex app server](https://developers.openai.com/codex/app-server/) on the same machine.
+### Is `/grok:review` really read-only?
 
-That means:
+Grok may read files and run read-only commands. Every permission request for anything else is
+denied by the plugin, including shell commands that are not on a read-only allowlist and anything
+that redirects output to a file.
 
-- it uses the same Codex install you would use directly
-- it uses the same local authentication state
-- it uses the same repository checkout and machine-local environment
+### Why is there no `/grok:transfer`?
 
-### Will it use the same Codex config I already have?
+The upstream Codex plugin could import a Claude Code session into a Codex thread. Grok Build has no
+equivalent, so the command was removed rather than faked.
 
-Yes. If you already use Codex, the plugin picks up the same [configuration](#common-configurations).
+## License
 
-### Can I keep using my current API key or base URL setup?
-
-Yes. Because the plugin uses your local Codex CLI, your existing sign-in method and config still apply.
-
-If you need to point the built-in OpenAI provider at a different endpoint, set `openai_base_url` in your [Codex config](https://developers.openai.com/codex/config-advanced/#config-and-state-locations).
+Apache-2.0. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
