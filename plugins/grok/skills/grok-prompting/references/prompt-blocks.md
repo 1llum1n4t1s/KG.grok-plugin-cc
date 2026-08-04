@@ -1,6 +1,6 @@
 # Prompt Blocks
 
-Use these blocks selectively when composing Codex or GPT-5.4 prompts.
+Use these blocks selectively when composing Grok prompts.
 Wrap each block in the XML tag shown in its heading.
 
 ## Core Wrapper
@@ -44,7 +44,7 @@ Do not include long scene-setting or repeated recap.
 
 ### `default_follow_through_policy`
 
-Use when Codex should act without asking routine questions.
+Use when Grok should act without asking routine questions.
 
 ```xml
 <default_follow_through_policy>
@@ -80,7 +80,7 @@ If a check fails, revise the answer instead of reporting the first draft.
 
 ### `missing_context_gating`
 
-Use when Codex might otherwise guess.
+Use when Grok might otherwise guess.
 
 ```xml
 <missing_context_gating>
