@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Grok plugin for Claude Code — Claude Code から Grok Build を呼ぶプラグイン</title>
+<meta name="description" content="Claude Code の中から xAI の Grok Build を呼び出すプラグイン。/grok:review で読み取り専用のコードレビュー、/grok:audit でコードベース全体の監査、/grok:rescue で行き詰まった問題の委譲。Agent Client Protocol で Grok がリポジトリを直接読みます。A Claude Code plugin that delegates code review and stuck problems to xAI's Grok Build." />
+<meta name="keywords" content="Grok, Claude Code, plugin, xAI, Grok Build, code review, ACP, Agent Client Protocol, コードレビュー, プラグイン, grok:review, grok:rescue" />
+<meta name="author" content="ゆろち" />
+<meta name="robots" content="index, follow" />
+<meta name="theme-color" content="#0a0a0c" />
+<link rel="canonical" href="https://grok-plugin.kagayoi.com/" />
+
+<!-- Open Graph -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Grok plugin for Claude Code" />
+<meta property="og:title" content="Grok plugin for Claude Code" />
+<meta property="og:description" content="Claude Code から出ずに Grok へレビューを頼み、詰まった問題を投げる。/grok:review · /grok:audit · /grok:rescue。Ask Grok for a review without leaving Claude Code." />
+<meta property="og:url" content="https://grok-plugin.kagayoi.com/" />
+<meta property="og:locale" content="ja_JP" />
+<meta property="og:locale:alternate" content="en_US" />
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Grok plugin for Claude Code" />
+<meta name="twitter:description" content="Claude Code の中から Grok Build を呼ぶ。レビュー・監査・救援を委譲するプラグイン。" />
+
+<!-- Inline SVG favicon: a terminal caret handing off to a spark (Claude → Grok) -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0c'/%3E%3Cpath d='M7 11l4 4-4 4' stroke='%23d97757' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Cpath d='M15 21h10' stroke='%23e9e9ee' stroke-width='2.2' stroke-linecap='round'/%3E%3Cpath d='M21 6l1.3 3.2L25.5 10.5 22.3 11.8 21 15l-1.3-3.2L16.5 10.5l3.2-1.3z' fill='%23e9e9ee'/%3E%3C/svg%3E" />
+
+<script>document.documentElement.classList.add('js');</script>
+<style>
+  /* ============================================================
+     Grok plugin for Claude Code — "Handoff"
+     Claude Code から出ずに、Grok へ渡す。
+     Near-black terminal ground, warm Claude terracotta handing
+     off to cool Grok white. No external fonts / CDN / images.
+     ============================================================ */
+
+  :root{
+    --bg-0:#050506;        /* deepest */
+    --bg-1:#0a0a0c;        /* base */
+    --bg-2:#101013;        /* raised */
+    --bg-3:#16161a;        /* panel */
+    --bg-4:#1d1d22;
+
+    --clay:#d97757;        /* Claude-side warm accent */
+    --clay-2:#eb9070;      /* highlight */
+    --clay-deep:#8f4530;   /* muted */
+    --spark:#e9e9ee;       /* Grok-side cool white */
+    --spark-2:#ffffff;
+    --spark-soft:#e9e9eecc;
+
+    --ink:#f5f5f7;         /* primary text */
+    --frost:#d5d5dc;       /* body text */
+    --muted:#9494a1;       /* secondary / EN line */
+    --muted-2:#63636f;     /* faint */
+    --line:#26262c;        /* hairline */
+    --line-bright:#d9775733;
+    --ok:#7fd39a;          /* read-only / allowed */
+    --no:#e0685f;          /* denied */
+    --shadow:0 30px 80px -30px #000e;
+    --r:16px;
+    --maxw:1180px;
+
+    /* System font stacks only — no webfont download. */
+    --f-display:"Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+    --f-head:"Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+    --f-jp:"Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", "Segoe UI", system-ui, sans-serif;
+    --f-body:"Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+    --f-mono:"Cascadia Code", "Consolas", "SF Mono", ui-monospace, "Courier New", monospace;
+  }
+
+  *,*::before,*::after{ box-sizing:border-box; }
+  html{ scroll-behavior:smooth; -webkit-text-size-adjust:100%; }
+  body{
+    margin:0; background:var(--bg-1); color:var(--ink);
+    font-family:var(--f-body); line-height:1.65;
+    font-size:clamp(15px,1.05vw,17px); overflow-x:hidden;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+
+  /* ---- Bilingual: JA default, EN toggle ---- */
+  [data-en]{ display:none; }
+  html.lang-en [data-ja]{ display:none; }
+  html.lang-en [data-en]{ display:revert; }
+
+  /* ---- Atmospheric background (fixed) ---- */
+  .bgwrap{ position:fixed; inset:0; z-index:-2; overflow:hidden; pointer-events:none; }
+  .bgwrap::before{
+    content:""; position:absolute; inset:-20%;
+    background:
+      radial-gradient(46% 38% at 16% 2%, #d9775722 0%, transparent 62%),
+      radial-gradient(44% 40% at 84% 8%, #e9e9ee12 0%, transparent 62%),
+      radial-gradient(64% 54% at 50% 104%, #101013aa 0%, transparent 60%),
+      linear-gradient(168deg, var(--bg-0), var(--bg-1) 48%, #060608 100%);
+  }
+  .bgwrap::after{
+    content:""; position:absolute; inset:0; opacity:.05; mix-blend-mode:overlay;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .ray-bg{ position:absolute; inset:0; width:100%; height:100%; opacity:.42; }
+
+  /* ---- Layout primitives ---- */
+  .wrap{ width:min(92%,var(--maxw)); margin-inline:auto; }
+  section{ position:relative; }
+  .eyebrow{
+    font-family:var(--f-head); font-weight:700; letter-spacing:.32em;
+    text-transform:uppercase; font-size:.7rem; color:var(--clay-2);
+    display:inline-flex; align-items:center; gap:.7em;
+  }
+  .eyebrow::before{ content:""; width:26px; height:1px; background:linear-gradient(90deg,var(--clay-2),transparent); }
+  .gradtext{
+    background:linear-gradient(104deg,var(--clay-2) 0%, var(--spark) 62%, var(--spark-2) 100%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  a{ color:inherit; }
+  code{ font-family:var(--f-mono); }
+  .sr-only{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+
+  /* ============================ HEADER ============================ */
+  header.nav{
+    position:sticky; top:0; z-index:50;
+    backdrop-filter:blur(14px) saturate(1.2);
+    background:linear-gradient(180deg, #0a0a0cdd, #0a0a0c55 70%, transparent);
+    border-bottom:1px solid #ffffff0d;
+  }
+  .nav-inner{ display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:.85rem 0; }
+  .brand{ display:flex; align-items:center; gap:.7rem; text-decoration:none; }
+  .brand .mark{ width:34px; height:34px; flex:none; border-radius:9px; filter:drop-shadow(0 0 12px #d9775755); }
+  .brand b{ font-family:var(--f-display); font-weight:800; font-size:1.16rem; letter-spacing:.01em; }
+  .brand .sub{ font-family:var(--f-jp); color:var(--muted); font-size:.76rem; margin-left:.2rem; }
+  .nav-links{ display:flex; align-items:center; gap:1.4rem; }
+  .nav-links a.nav-anchor{
+    text-decoration:none; color:var(--frost); font-family:var(--f-head); font-weight:600;
+    font-size:.86rem; letter-spacing:.02em; opacity:.82; transition:opacity .2s, color .2s;
+  }
+  .nav-links a.nav-anchor:hover{ opacity:1; color:var(--clay-2); }
+  .lang-btn{
+    font-family:var(--f-head); font-weight:700; font-size:.78rem; letter-spacing:.06em;
+    color:var(--frost); background:#101013aa; border:1px solid var(--line);
+    padding:.42rem .7rem; border-radius:10px; cursor:pointer;
+    display:inline-flex; align-items:center; gap:.4rem;
+    transition:border-color .2s, background .2s, transform .2s;
+  }
+  .lang-btn:hover{ border-color:var(--clay); background:#d9775714; transform:translateY(-1px); }
+  .gh-link{ display:inline-flex; align-items:center; gap:.45rem; text-decoration:none; color:var(--frost);
+    font-family:var(--f-head); font-weight:600; font-size:.82rem;
+    border:1px solid var(--line); background:#101013aa; padding:.42rem .75rem; border-radius:10px;
+    transition:border-color .2s, background .2s, transform .2s; }
+  .gh-link:hover{ border-color:var(--spark-soft); background:#ffffff10; transform:translateY(-1px); }
+  .gh-link svg{ width:15px; height:15px; }
+  @media(max-width:820px){ .nav-links a.nav-anchor{ display:none; } }
+
+  /* ============================ HERO ============================ */
+  .hero{ padding:clamp(3rem,9vw,6.5rem) 0 clamp(3.5rem,7vw,5.5rem); }
+  .hero-grid{ display:grid; grid-template-columns:1.02fr .98fr; gap:clamp(2rem,5vw,4rem); align-items:center; }
+  @media(max-width:960px){ .hero-grid{ grid-template-columns:1fr; } }
+
+  .badge-row{ display:flex; flex-wrap:wrap; gap:.55rem; margin-bottom:1.6rem; }
+  .badge{
+    font-family:var(--f-head); font-weight:600; font-size:.72rem; letter-spacing:.03em;
+    padding:.4rem .7rem; border-radius:999px; border:1px solid var(--line);
+    background:#101013aa; color:var(--frost); display:inline-flex; gap:.45rem; align-items:center;
+  }
+  .badge .dot{ width:6px; height:6px; border-radius:50%; background:var(--clay-2); box-shadow:0 0 10px var(--clay-2); animation:breathe 4.5s ease-in-out infinite; }
+  @keyframes breathe{ 0%,100%{ opacity:.5 } 50%{ opacity:1; box-shadow:0 0 14px var(--clay-2) } }
+
+  h1.title{
+    font-family:var(--f-display); font-weight:800;
+    font-size:clamp(2.7rem,7.2vw,4.6rem); line-height:1.02; letter-spacing:-.015em; margin:.2rem 0 .3rem;
+  }
+  .title-sub{ font-family:var(--f-jp); font-weight:600; color:var(--muted); font-size:clamp(.92rem,2.1vw,1.1rem); letter-spacing:.2em; margin:0 0 1.4rem; }
+  .tagline{ font-family:var(--f-jp); font-weight:700; font-size:clamp(1.2rem,2.8vw,1.7rem); line-height:1.45; margin:0 0 .45rem; }
+  .tagline-en{ color:var(--muted); font-size:clamp(.94rem,2vw,1.06rem); font-weight:500; margin:0 0 2rem; max-width:54ch; }
+
+  .cta-row{ display:flex; flex-wrap:wrap; gap:.9rem; align-items:center; }
+  .btn{
+    position:relative; isolation:isolate;
+    font-family:var(--f-head); font-weight:700; font-size:.95rem; letter-spacing:.01em;
+    text-decoration:none; cursor:pointer; padding:.95rem 1.45rem; border-radius:13px;
+    display:inline-flex; align-items:center; gap:.7rem; border:0;
+    transition:transform .22s cubic-bezier(.2,.8,.2,1), box-shadow .22s, border-color .22s, background .22s;
+  }
+  .btn svg{ width:19px; height:19px; }
+  .btn .sub{ font-weight:600; font-size:.74rem; opacity:.75; margin-left:.15rem; }
+  .btn-primary{
+    color:#1b0c06;
+    background:linear-gradient(118deg,var(--clay-2), var(--clay) 58%, #c86142);
+    box-shadow:0 14px 40px -14px #d9775788, inset 0 0 0 1px #ffffff44;
+  }
+  .btn-primary:hover{ transform:translateY(-3px); box-shadow:0 22px 55px -14px #eb9070aa, inset 0 0 0 1px #fff; }
+  .btn-ghost{ color:var(--frost); border:1px solid var(--line); background:#101013aa; }
+  .btn-ghost:hover{ transform:translateY(-3px); border-color:var(--spark-soft); background:#ffffff10; box-shadow:0 16px 40px -18px #000; }
+
+  .hero-meta{ margin-top:1.7rem; display:flex; flex-wrap:wrap; gap:1.1rem 1.9rem; color:var(--muted); font-size:.84rem; }
+  .hero-meta b{ color:var(--frost); font-family:var(--f-head); display:block; }
+
+  /* ---- Signature stage: a live terminal handing a review to Grok ---- */
+  .stage{ position:relative; }
+  .stage::before{
+    content:""; position:absolute; inset:6% 4% 4%;
+    background:radial-gradient(circle at 30% 30%, #d9775726, transparent 62%),
+               radial-gradient(circle at 78% 70%, #e9e9ee14, transparent 60%);
+    filter:blur(34px); z-index:0;
+  }
+  .term{
+    position:relative; z-index:2; border-radius:14px; overflow:hidden;
+    border:1px solid var(--line); background:linear-gradient(180deg,#131317,#0b0b0e);
+    box-shadow:0 34px 70px -26px #000e, inset 0 1px 0 #ffffff0d;
+    font-family:var(--f-mono); font-size:clamp(.72rem,1.15vw,.83rem); line-height:1.85;
+  }
+  .term-bar{ display:flex; align-items:center; gap:.5rem; padding:.6rem .9rem; border-bottom:1px solid var(--line); background:#0f0f13; }
+  .term-bar i{ width:10px; height:10px; border-radius:50%; background:#2c2c33; display:block; }
+  .term-bar i:first-child{ background:#3a2b28; }
+  .term-bar .ttl{ margin-left:.5rem; font-size:.72rem; color:var(--muted-2); letter-spacing:.04em; }
+  .term-body{ padding:1.1rem 1.1rem 1.3rem; display:flex; flex-direction:column; gap:.1rem; }
+  .tl{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tl .p{ color:var(--clay); }              /* prompt caret */
+  .tl .cmd{ color:var(--ink); font-weight:600; }
+  .tl .dim{ color:var(--muted-2); }
+  .tl .tool{ color:var(--spark-soft); }
+  .tl .ok{ color:var(--ok); }
+  .tl .no{ color:var(--no); }
+  .tl .hi{ color:var(--clay-2); }
+  .js .term-body .tl{ opacity:0; transform:translateY(6px); animation:typein .5s ease forwards; animation-delay:var(--t,0ms); }
+  @keyframes typein{ to{ opacity:1; transform:none; } }
+  .caret{ display:inline-block; width:.55em; height:1em; vertical-align:-.13em; background:var(--clay); animation:blink 1.15s steps(1) infinite; }
+  @keyframes blink{ 0%,49%{ opacity:1 } 50%,100%{ opacity:0 } }
+  .stage-cap{
+    display:block; margin-top:.9rem; text-align:center;
+    font-family:var(--f-jp); font-size:.76rem; color:var(--muted-2); letter-spacing:.12em;
+  }
+
+  /* ============================ COMMAND STRIP ============================ */
+  .formats{ border-block:1px solid #ffffff0d; padding:1.1rem 0; background:#0a0a0c88; }
+  .formats-inner{ display:flex; align-items:center; gap:.85rem; flex-wrap:wrap; justify-content:center; }
+  .formats .lbl{ font-family:var(--f-head); font-weight:600; letter-spacing:.14em; font-size:.7rem; color:var(--muted-2); text-transform:uppercase; }
+  .chip{
+    font-family:var(--f-mono); font-weight:500; font-size:.84rem; letter-spacing:.01em;
+    color:var(--frost); padding:.3rem .75rem; border:1px solid var(--line); border-radius:8px;
+    background:linear-gradient(180deg,#16161a,#101013); text-decoration:none;
+    transition:border-color .2s, color .2s, transform .2s;
+  }
+  a.chip:hover{ border-color:var(--line-bright); color:var(--clay-2); transform:translateY(-2px); }
+  .chip.glow{ color:var(--clay-2); border-color:var(--line-bright); box-shadow:0 0 14px #d9775722; }
+
+  /* ============================ SECTION HEAD ============================ */
+  .sec{ padding:clamp(3.4rem,8vw,5.6rem) 0; }
+  .sec-head{ max-width:64ch; margin-bottom:clamp(2rem,4vw,3rem); }
+  .sec-head h2{ font-family:var(--f-display); font-weight:800; letter-spacing:-.015em; font-size:clamp(1.9rem,4.6vw,2.9rem); line-height:1.08; margin:.8rem 0 .5rem; }
+  .sec-head .h2-en{ font-family:var(--f-head); color:var(--muted); font-size:clamp(.98rem,2vw,1.2rem); font-weight:600; letter-spacing:.02em; }
+  .sec-head p{ color:var(--muted); margin:.9rem 0 0; }
+
+  /* ============================ READ-ONLY BAND ============================ */
+  .toggle-band{
+    border:1px solid var(--line-bright); border-radius:var(--r); overflow:hidden;
+    background:radial-gradient(70% 120% at 8% 0%, #d9775718, transparent 60%), linear-gradient(160deg,#131317,#0b0b0e);
+    padding:clamp(1.6rem,4vw,2.4rem); display:grid; grid-template-columns:1.15fr .85fr; gap:2rem; align-items:center;
+  }
+  @media(max-width:880px){ .toggle-band{ grid-template-columns:1fr; } }
+  .toggle-band h3{ font-family:var(--f-display); font-weight:800; font-size:clamp(1.35rem,3vw,1.95rem); margin:.3rem 0 .6rem; letter-spacing:-.01em; }
+  .toggle-band p{ color:var(--frost); margin:0; font-size:.94rem; }
+  .toggle-band .eyebrow{ margin-bottom:.2rem; }
+  .perm-demo{ display:flex; flex-direction:column; gap:.7rem; }
+  .perm-row{ display:flex; align-items:center; gap:.9rem; border:1px solid var(--line); border-radius:12px; background:#0a0a0c99; padding:.7rem 1rem; }
+  .perm-row .txt{ font-family:var(--f-mono); font-size:.82rem; flex:1; color:var(--frost); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .verdict{ font-family:var(--f-head); font-weight:700; font-size:.68rem; letter-spacing:.08em; padding:.22rem .55rem; border-radius:6px; flex:none; }
+  .verdict.allow{ color:var(--ok); background:#7fd39a14; border:1px solid #7fd39a44; }
+  .verdict.deny{ color:var(--no); background:#e0685f14; border:1px solid #e0685f44; }
+
+  /* ============================ COMMAND CARDS ============================ */
+  .feat-grid{ display:grid; grid-template-columns:repeat(12,1fr); gap:1rem; }
+  .card{
+    grid-column:span 4; position:relative; overflow:hidden;
+    border:1px solid var(--line); border-radius:var(--r);
+    background:linear-gradient(180deg,#131317, #0b0b0e); padding:1.5rem 1.45rem 1.6rem;
+    transition:transform .3s cubic-bezier(.2,.8,.2,1), border-color .3s, box-shadow .3s;
+  }
+  .card::before{ content:""; position:absolute; top:-1px; right:-1px; width:54px; height:54px;
+    background:linear-gradient(135deg,#d9775722, transparent 70%); clip-path:polygon(100% 0, 0 0, 100% 100%); transition:background .3s; }
+  .card::after{ content:""; position:absolute; inset:0; opacity:0;
+    background:radial-gradient(150px 150px at var(--mx,80%) var(--my,0%), #d977571f, transparent 70%); transition:opacity .3s; }
+  .card:hover{ transform:translateY(-6px); border-color:#d9775766; box-shadow:0 26px 50px -28px #000, 0 0 0 1px #d9775722; }
+  .card:hover::after{ opacity:1; }
+  .card:hover::before{ background:linear-gradient(135deg,#eb907055, transparent 70%); }
+  .card:hover .ic{ transform:translateY(-2px) scale(1.05); }
+  .card.wide{ grid-column:span 6; }
+  @media(max-width:900px){ .card,.card.wide{ grid-column:span 6; } }
+  @media(max-width:620px){ .card,.card.wide{ grid-column:span 12; } }
+
+  .ic{ width:44px; height:44px; border-radius:12px; margin-bottom:1.05rem; display:grid; place-items:center; flex:none;
+    background:linear-gradient(140deg,#16161a,#101013); border:1px solid var(--line-bright); transition:transform .3s; }
+  .ic svg{ width:23px; height:23px; stroke:var(--clay-2); fill:none; stroke-width:1.7; }
+  .card h3{ font-family:var(--f-mono); font-weight:600; font-size:1.02rem; margin:0 0 .1rem; letter-spacing:0; color:var(--ink); }
+  .card .h3-en{ font-family:var(--f-head); font-weight:600; color:var(--spark-soft); font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; display:block; margin-bottom:.55rem; }
+  .card p{ margin:0; color:var(--frost); font-size:.9rem; }
+  .card .tags{ margin-top:.9rem; display:flex; flex-wrap:wrap; gap:.4rem; }
+  .card .tags span{ font-family:var(--f-mono); font-size:.68rem; letter-spacing:0; padding:.18rem .5rem; border-radius:6px; background:#16161a; border:1px solid var(--line); color:var(--muted); }
+  .card .tags span.hot{ color:var(--clay-2); border-color:var(--line-bright); }
+
+  /* ============================ SPLIT: HOW IT WORKS ============================ */
+  .split{ display:grid; grid-template-columns:1fr 1fr; gap:clamp(1.4rem,3vw,2.4rem); align-items:stretch; }
+  @media(max-width:880px){ .split{ grid-template-columns:1fr; } }
+  .panel{ position:relative; border:1.5px solid var(--line-bright); border-radius:var(--r);
+    background:linear-gradient(160deg,#131317, #0b0b0e); padding:2rem 1.6rem;
+    display:flex; flex-direction:column; gap:.9rem; min-height:240px; justify-content:center; overflow:hidden; }
+  .panel::before{ content:""; position:absolute; inset:0; opacity:.4;
+    background:repeating-linear-gradient(180deg,#d9775708 0 14px, transparent 14px 28px); }
+  .pn-row{ display:flex; align-items:center; gap:1rem; position:relative; }
+  .pn-ic{ width:50px; height:50px; flex:none; border-radius:12px; display:grid; place-items:center; background:#16161a99; border:1px solid var(--line-bright); }
+  .pn-ic svg{ width:25px; height:25px; stroke:var(--clay-2); fill:none; stroke-width:1.6; }
+  .pn-row b{ font-family:var(--f-head); font-weight:700; font-size:.98rem; display:block; }
+  .pn-row .desc{ color:var(--muted); font-size:.82rem; display:block; }
+  .pn-arrow{ text-align:center; color:var(--clay-2); font-size:1rem; font-family:var(--f-mono); animation:pulse 3s ease-in-out infinite; letter-spacing:.06em; }
+  @keyframes pulse{ 0%,100%{ opacity:.4 } 50%{ opacity:1 } }
+  .how-list{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:1rem; }
+  .how-list li{ display:flex; gap:1rem; align-items:flex-start; padding:1rem 1.1rem; border:1px solid var(--line); border-radius:14px; background:#0a0a0c88; transition:border-color .25s, transform .25s; }
+  .how-list li:hover{ border-color:#d9775755; transform:translateX(4px); }
+  .num{ font-family:var(--f-display); font-weight:800; font-size:1.1rem; color:var(--clay-2); flex:none; width:1.8rem; }
+  .how-list b{ font-family:var(--f-head); font-weight:700; }
+  .how-list .desc{ color:var(--muted); font-size:.87rem; display:block; margin-top:.2rem; }
+
+  /* ============================ REQUIREMENTS ============================ */
+  .req-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:1rem; }
+  @media(max-width:880px){ .req-grid{ grid-template-columns:repeat(2,1fr); } }
+  @media(max-width:470px){ .req-grid{ grid-template-columns:1fr; } }
+  .req{ border:1px solid var(--line); border-radius:var(--r); padding:1.3rem 1.25rem;
+    background:linear-gradient(180deg,#131317,#0b0b0e); position:relative; overflow:hidden; transition:border-color .25s, transform .25s; }
+  .req:hover{ border-color:#d9775755; transform:translateY(-4px); }
+  .req .k{ font-family:var(--f-head); font-weight:600; letter-spacing:.12em; text-transform:uppercase; font-size:.68rem; color:var(--clay-2); margin-bottom:.5rem; }
+  .req .v{ font-family:var(--f-display); font-weight:600; font-size:1.1rem; line-height:1.25; }
+  .req .v small{ font-family:var(--f-jp); font-weight:400; font-size:.79rem; color:var(--muted); display:block; margin-top:.35rem; letter-spacing:0; }
+  .plat-note{ margin-top:1.4rem; border:1px solid var(--line); border-left:3px solid var(--clay); border-radius:12px; background:#0a0a0c88;
+    padding:1rem 1.2rem; color:var(--frost); font-size:.89rem; display:flex; gap:.8rem; align-items:flex-start; }
+  .plat-note svg{ width:20px; height:20px; stroke:var(--clay-2); fill:none; stroke-width:1.7; flex:none; margin-top:.15rem; }
+
+  /* ============================ CODE BLOCK + COPY ============================ */
+  .cmd-block{ position:relative; border:1px solid var(--line); border-radius:12px; background:#0a0a0cd9;
+    padding:.85rem 3.2rem .85rem 1rem; margin:.55rem 0 0; overflow-x:auto; }
+  .cmd-block code{ font-size:.86rem; color:var(--ink); white-space:pre; display:block; }
+  .cmd-block code .p{ color:var(--clay); user-select:none; }
+  .copy{ position:absolute; top:.5rem; right:.5rem; cursor:pointer;
+    font-family:var(--f-head); font-weight:700; font-size:.66rem; letter-spacing:.06em;
+    color:var(--muted); background:#16161a; border:1px solid var(--line); border-radius:7px; padding:.3rem .5rem;
+    transition:color .2s, border-color .2s, background .2s; }
+  .copy:hover{ color:var(--clay-2); border-color:var(--line-bright); background:#d9775714; }
+  .copy.done{ color:var(--ok); border-color:#7fd39a55; background:#7fd39a14; }
+
+  /* ============================ INSTALL ============================ */
+  .dl-panel{ position:relative; overflow:hidden; border:1px solid #d9775733; border-radius:24px;
+    background:
+      radial-gradient(60% 90% at 12% 0%, #d9775730, transparent 60%),
+      radial-gradient(50% 80% at 100% 100%, #e9e9ee10, transparent 60%),
+      linear-gradient(160deg,#141418, #0a0a0c);
+    padding:clamp(2rem,5vw,3.2rem); box-shadow:var(--shadow); }
+  .dl-panel::before{ content:""; position:absolute; left:-70px; top:-70px; width:280px; height:280px; opacity:.2;
+    background:radial-gradient(circle at 50% 50%, #eb9070, transparent 62%); border-radius:50%; animation:pulseGlow 9s ease-in-out infinite; pointer-events:none; }
+  @keyframes pulseGlow{ 0%,100%{ transform:scale(.9); opacity:.14 } 50%{ transform:scale(1.05); opacity:.28 } }
+  .dl-head{ display:flex; flex-wrap:wrap; align-items:flex-end; justify-content:space-between; gap:1rem; margin-bottom:1.8rem; position:relative; }
+  .dl-head h2{ font-family:var(--f-display); font-weight:800; font-size:clamp(1.8rem,4.4vw,2.6rem); margin:.4rem 0 0; letter-spacing:-.015em; }
+  .dl-head .h2-en{ color:var(--muted); font-family:var(--f-head); font-weight:600; }
+  .price-pill{ font-family:var(--f-head); font-weight:700; font-size:.78rem; letter-spacing:.04em; color:var(--clay-2); border:1px solid var(--line-bright); background:#d9775712; padding:.5rem .9rem; border-radius:999px; }
+  .steps{ display:grid; gap:1rem; position:relative; }
+  .step{ border:1px solid var(--line); border-radius:16px; background:linear-gradient(180deg,#16161a, #101013); padding:1.2rem 1.3rem 1.3rem;
+    display:grid; grid-template-columns:auto 1fr; gap:.2rem 1rem; align-items:start; transition:border-color .25s; }
+  .step:hover{ border-color:#d9775755; }
+  .step .n{ grid-row:span 2; font-family:var(--f-display); font-weight:800; font-size:1.05rem; color:var(--clay-2);
+    width:2rem; height:2rem; display:grid; place-items:center; border:1px solid var(--line-bright); border-radius:9px; background:#d9775710; }
+  .step b{ font-family:var(--f-head); font-weight:700; font-size:.98rem; }
+  .step .desc{ color:var(--muted); font-size:.85rem; display:block; margin-top:.15rem; }
+  /* grid の既定 min-width:auto だと、長いコマンドを持つ .cmd-block が列を
+     押し広げてパネル幅を超える。min-width:0 で内側の overflow-x に任せる。 */
+  .step{ min-width:0; }
+  .step .body{ grid-column:2; min-width:0; }
+  .trust{ display:grid; grid-template-columns:repeat(3,1fr); gap:1rem; margin-top:1.4rem; position:relative; }
+  @media(max-width:780px){ .trust{ grid-template-columns:1fr; } }
+  .trust div{ border:1px solid var(--line); border-radius:14px; padding:1.1rem 1.2rem; background:#0a0a0c88; }
+  .trust b{ font-family:var(--f-head); font-weight:700; color:var(--clay-2); display:block; margin-bottom:.25rem; font-size:.92rem; }
+  .trust p{ margin:0; color:var(--muted); font-size:.82rem; }
+
+  /* ============================ FAQ ============================ */
+  .faq{ display:grid; gap:.8rem; }
+  .faq details{ border:1px solid var(--line); border-radius:14px; background:linear-gradient(180deg,#131317,#0b0b0e); overflow:hidden; transition:border-color .25s; }
+  .faq details[open]{ border-color:#d9775755; }
+  .faq summary{ cursor:pointer; list-style:none; padding:1.05rem 1.3rem; font-family:var(--f-head); font-weight:700; font-size:.98rem;
+    display:flex; align-items:center; gap:.8rem; }
+  .faq summary::-webkit-details-marker{ display:none; }
+  .faq summary::before{ content:"+"; font-family:var(--f-mono); color:var(--clay-2); font-size:1.1rem; flex:none; transition:transform .25s; }
+  .faq details[open] summary::before{ transform:rotate(45deg); }
+  .faq .a{ padding:0 1.3rem 1.2rem 3rem; color:var(--frost); font-size:.9rem; }
+  .faq .a p{ margin:0; }
+
+  /* ============================ FOOTER ============================ */
+  footer{ border-top:1px solid #ffffff0d; margin-top:clamp(3rem,6vw,5rem); background:linear-gradient(180deg, transparent, #050506); padding:clamp(2.6rem,5vw,4rem) 0 2.5rem; }
+  .foot-grid{ display:grid; grid-template-columns:1.5fr 1fr 1fr; gap:2rem; }
+  @media(max-width:780px){ .foot-grid{ grid-template-columns:1fr; gap:1.6rem; } }
+  .foot-brand .brand{ margin-bottom:.9rem; }
+  .foot-brand p{ color:var(--muted); font-size:.86rem; max-width:44ch; margin:.4rem 0; }
+  .foot-col h4{ font-family:var(--f-head); font-weight:700; letter-spacing:.1em; text-transform:uppercase; font-size:.74rem; color:var(--frost); margin:0 0 .9rem; }
+  .foot-col a, .foot-col span.fitem{ display:block; color:var(--muted); text-decoration:none; font-size:.86rem; margin-bottom:.55rem; transition:color .2s; }
+  .foot-col a:hover{ color:var(--clay-2); }
+  .legit{ margin-top:2rem; padding-top:1.5rem; border-top:1px solid #ffffff0d; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem; color:var(--muted-2); font-size:.78rem; }
+  .legit .badge-safe{ display:inline-flex; align-items:center; gap:.5rem; color:var(--clay-2); border:1px solid var(--line-bright); background:#d9775710; padding:.4rem .8rem; border-radius:999px; font-family:var(--f-head); font-weight:600; letter-spacing:.02em; }
+  .legit .badge-safe svg{ width:15px; height:15px; stroke:var(--clay-2); fill:none; stroke-width:1.8; }
+  .legit p{ margin:0; max-width:70ch; }
+
+  /* ============================ REVEAL ============================ */
+  .js .reveal{ opacity:0; transform:translateY(26px);
+    transition:opacity .8s cubic-bezier(.2,.85,.25,1), transform .8s cubic-bezier(.2,.85,.25,1); transition-delay:var(--d,0ms); }
+  .js .is-in .reveal{ opacity:1; transform:none; }
+  :focus-visible{ outline:2px solid var(--clay-2); outline-offset:3px; border-radius:6px; }
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{ animation:none !important; transition:none !important; scroll-behavior:auto !important; }
+    .reveal{ opacity:1 !important; transform:none !important; }
+    .js .term-body .tl{ opacity:1 !important; transform:none !important; }
+  }
+</style>
+</head>
+
+<body>
+<div class="bgwrap" aria-hidden="true">
+  <svg class="ray-bg" preserveAspectRatio="xMidYMid slice" viewBox="0 0 1200 800" fill="none">
+    <g stroke="#d97757" stroke-width="1">
+      <path d="M0 210 Q 300 200 600 210 T 1200 210" stroke-opacity="0.09"/>
+      <path d="M0 360 Q 300 370 600 360 T 1200 360" stroke-opacity="0.06"/>
+    </g>
+    <g stroke="#e9e9ee" stroke-width="1">
+      <path d="M0 530 Q 300 520 600 530 T 1200 530" stroke-opacity="0.05"/>
+    </g>
+  </svg>
+</div>
+
+<!-- ===================== HEADER ===================== -->
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top" aria-label="Grok plugin for Claude Code ホーム">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect width="32" height="32" rx="7" fill="#0a0a0c"/>
+        <path d="M7 11l4 4-4 4" stroke="#d97757" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <path d="M15 21h10" stroke="#e9e9ee" stroke-width="2.2" stroke-linecap="round"/>
+        <path d="M21 6l1.3 3.2L25.5 10.5 22.3 11.8 21 15l-1.3-3.2L16.5 10.5l3.2-1.3z" fill="#e9e9ee"/>
+      </svg>
+      <span><b>Grok plugin</b><span class="sub">for Claude Code</span></span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a class="nav-anchor" href="#commands"><span data-ja>コマンド</span><span data-en>Commands</span></a>
+      <a class="nav-anchor" href="#how"><span data-ja>しくみ</span><span data-en>How it works</span></a>
+      <a class="nav-anchor" href="#requirements"><span data-ja>動作環境</span><span data-en>Requirements</span></a>
+      <a class="nav-anchor" href="#install"><span data-ja>導入</span><span data-en>Install</span></a>
+      <a class="gh-link" href="https://github.com/1llum1n4t1s/KG.grok-plugin-cc" rel="noopener">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        <span>GitHub</span>
+      </a>
+      <button class="lang-btn" id="langToggle" type="button" aria-pressed="false" aria-label="言語を切り替える / Toggle language">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
+        <span data-ja>EN</span><span data-en>日本語</span>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ===================== HERO ===================== -->
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <div class="badge-row reveal" style="--d:60ms">
+          <span class="badge"><span class="dot"></span>Claude Code plugin</span>
+          <span class="badge">xAI Grok Build</span>
+          <span class="badge">Node.js 18.18+</span>
+          <span class="badge">Apache-2.0</span>
+        </div>
+
+        <h1 class="title reveal" id="hero-title" style="--d:120ms"><span class="gradtext">Grok, inside<br>Claude Code.</span></h1>
+        <p class="title-sub reveal" style="--d:180ms"><span data-ja>グロック プラグイン</span><span data-en>A Claude Code plugin for Grok Build</span></p>
+
+        <p class="tagline reveal" style="--d:240ms"><span data-ja lang="ja">エディタから出ずに、Grok へ渡す。</span><span data-en>Hand it to Grok without leaving your editor.</span></p>
+        <p class="tagline-en reveal" style="--d:300ms"><span data-ja lang="ja">いま書いた差分のレビュー、コードベース全体の監査、行き詰まった問題の救援 —— スラッシュコマンド 1 行で Grok Build に任せて、答えをそのまま Claude Code の会話へ戻します。すでに入っている Grok Build と、そのサインインをそのまま使います。</span><span data-en>Review the diff you just wrote, audit the whole codebase, or hand off a problem you're stuck on — one slash command delegates it to Grok Build and brings the answer straight back into your Claude Code session. It uses the Grok Build you already have, signed in the way you already are.</span></p>
+
+        <div class="cta-row reveal" style="--d:360ms">
+          <a class="btn btn-primary" href="#install">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg>
+            <span><span data-ja>導入する</span><span data-en>Get started</span> <span class="sub">2 min</span></span>
+          </a>
+          <a class="btn btn-ghost" href="https://github.com/1llum1n4t1s/KG.grok-plugin-cc" rel="noopener">
+            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+            <span><span data-ja>ソースを見る</span><span data-en>View source</span></span>
+          </a>
+        </div>
+
+        <div class="hero-meta reveal" style="--d:440ms">
+          <div><b><span data-ja>レビューは読み取り専用</span><span data-en>Reviews are read-only</span></b></div>
+          <div><b><span data-ja>別アカウント不要</span><span data-en>No extra account</span></b></div>
+          <div><b><span data-ja>回答は会話の言語で</span><span data-en>Answers in your language</span></b></div>
+          <div><b><span data-ja>バックグラウンド実行</span><span data-en>Background jobs</span></b></div>
+        </div>
+      </div>
+
+      <!-- Signature stage: a live terminal handing a review to Grok -->
+      <div class="stage reveal" style="--d:280ms">
+        <div class="term" role="img" aria-label="Claude Code で /grok:review を実行し、Grok が読み取り専用でリポジトリを調べて指摘を返す様子 / Running /grok:review in Claude Code while Grok inspects the repository read-only and reports findings">
+          <div class="term-bar" aria-hidden="true">
+            <i></i><i></i><i></i>
+            <span class="ttl">claude — grok-plugin</span>
+          </div>
+          <div class="term-body" aria-hidden="true">
+            <div class="tl" style="--t:120ms"><span class="p">&gt;</span> <span class="cmd">/grok:review --wait</span></div>
+            <div class="tl dim" style="--t:420ms"><span class="dim">  base main · scope branch · language ja</span></div>
+            <div class="tl" style="--t:700ms"><span class="hi">◆</span> <span class="dim">grok agent stdio</span> <span class="dim">— grok-4.5</span></div>
+            <div class="tl" style="--t:980ms"><span class="tool">  ⎿ read</span> <span class="dim">src/lib/retry.mjs</span> <span class="ok">allowed</span></div>
+            <div class="tl" style="--t:1200ms"><span class="tool">  ⎿ bash</span> <span class="dim">git diff main...HEAD</span> <span class="ok">allowed</span></div>
+            <div class="tl" style="--t:1420ms"><span class="tool">  ⎿ write</span> <span class="dim">src/lib/retry.mjs</span> <span class="no">denied</span></div>
+            <div class="tl" style="--t:1700ms"><span class="hi">▍</span> <span class="cmd">指摘 2 件</span></div>
+            <div class="tl" style="--t:1900ms"><span class="dim">  1. </span>リトライ上限に達しても待機が続く</div>
+            <div class="tl" style="--t:2100ms"><span class="dim">  2. </span>キャンセル時に stdio が閉じられない</div>
+            <div class="tl" style="--t:2350ms"><span class="dim">  resume: </span><span class="tool">grok --resume 0f3c…</span></div>
+            <div class="tl" style="--t:2600ms"><span class="p">&gt;</span> <span class="caret"></span></div>
+          </div>
+        </div>
+        <span class="stage-cap"><span data-ja lang="ja">書き込みは、プラグインが断る。</span><span data-en>Writes are denied by the plugin.</span></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== COMMAND STRIP ===================== -->
+  <section class="formats" aria-label="スラッシュコマンド / Slash commands">
+    <div class="wrap formats-inner">
+      <span class="lbl"><span data-ja>コマンド</span><span data-en>Commands</span></span>
+      <a class="chip glow" href="#commands">/grok:review</a>
+      <a class="chip" href="#commands">/grok:adversarial-review</a>
+      <a class="chip" href="#commands">/grok:audit</a>
+      <a class="chip" href="#commands">/grok:rescue</a>
+      <a class="chip" href="#commands">/grok:status</a>
+      <a class="chip" href="#commands">/grok:result</a>
+      <a class="chip" href="#commands">/grok:cancel</a>
+      <a class="chip" href="#install">/grok:setup</a>
+    </div>
+  </section>
+
+  <!-- ===================== READ-ONLY BAND ===================== -->
+  <section class="sec" style="padding-bottom:0">
+    <div class="wrap">
+      <div class="toggle-band reveal">
+        <div>
+          <span class="eyebrow">Read-only by default</span>
+          <h3><span data-ja>レビューは読むだけ。書き換えはしない。</span><span data-en>Reviews read. They don't rewrite.</span></h3>
+          <p><span data-ja lang="ja">レビューと監査の間、Grok はファイルを読み、<code>git diff</code> や <code>git log</code> のような読み取り専用コマンドを実行できます。それ以外の権限要求は<b>プラグインがすべて拒否</b>します —— 許可リストにないシェルコマンドも、出力をファイルへリダイレクトする類のものも同じです。Grok は「こう直すべき」と報告するだけで、直しません。ファイルを変更させたいときだけ、<code>/grok:rescue --write</code> で明示的に許可します。</span><span data-en>During a review or audit, Grok may read files and run read-only commands such as <code>git diff</code> and <code>git log</code>. Every other permission request is <b>denied by the plugin</b> — including shell commands outside the read-only allowlist and anything that redirects output to a file. Grok reports what it thinks should change; it does not change it. When you do want files touched, you opt in explicitly with <code>/grok:rescue --write</code>.</span></p>
+        </div>
+        <div class="perm-demo" aria-hidden="true">
+          <div class="perm-row"><span class="txt">read src/api/client.ts</span><span class="verdict allow">ALLOW</span></div>
+          <div class="perm-row"><span class="txt">bash git log --oneline -20</span><span class="verdict allow">ALLOW</span></div>
+          <div class="perm-row"><span class="txt">write src/api/client.ts</span><span class="verdict deny">DENY</span></div>
+          <div class="perm-row"><span class="txt">bash npm run fix &gt; out.txt</span><span class="verdict deny">DENY</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== COMMANDS ===================== -->
+  <section class="sec" id="commands" aria-labelledby="cmd-title">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="eyebrow">Commands</span>
+        <h2 id="cmd-title"><span data-ja>スラッシュコマンド 1 行で、Grok に渡す。</span><span data-en>One slash command hands it over.</span></h2>
+        <p class="h2-en">Review · audit · rescue · manage.</p>
+        <p><span data-ja lang="ja">スラッシュコマンドとして実行すると、Claude が会話の言語を <code>--language</code> で自動的に引き継ぎます。だから指摘はあなたの言語で返ってきます。</span><span data-en>Run as a slash command, Claude forwards your conversation language with <code>--language</code> automatically — so findings come back in the language you're already speaking.</span></p>
+      </div>
+
+      <div class="feat-grid">
+
+        <article class="card wide reveal" style="--d:40ms">
+          <div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h10l4 4v10H4z"/><path d="M8 12h6M8 16h4"/></svg></div>
+          <span class="h3-en">Review your diff</span>
+          <h3>/grok:review</h3>
+          <p><span data-ja lang="ja">ローカルの Git 状態を読み取り専用でレビューし、Grok の指摘をそのまま返します。<code>--base main</code> で比較先を、<code>--scope working-tree</code> で範囲を指定でき、フラグの後ろに残したテキストはそのまま「どこを重点的に見るか」として渡されます。<code>--wait</code> / <code>--background</code> を付けない場合は、Claude が変更量を見積もってどちらで走らせるか尋ねます。</span><span data-en>Runs a read-only review of your local git state and returns Grok's findings verbatim. Point it with <code>--base main</code>, narrow it with <code>--scope working-tree</code>, and any text left after the flags is passed through as review focus. Without <code>--wait</code> or <code>--background</code>, Claude sizes up the change and asks which mode you want.</span></p>
+          <div class="tags"><span class="hot">--wait</span><span>--background</span><span>--base</span><span>--scope</span></div>
+        </article>
+
+        <article class="card reveal" style="--d:100ms">
+          <div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4v5c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg></div>
+          <span class="h3-en">Argue against shipping</span>
+          <h3>/grok:adversarial-review</h3>
+          <p><span data-ja lang="ja">対象の指定は <code>/grok:review</code> と同じまま、Grok には「出荷に反対する立場で、いま出すべきでない最も強い理由を挙げろ」と指示します。バランスの取れた要約ではなく、反論がほしいときに。</span><span data-en>Same targeting as <code>/grok:review</code>, but Grok is told to argue against shipping and report the strongest reasons the change should not land yet. Use it when you want pushback rather than a balanced summary.</span></p>
+          <div class="tags"><span class="hot"><span data-ja>反論重視</span><span data-en>pushback</span></span><span>--base</span></div>
+        </article>
+
+        <article class="card reveal" style="--d:160ms">
+          <div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16 16l5 5"/></svg></div>
+          <span class="h3-en">Audit the whole codebase</span>
+          <h3>/grok:audit</h3>
+          <p><span data-ja lang="ja">差分ではなく、いまあるソースそのものを監査します。渡すのはファイル一覧だけで差分もファイル内容も含めないため、Grok は読み取り専用コマンドで自分が見るべきファイルを選んで読みます。差分レビューよりトークンを食うので、大きなリポジトリでは重点を指定して深く掘らせるのがおすすめです。</span><span data-en>Audits the source as it stands instead of a diff. The context deliberately carries no diff and no file contents — only a file inventory — so Grok reads what it decides to inspect with read-only commands. That makes it noticeably more token-hungry than a diff review; on large repositories, a focus keeps the audit deep instead of broad.</span></p>
+          <div class="tags"><span class="hot"><span data-ja>差分なし</span><span data-en>no diff</span></span><span><span data-ja>重点指定推奨</span><span data-en>focus advised</span></span></div>
+        </article>
+
+        <article class="card reveal" style="--d:60ms">
+          <div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v6M12 21v-4"/><path d="M5 12a7 7 0 0 1 14 0"/><path d="M4 12h2M18 12h2"/><circle cx="12" cy="13" r="3"/></svg></div>
+          <span class="h3-en">Hand off a problem</span>
+          <h3>/grok:rescue</h3>
+          <p><span data-ja lang="ja">詰まった問題を Grok に渡して、答えを受け取ります。「もう一組の目がほしい」ときのコマンド。既定は読み取り専用で、ファイルを変更させたいときだけ <code>--write</code> を付けます。<code>--model</code> は <code>fast</code> / <code>reasoning</code> / <code>multi</code> / <code>build</code> / <code>latest</code> のエイリアスかモデル ID、<code>--effort</code> は <code>low</code> / <code>medium</code> / <code>high</code>。</span><span data-en>Hands a problem to Grok and returns its answer — the command for "I'm stuck, get another set of eyes on it." Read-only by default; pass <code>--write</code> when you want Grok to change files. <code>--model</code> takes the aliases <code>fast</code>, <code>reasoning</code>, <code>multi</code>, <code>build</code>, <code>latest</code> or any model ID, and <code>--effort</code> takes <code>low</code>, <code>medium</code>, or <code>high</code>.</span></p>
+          <div class="tags"><span class="hot">--write</span><span>--model</span><span>--effort</span><span>--resume</span></div>
+        </article>
+
+        <article class="card reveal" style="--d:120ms">
+          <div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9h4M7 13h7M7 17h5"/></svg></div>
+          <span class="h3-en">Manage background jobs</span>
+          <h3>/grok:status · result · cancel</h3>
+          <p><span data-ja lang="ja"><code>/grok:status</code> でリポジトリの実行中・最近のジョブとレビューゲートの状態を確認。<code>/grok:result</code> は終了したジョブの最終出力を表示し、Grok のセッション ID と <code>grok --resume &lt;id&gt;</code> も併記するので、Grok 自身の TUI で会話を続けられます。<code>/grok:cancel</code> は実行中のジョブと、その背後の Grok のターンを止めます。</span><span data-en><code>/grok:status</code> shows active and recent jobs for the repository plus the state of the review gate. <code>/grok:result</code> prints a finished job's stored output — including the Grok session ID and the <code>grok --resume &lt;id&gt;</code> command, so you can pick the conversation back up in Grok's own TUI. <code>/grok:cancel</code> stops a running job and the Grok turn behind it.</span></p>
+          <div class="tags"><span class="hot">--all</span><span>--wait</span><span>&lt;job-id&gt;</span></div>
+        </article>
+
+        <article class="card reveal" style="--d:180ms">
+          <div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/><circle cx="12" cy="12" r="9"/></svg></div>
+          <span class="h3-en">Check the wiring</span>
+          <h3>/grok:setup</h3>
+          <p><span data-ja lang="ja">Grok Build が入っているか、<code>grok agent stdio</code> が使えるか、サインイン済みかを確認します。停止時レビューゲートの ON / OFF もここで切り替えられ、ON にするとセッション終了時に新しく敵対的レビューが走り、何か見つかれば終了をブロックします。</span><span data-en>Checks whether Grok Build is installed, whether <code>grok agent stdio</code> is available, and whether you're signed in. It also toggles the stop-time review gate: with the gate enabled, ending a Claude session triggers a fresh adversarial review and blocks if it finds something.</span></p>
+          <div class="tags"><span class="hot">--enable-review-gate</span><span>--disable-review-gate</span></div>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== HOW IT WORKS ===================== -->
+  <section class="sec" id="how" aria-labelledby="how-title" style="padding-top:0">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="eyebrow">How it works</span>
+        <h2 id="how-title"><span data-ja>貼り付けた差分ではなく、リポジトリそのものを読ませる。</span><span data-en>Grok reads the repository, not a pasted diff.</span></h2>
+        <p class="h2-en">Agent Client Protocol over <code>grok agent stdio</code>.</p>
+        <p><span data-ja lang="ja">同じリポジトリでの実行は 1 つの Grok プロセスを小さなブローカー経由で共有します。レビューと委譲タスクがそれぞれ起動コストを払わずに済み、ブローカーに繋がらないときは自前で Grok プロセスを立ち上げてフォールバックします。</span><span data-en>Runs in the same repository share one Grok process through a small broker, so a review and a delegated task don't each pay startup cost. If the broker is unreachable, the plugin falls back to starting its own Grok process.</span></p>
+      </div>
+
+      <div class="split">
+        <div class="panel reveal" role="img" aria-label="Claude Code が ACP 経由で Grok Build に接続し、Grok がリポジトリを直接読む構成 / Claude Code connects to Grok Build over ACP and Grok reads the repository directly">
+          <div class="pn-row">
+            <div class="pn-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg></div>
+            <div><b>Claude Code</b><span class="desc"><span data-ja lang="ja">/grok:review を実行</span><span data-en>runs /grok:review</span></span></div>
+          </div>
+          <div class="pn-arrow" aria-hidden="true">↓ &nbsp; grok agent stdio · ACP &nbsp; ↓</div>
+          <div class="pn-row">
+            <div class="pn-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3l-1.8 4.6L6.6 9.4l4.6 1.8L13 15.8l1.8-4.6 4.6-1.8-4.6-1.8z"/><circle cx="7" cy="17" r="2.2"/><circle cx="17" cy="18" r="1.6"/></svg></div>
+            <div><b>Grok Build</b><span class="desc"><span data-ja lang="ja">自分でファイルを読み、ツール呼び出しが見える</span><span data-en>reads files itself; you see its tool calls</span></span></div>
+          </div>
+          <div class="pn-arrow" aria-hidden="true">↓ &nbsp; findings &nbsp; ↓</div>
+          <div class="pn-row">
+            <div class="pn-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg></div>
+            <div><b><span data-ja lang="ja">会話へそのまま返る</span><span data-en>Straight back into the session</span></b><span class="desc"><span data-ja lang="ja">あなたの言語で、原文のまま</span><span data-en>verbatim, in your language</span></span></div>
+          </div>
+        </div>
+
+        <ol class="how-list reveal" style="--d:120ms">
+          <li><span class="num">1</span><div><b><span data-ja>ACP で話す</span><span data-en>It speaks ACP.</span></b><span class="desc"><span data-ja lang="ja">プラグインは <code>grok agent stdio</code> を起動し、Agent Client Protocol で会話します。Grok はリポジトリを自分で読み、ツール呼び出しは起きた順にそのまま見えます。</span><span data-en>The plugin runs <code>grok agent stdio</code> and speaks the Agent Client Protocol to it. Grok reads your repository itself, and you see its tool calls as they happen.</span></span></div></li>
+          <li><span class="num">2</span><div><b><span data-ja>プロセスを共有する</span><span data-en>It shares one process.</span></b><span class="desc"><span data-ja lang="ja">同一リポジトリの実行はブローカー経由で 1 プロセスを共有。届かなければ自前で起動してフォールバックします。</span><span data-en>Runs in one repository share a single Grok process through a broker, with a fallback that starts its own process if the broker is unreachable.</span></span></div></li>
+          <li><span class="num">3</span><div><b><span data-ja>モデルを指定する</span><span data-en>It picks a model.</span></b><span class="desc"><span data-ja lang="ja">既定は <code>grok-4.5</code>。単発は <code>--model</code>、常用は環境変数 <code>GROK_PLUGIN_MODEL</code> で上書きできます。<code>XAI_API_KEY</code> で認証すると Grok 側の新規セッション既定は非推論モデルになり、レビュー品質が目に見えて落ちるため、この既定が効いてきます。</span><span data-en>It asks for <code>grok-4.5</code> by default. Override it for one run with <code>--model</code>, or for every run with <code>GROK_PLUGIN_MODEL</code>. This matters more than it looks: when you authenticate with <code>XAI_API_KEY</code>, Grok's own default for a new session is a non-reasoning model, which reviews noticeably worse.</span></span></div></li>
+          <li><span class="num">4</span><div><b><span data-ja>MCP を持ち込まない</span><span data-en>It leaves your MCP servers out.</span></b><span class="desc"><span data-ja lang="ja">レビューは MCP サーバーを 1 つも繋がずに始めるので、グローバル設定が毎回のレビューに読み込まれてトークンが膨らむことがありません。<code>/grok:rescue</code> の委譲実行は通常どおりあなたの設定を使います。</span><span data-en>Reviews start with no MCP servers attached, so your global MCP setup doesn't get loaded into every review and inflate the token count. Delegated <code>/grok:rescue</code> runs use your normal configuration.</span></span></div></li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== REQUIREMENTS ===================== -->
+  <section class="sec" id="requirements" aria-labelledby="req-title" style="padding-top:0">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="eyebrow">Requirements</span>
+        <h2 id="req-title"><span data-ja>動作環境</span><span data-en>What you need</span></h2>
+        <p class="h2-en">Grok Build, signed in, on Node 18.18+.</p>
+      </div>
+      <div class="req-grid">
+        <div class="req reveal" style="--d:40ms">
+          <div class="k">Grok Build</div>
+          <div class="v"><span data-ja>必須</span><span data-en>Required</span><small><span data-ja><code>grok agent stdio</code> を持つビルド</span><span data-en>a build exposing <code>grok agent stdio</code></span></small></div>
+        </div>
+        <div class="req reveal" style="--d:90ms">
+          <div class="k"><span data-ja>サインイン</span><span data-en>Sign-in</span></div>
+          <div class="v">SuperGrok / X Premium+<small><span data-ja>または <code>XAI_API_KEY</code></span><span data-en>or an <code>XAI_API_KEY</code></span></small></div>
+        </div>
+        <div class="req reveal" style="--d:140ms">
+          <div class="k">Node.js</div>
+          <div class="v">18.18+<small><span data-ja>プラグイン本体の実行に使用</span><span data-en>used to run the plugin itself</span></small></div>
+        </div>
+        <div class="req reveal" style="--d:190ms">
+          <div class="k">Claude Code</div>
+          <div class="v"><span data-ja>プラグイン対応版</span><span data-en>Plugin-capable</span><small><span data-ja><code>/plugin marketplace</code> が使えること</span><span data-en>with <code>/plugin marketplace</code> available</span></small></div>
+        </div>
+      </div>
+
+      <div class="plat-note reveal" style="--d:120ms" role="note">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+        <p style="margin:0"><span data-ja lang="ja"><b>利用量について：</b>このプラグインは、あなたのマシンの Grok Build がすでにサインインしている先をそのまま使います。専用アカウントは要りません。消費はサインインに使っているプラン（SuperGrok / X Premium+）または <code>XAI_API_KEY</code> のどちらかに計上され、<b>API キーはブラウザ資格情報より優先されます</b>。</span><span data-en><b>About usage:</b> the plugin uses whatever Grok Build on your machine is already signed in with — no separate account needed. Usage counts against whichever you use, your plan (SuperGrok / X Premium+) or your <code>XAI_API_KEY</code>, and <b>the API key takes precedence over browser credentials</b>.</span></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== INSTALL ===================== -->
+  <section class="sec" id="install" aria-labelledby="install-title" style="padding-top:0">
+    <div class="wrap">
+      <div class="dl-panel reveal">
+        <div class="dl-head">
+          <div>
+            <span class="eyebrow">Install</span>
+            <h2 id="install-title"><span data-ja>導入は 4 ステップ</span><span data-en>Four steps to running</span></h2>
+            <p class="h2-en"><span data-ja lang="en">Install Grok Build, add the marketplace, install, check.</span><span data-en>Install Grok Build, add the marketplace, install, check.</span></p>
+          </div>
+          <span class="price-pill"><span data-ja>Apache-2.0 · 無料</span><span data-en>Apache-2.0 · Free</span></span>
+        </div>
+
+        <div class="steps">
+          <div class="step reveal" style="--d:40ms">
+            <span class="n">1</span>
+            <div class="body">
+              <b><span data-ja>Grok Build を入れる</span><span data-en>Install Grok Build</span></b>
+              <span class="desc"><span data-ja lang="ja">x.ai から配布されています（パッケージレジストリ経由ではありません）。Windows は PowerShell で。</span><span data-en>It ships from x.ai, not from a package registry. On Windows, in PowerShell:</span></span>
+              <div class="cmd-block"><code>irm https://x.ai/cli/install.ps1 | iex</code><button class="copy" type="button" data-copy="irm https://x.ai/cli/install.ps1 | iex">COPY</button></div>
+              <span class="desc"><span data-ja>macOS / Linux:</span><span data-en>On macOS or Linux:</span></span>
+              <div class="cmd-block"><code>curl -fsSL https://x.ai/cli/install.sh | bash</code><button class="copy" type="button" data-copy="curl -fsSL https://x.ai/cli/install.sh | bash">COPY</button></div>
+            </div>
+          </div>
+
+          <div class="step reveal" style="--d:90ms">
+            <span class="n">2</span>
+            <div class="body">
+              <b><span data-ja>サインインする</span><span data-en>Sign in</span></b>
+              <span class="desc"><span data-ja lang="ja">ブラウザで対話的にサインインするか、ヘッドレス／従量利用なら <a href="https://console.x.ai" rel="noopener">console.x.ai</a> の API キーを使います。</span><span data-en>Sign in interactively, or use an API key from <a href="https://console.x.ai" rel="noopener">console.x.ai</a> for headless or metered use.</span></span>
+              <div class="cmd-block"><code>grok login</code><button class="copy" type="button" data-copy="grok login">COPY</button></div>
+              <div class="cmd-block"><code>$env:XAI_API_KEY = "xai-..."</code><button class="copy" type="button" data-copy="$env:XAI_API_KEY = &quot;xai-...&quot;">COPY</button></div>
+            </div>
+          </div>
+
+          <div class="step reveal" style="--d:140ms">
+            <span class="n">3</span>
+            <div class="body">
+              <b><span data-ja>プラグインを入れる</span><span data-en>Install the plugin</span></b>
+              <span class="desc"><span data-ja lang="ja">Claude Code の中で、マーケットプレイスを追加してインストールし、再読み込みします。</span><span data-en>Inside Claude Code, add the marketplace, install, then reload.</span></span>
+              <div class="cmd-block"><code><span class="p">/</span>plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc</code><button class="copy" type="button" data-copy="/plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc">COPY</button></div>
+              <div class="cmd-block"><code><span class="p">/</span>plugin install grok@kagayoi-grok</code><button class="copy" type="button" data-copy="/plugin install grok@kagayoi-grok">COPY</button></div>
+              <div class="cmd-block"><code><span class="p">/</span>reload-plugins</code><button class="copy" type="button" data-copy="/reload-plugins">COPY</button></div>
+            </div>
+          </div>
+
+          <div class="step reveal" style="--d:190ms">
+            <span class="n">4</span>
+            <div class="body">
+              <b><span data-ja>配線を確認する</span><span data-en>Check the wiring</span></b>
+              <span class="desc"><span data-ja lang="ja">Grok Build の有無、<code>grok agent stdio</code> の可否、サインイン状態を報告します。何かをインストールすることはありません。</span><span data-en>It reports whether Grok Build is installed, whether <code>grok agent stdio</code> is available, and whether you're signed in. It doesn't install anything for you.</span></span>
+              <div class="cmd-block"><code><span class="p">/</span>grok:setup</code><button class="copy" type="button" data-copy="/grok:setup">COPY</button></div>
+              <span class="desc"><span data-ja lang="ja">あとは出荷前に 1 行。</span><span data-en>Then, before you ship:</span></span>
+              <div class="cmd-block"><code><span class="p">/</span>grok:review --wait</code><button class="copy" type="button" data-copy="/grok:review --wait">COPY</button></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="trust">
+          <div class="reveal" style="--d:40ms">
+            <b><span data-ja>追加費用なし</span><span data-en>No extra cost</span></b>
+            <p><span data-ja lang="ja">プラグイン自体は無料。消費は既存の Grok 契約に計上されます。</span><span data-en>The plugin is free; usage counts against your existing Grok access.</span></p>
+          </div>
+          <div class="reveal" style="--d:90ms">
+            <b><span data-ja>読み取り専用が既定</span><span data-en>Read-only by default</span></b>
+            <p><span data-ja lang="ja">書き込みは <code>--write</code> を明示したときだけ。</span><span data-en>Writes happen only when you pass <code>--write</code>.</span></p>
+          </div>
+          <div class="reveal" style="--d:140ms">
+            <b><span data-ja>オープンソース</span><span data-en>Open source</span></b>
+            <p><span data-ja lang="ja">Apache-2.0。<code>openai/codex-plugin-cc</code> のフォークです。</span><span data-en>Apache-2.0, forked from <code>openai/codex-plugin-cc</code>.</span></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== FAQ ===================== -->
+  <section class="sec" id="faq" aria-labelledby="faq-title" style="padding-top:0">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="eyebrow">FAQ</span>
+        <h2 id="faq-title"><span data-ja>よくある質問</span><span data-en>Questions</span></h2>
+      </div>
+
+      <div class="faq reveal">
+        <details>
+          <summary><span data-ja>このプラグイン専用のアカウントは必要ですか？</span><span data-en>Do I need a separate account for this plugin?</span></summary>
+          <div class="a"><p><span data-ja lang="ja">いりません。あなたのマシンの Grok Build がすでにサインインしている先をそのまま使います。</span><span data-en>No. It uses whatever Grok Build on your machine is already signed in with.</span></p></div>
+        </details>
+        <details>
+          <summary><span data-ja>いまの Grok の設定は使われますか？</span><span data-en>Does it use my existing Grok configuration?</span></summary>
+          <div class="a"><p><span data-ja lang="ja">使われます。例外は 1 つだけで、レビューは MCP サーバーを繋がずに始めます。グローバルの MCP 設定が毎回のレビューへ読み込まれてトークンが膨らむのを避けるためです。<code>/grok:rescue</code> の委譲実行では通常の設定が使われます。</span><span data-en>Yes, with one exception: reviews start with no MCP servers attached, so your global MCP setup doesn't get loaded into every review and inflate the token count. Delegated <code>/grok:rescue</code> runs use your normal configuration.</span></p></div>
+        </details>
+        <details>
+          <summary><span data-ja><code>/grok:review</code> は本当に読み取り専用ですか？</span><span data-en>Is <code>/grok:review</code> really read-only?</span></summary>
+          <div class="a"><p><span data-ja lang="ja">はい。Grok はファイルを読み、読み取り専用コマンドを実行できます。それ以外の権限要求はすべてプラグインが拒否します —— 読み取り専用の許可リストに載っていないシェルコマンドも、出力をファイルへリダイレクトするものも含めてです。</span><span data-en>Yes. Grok may read files and run read-only commands. Every permission request for anything else is denied by the plugin, including shell commands that are not on a read-only allowlist and anything that redirects output to a file.</span></p></div>
+        </details>
+        <details>
+          <summary><span data-ja>指摘は日本語で返ってきますか？</span><span data-en>Will findings come back in my language?</span></summary>
+          <div class="a"><p><span data-ja lang="ja">スラッシュコマンドとして実行すれば、Claude が会話の言語を <code>--language &lt;bcp47&gt;</code> で自動的に引き継ぎます。コンパニオンスクリプトを直接呼ぶ場合は自分で <code>--language</code> を渡してください。渡さない場合は重点テキストの言語、次に英語へフォールバックします。</span><span data-en>When run as a slash command, Claude forwards the conversation language with <code>--language &lt;bcp47&gt;</code> automatically. If you call the companion script directly, pass <code>--language</code> yourself; otherwise it falls back to the language of the focus text, then English.</span></p></div>
+        </details>
+        <details>
+          <summary><span data-ja><code>/grok:transfer</code> がないのはなぜですか？</span><span data-en>Why is there no <code>/grok:transfer</code>?</span></summary>
+          <div class="a"><p><span data-ja lang="ja">上流の Codex プラグインには Claude Code のセッションを Codex のスレッドへ取り込む機能がありました。Grok Build に同等のものが無いため、それらしく見せかけるのではなくコマンドごと削除しました。</span><span data-en>The upstream Codex plugin could import a Claude Code session into a Codex thread. Grok Build has no equivalent, so the command was removed rather than faked.</span></p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ===================== FOOTER ===================== -->
+<footer aria-labelledby="foot-title">
+  <h2 id="foot-title" class="sr-only">Footer</h2>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div class="foot-brand">
+        <a class="brand" href="#top" aria-label="Grok plugin for Claude Code ホーム">
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="7" fill="#0a0a0c"/>
+            <path d="M7 11l4 4-4 4" stroke="#d97757" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <path d="M15 21h10" stroke="#e9e9ee" stroke-width="2.2" stroke-linecap="round"/>
+            <path d="M21 6l1.3 3.2L25.5 10.5 22.3 11.8 21 15l-1.3-3.2L16.5 10.5l3.2-1.3z" fill="#e9e9ee"/>
+          </svg>
+          <span><b>Grok plugin</b><span class="sub">for Claude Code</span></span>
+        </a>
+        <p><span data-ja lang="ja">Claude Code の中から xAI の Grok Build を呼び出すプラグイン。差分レビュー、コードベース監査、行き詰まった問題の委譲を、Agent Client Protocol 経由で任せられます。</span><span data-en>A Claude Code plugin that reaches xAI's Grok Build for diff reviews, codebase audits, and handing off problems you're stuck on — over the Agent Client Protocol.</span></p>
+      </div>
+
+      <nav class="foot-col" aria-label="Product">
+        <h4>Product</h4>
+        <a href="#commands"><span data-ja>コマンド</span><span data-en>Commands</span></a>
+        <a href="#how"><span data-ja>しくみ</span><span data-en>How it works</span></a>
+        <a href="#requirements"><span data-ja>動作環境</span><span data-en>Requirements</span></a>
+        <a href="#install"><span data-ja>導入</span><span data-en>Install</span></a>
+        <a href="#faq">FAQ</a>
+      </nav>
+
+      <nav class="foot-col" aria-label="About">
+        <h4>About</h4>
+        <a href="https://github.com/1llum1n4t1s/KG.grok-plugin-cc" rel="noopener">GitHub</a>
+        <a href="https://x.ai/cli" rel="noopener">Grok Build (x.ai/cli)</a>
+        <span class="fitem"><span data-ja>ライセンス：Apache-2.0</span><span data-en>License: Apache-2.0</span></span>
+        <span class="fitem"><span data-ja>開発者：ゆろち</span><span data-en>Developer: Yurochi</span></span>
+      </nav>
+    </div>
+
+    <div class="legit">
+      <span class="badge-safe">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 6v6c0 5 3.5 7.5 8 8 4.5-.5 8-3 8-8V6z"/><path d="M9 12l2 2 4-4"/></svg>
+        <span data-ja>オープンソース</span><span data-en>Open source</span>
+      </span>
+      <p>
+        <span data-ja lang="ja">本プラグインは <a href="https://github.com/openai/codex-plugin-cc" rel="noopener">openai/codex-plugin-cc</a> のフォークで、OpenAI Codex CLI から xAI の Grok Build CLI へ載せ替えたものです。Anthropic および xAI とは無関係の非公式プロジェクトです。© 2026 ゆろち · Apache-2.0.</span>
+        <span data-en>This plugin is a fork of <a href="https://github.com/openai/codex-plugin-cc" rel="noopener">openai/codex-plugin-cc</a>, retargeted from the OpenAI Codex CLI to xAI's Grok Build CLI. It is an unofficial project, not affiliated with Anthropic or xAI. © 2026 Yurochi · Apache-2.0.</span>
+      </p>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* Progressive enhancement only — the page is fully functional & visible without JS.
+   デフォルトは日本語表示。JS 無効でも日本語がそのまま出る。 */
+(function(){
+  var doc = document.documentElement;
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* 1) 言語トグル（日本語デフォルト / EN 切替） */
+  var btn = document.getElementById('langToggle');
+  if (btn) {
+    btn.addEventListener('click', function(){
+      var toEn = !doc.classList.contains('lang-en');
+      doc.classList.toggle('lang-en', toEn);
+      doc.setAttribute('lang', toEn ? 'en' : 'ja');
+      btn.setAttribute('aria-pressed', String(toEn));
+    });
+  }
+
+  /* 2) コマンドのコピーボタン。clipboard API が無い環境では選択用の
+        フォールバック（textarea + execCommand）に落とす。 */
+  document.querySelectorAll('.copy').forEach(function(b){
+    b.addEventListener('click', function(){
+      var text = b.getAttribute('data-copy') || '';
+      var done = function(){
+        var prev = b.textContent;
+        b.textContent = doc.classList.contains('lang-en') ? 'COPIED' : 'コピー済';
+        b.classList.add('done');
+        setTimeout(function(){ b.textContent = prev; b.classList.remove('done'); }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function(){});
+        return;
+      }
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly','');
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) {}
+      document.body.removeChild(ta);
+    });
+  });
+
+  /* 3) Scroll-reveal: reveal sections as they enter the viewport. */
+  var sections = document.querySelectorAll('section, footer');
+  if (reduce || !('IntersectionObserver' in window)) {
+    sections.forEach(function(s){ s.classList.add('is-in'); });
+  } else {
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (e.isIntersecting){ e.target.classList.add('is-in'); io.unobserve(e.target); }
+      });
+    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
+    sections.forEach(function(s){ io.observe(s); });
+    var hero = document.querySelector('.hero');
+    if (hero) hero.classList.add('is-in');
+  }
+
+  /* 4) Card hover spotlight follows the cursor. */
+  if (!reduce) {
+    document.querySelectorAll('.card').forEach(function(card){
+      card.addEventListener('pointermove', function(ev){
+        var r = card.getBoundingClientRect();
+        card.style.setProperty('--mx', (ev.clientX - r.left) + 'px');
+        card.style.setProperty('--my', (ev.clientY - r.top) + 'px');
+      });
+    });
+  }
+})();
+</script>
+</body>
+</html>

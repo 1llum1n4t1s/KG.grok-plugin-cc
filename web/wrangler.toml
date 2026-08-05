@@ -1,0 +1,16 @@
+# Grok plugin for Claude Code のランディングページ配信 Worker。
+# grok-plugin.kagayoi.com は R2 バケットを持たない純粋な静的ページ配信なので、
+# routes ではなく Custom Domain 相当のルートを 1 本張るだけでよい。
+# 対外プロダクト向けの新規ホストなので nephilim.jp 側のルートは増やさない。
+name = "grok-plugin-landing"
+main = "worker.js"
+compatibility_date = "2026-05-01"
+
+routes = [
+  { pattern = "grok-plugin.kagayoi.com/*", zone_name = "kagayoi.com" },
+]
+
+# index.html を文字列として worker.js に import する（Text モジュール）。
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
