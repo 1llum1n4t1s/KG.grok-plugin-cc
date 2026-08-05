@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.2
+
+- Fixed background `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, and `/grok:x` runs
+  returning noisy output: Claude Code merges a background task's stdout and stderr into a single
+  file, so the companion's own progress lines (`[grok] Tool: ...`) and any Node warnings landed
+  ahead of the report when that file was read back. The commands now read the finished job's
+  stored report with `grok-companion.mjs result` instead, which returns the rendered output only.
+- Stopped emitting Node's `DEP0190` deprecation warning on every `grok` and `grok agent stdio`
+  spawn on Windows. Passing an argument array together with `shell: true` triggered the warning on
+  Node 22+; the plugin now folds the command and arguments into a single shell-safe string instead.
+
 ## 0.1.0
 
 - First release of the Grok plugin, forked from `openai/codex-plugin-cc` and retargeted from the

@@ -28,7 +28,7 @@ import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
-import { terminateProcessTree } from "./process.mjs";
+import { buildShellCommand, terminateProcessTree } from "./process.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
@@ -402,18 +402,26 @@ class SpawnedAcpClient extends AcpClientBase {
 
   async initialize() {
     const command = this.options.grokBin ?? "grok";
-    this.proc = spawn(quoteIfNeeded(command), ["agent", "stdio"], {
-      cwd: this.cwd,
-      env: this.options.env ?? process.env,
-      stdio: ["pipe", "pipe", "pipe"],
-      // Windows では shell が要る。PATH / PATHEXT の解決に加えて、
-      // `.cmd` / `.bat` は shell 無しでは起動できないため。
-      // ここで `process.env.SHELL` を使ってはいけない。Git Bash 環境では
-      // bash が選ばれ、`C:\Users\...` のバックスラッシュをエスケープとして
-      // 食って `C:Users...` に化ける。`true` なら cmd.exe が使われる。
-      shell: process.platform === "win32",
-      windowsHide: true
-    });
+    // Windows では shell が要る。PATH / PATHEXT の解決に加えて、
+    // `.cmd` / `.bat` は shell 無しでは起動できないため。
+    // ここで `process.env.SHELL` を使ってはいけない。Git Bash 環境では
+    // bash が選ばれ、`C:\Users\...` のバックスラッシュをエスケープとして
+    // 食って `C:Users...` に化ける。`true` なら cmd.exe が使われる。
+    const useShell = process.platform === "win32";
+    const args = ["agent", "stdio"];
+    // shell 有効のまま引数配列を渡すと Node 22 以降が DEP0190 を stderr へ出し、
+    // バックグラウンド実行の出力に混ざる。shell のときは 1 本の文字列へ畳む。
+    this.proc = spawn(
+      useShell ? buildShellCommand(quoteIfNeeded(command), args) : command,
+      useShell ? [] : args,
+      {
+        cwd: this.cwd,
+        env: this.options.env ?? process.env,
+        stdio: ["pipe", "pipe", "pipe"],
+        shell: useShell,
+        windowsHide: true
+      }
+    );
 
     this.proc.stdout.setEncoding("utf8");
     this.proc.stderr.setEncoding("utf8");

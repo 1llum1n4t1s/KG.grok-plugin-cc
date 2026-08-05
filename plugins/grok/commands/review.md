@@ -66,3 +66,19 @@ Bash({
 ```
 - Do not call `BashOutput` or wait for completion in this turn.
 - After launching the command, tell the user: "Grok review started in the background. Check `/grok:status` for progress."
+
+When the background run finishes (a later turn):
+- Do not read, quote, or paste the background task's output file, and do not call `BashOutput`.
+  A background task merges the run's stderr into the same stream as its stdout, so that file holds
+  the companion's progress lines (`[grok] Tool: ...`, dozens of them) and any Node warnings ahead of
+  the report itself. Pasting it hands the user a wall of noise instead of the review.
+- Read the stored report instead:
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
+```
+- With no job id it resolves the most recent finished job for this session, which is the run you
+  launched. That output is the rendered report only, with no progress lines mixed in.
+- Return that stdout verbatim, exactly as-is. Do not paraphrase, summarize, or add commentary before
+  or after it, and do not fix any issues mentioned in the review output.
+- If the command reports that the job is still running, do not re-run the review. Tell the user to
+  check `/grok:status`.

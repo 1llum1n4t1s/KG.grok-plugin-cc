@@ -56,5 +56,18 @@ Bash({
 - Do not wait for completion in this turn.
 - After launching the command, tell the user: "Grok X search started in the background. Check `/grok:status` for progress."
 
+When the background run finishes (a later turn):
+- Do not read, quote, or paste the background task's output file, and do not call `BashOutput`.
+  A background task merges the run's stderr into the same stream as its stdout, so that file holds
+  the companion's progress lines (`[grok] Tool: ...`) and any Node warnings ahead of the answer.
+- Read the stored result instead:
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
+```
+- With no job id it resolves the most recent finished job for this session, which is the run you
+  launched.
+- Return that stdout verbatim, exactly as-is. Do not paraphrase, summarize, or add commentary before
+  or after it.
+
 Failure handling:
 - If the helper reports that Grok Build is missing or unauthenticated, stop and tell the user to run `/grok:setup`.
