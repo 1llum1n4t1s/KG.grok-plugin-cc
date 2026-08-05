@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "grok",
-      "displayName": "Grok",
+      "displayName": "Grok Build Companion",
       "description": "Use Grok Build from Claude Code to review code or delegate tasks.",
       "version": "0.1.0",
       "author": {

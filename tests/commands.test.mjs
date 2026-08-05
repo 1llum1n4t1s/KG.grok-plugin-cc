@@ -183,6 +183,11 @@ test("both manifests carry the metadata a marketplace listing needs", () => {
 
   // owner はマーケットプレイスの必須フィールド。
   assert.ok(marketplace.owner?.name);
+
+  // 表示名は Anthropic のプラグインディレクトリへ申請した名前と一致させる。
+  // 技術名 `grok` は xAI のブランドそのものなので、掲載カードでは
+  // 第三者クライアントと分かる名前を出す。
+  assert.equal(entry.displayName, "Grok Build Companion");
 });
 
 test("the marketplace name does not collide with the reserved Anthropic names", () => {
