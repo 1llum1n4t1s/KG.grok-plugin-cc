@@ -355,11 +355,21 @@ export function renderTaskResult(parsedResult, meta) {
   return `${message}\n`;
 }
 
+function renderSessionRuntimeLabel(sessionRuntime) {
+  if (!sessionRuntime?.brokerActive) {
+    return "no shared broker (each command starts its own Grok process)";
+  }
+  const endpoint = sessionRuntime.brokerEndpoint;
+  return endpoint ? `shared broker at ${endpoint}` : "shared broker";
+}
+
 export function renderStatusReport(report) {
   const lines = [
     "# Grok Status",
     "",
-    `Session runtime: ${report.sessionRuntime.label}`,
+    // getSessionRuntimeStatus が返すのは brokerEndpoint / brokerActive だけ。
+    // ここで持たない `label` を読むと常に undefined が表示される。
+    `Session runtime: ${renderSessionRuntimeLabel(report.sessionRuntime)}`,
     `Review gate: ${report.config.stopReviewGate ? "enabled" : "disabled"}`,
     ""
   ];

@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderReviewResult, renderStoredJobResult, renderSetupReport } from "../plugins/grok/scripts/lib/render.mjs";
+import {
+  renderReviewResult,
+  renderStoredJobResult,
+  renderSetupReport,
+  renderStatusReport
+} from "../plugins/grok/scripts/lib/render.mjs";
 
 test("renderReviewResult degrades gracefully when JSON is missing required review fields", () => {
   const output = renderReviewResult(
@@ -91,4 +96,30 @@ test("renderSetupReport explains why Grok is unusable when agent stdio is missin
   assert.match(output, /`grok agent stdio` is unavailable/);
   assert.match(output, /auth: not signed in/);
   assert.match(output, /Update Grok Build/);
+});
+
+// getSessionRuntimeStatus は brokerEndpoint / brokerActive しか返さない。
+// 以前ここで `.label` を読んでいて、/grok:status が常に
+// "Session runtime: undefined" を出していた。
+test("renderStatusReport describes the broker state instead of printing undefined", () => {
+  const base = {
+    config: { stopReviewGate: false },
+    running: [],
+    recent: [],
+    latestFinished: null
+  };
+
+  const withoutBroker = renderStatusReport({
+    ...base,
+    sessionRuntime: { brokerActive: false, brokerEndpoint: null }
+  });
+  assert.doesNotMatch(withoutBroker, /undefined/);
+  assert.match(withoutBroker, /Session runtime: no shared broker/);
+
+  const withBroker = renderStatusReport({
+    ...base,
+    sessionRuntime: { brokerActive: true, brokerEndpoint: "127.0.0.1:51234" }
+  });
+  assert.doesNotMatch(withBroker, /undefined/);
+  assert.match(withBroker, /Session runtime: shared broker at 127\.0\.0\.1:51234/);
 });
