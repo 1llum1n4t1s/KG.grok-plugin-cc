@@ -45,6 +45,12 @@ Foreground flow:
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" review "$ARGUMENTS"
 ```
+- A review drives a full Grok Build session and can run longer than `Bash`'s default timeout, so
+  give the `Bash` call a timeout of at least 600000 ms. Without it the call is cut off while the
+  review is still running and you get no output at all, even though the run finishes and stores
+  its result.
+- If the call times out anyway, do not re-run the review. Tell the user to check `/grok:status` and
+  read the stored output with `/grok:result` — the finished run is already recorded.
 - Return the command stdout verbatim, exactly as-is.
 - Do not paraphrase, summarize, or add commentary before or after it.
 - Do not fix any issues mentioned in the review output.

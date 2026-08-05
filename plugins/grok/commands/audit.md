@@ -37,6 +37,12 @@ Foreground flow:
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" audit "$ARGUMENTS"
 ```
+- An audit drives a full Grok Build session and routinely runs longer than `Bash`'s default
+  timeout, so give the `Bash` call a timeout of at least 600000 ms. Without it the call is cut off
+  while the audit is still running and you get no output at all, even though the run finishes and
+  stores its result.
+- If the call times out anyway, do not re-run the audit. Tell the user to check `/grok:status` and
+  read the stored output with `/grok:result` — the finished run is already recorded.
 - Return the command stdout verbatim, exactly as-is.
 - Do not paraphrase, summarize, or add commentary before or after it.
 - Do not fix any issues mentioned in the audit output.
