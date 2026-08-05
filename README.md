@@ -15,6 +15,7 @@ summary of what changed.
 - `/grok:adversarial-review` for a deliberately skeptical ship/no-ship review
 - `/grok:audit` for a read-only audit of the entire existing codebase, ignoring the current diff
 - `/grok:rescue` to hand a problem to Grok and get a worked answer back
+- `/grok:x` to search X (Twitter) posts, which plain web search cannot read
 - `/grok:status`, `/grok:result`, and `/grok:cancel` to manage background jobs
 - `/grok:setup` to check that everything is wired up
 
@@ -180,6 +181,22 @@ By default the run is read-only. Pass `--write` when you want Grok to change fil
 
 Model aliases: `fast`, `reasoning`, `multi`, `build`, `latest`. Anything else is passed through as
 a model ID, so `--model grok-4.5` works too. `--effort` accepts `low`, `medium`, or `high`.
+
+### `/grok:x`
+
+Searches X (Twitter) posts through Grok Build and returns the findings with author handles, dates,
+and post URLs. Grok Build reaches X with its own `x_keyword_search` and `x_semantic_search` tools,
+so this works with the same `grok login` credentials as every other command — no xAI API key needed.
+Ordinary web search cannot read X timelines, which is why this is a separate command.
+
+```bash
+/grok:x what are people saying about the latest Avalonia release
+/grok:x --background reports of regressions in Node 24 over the past week
+/grok:x --model latest reaction to the new pricing announcement
+```
+
+The run is always read-only. A search drives a full Grok Build session, so it usually takes a few
+minutes; pass `--background` when you would rather not wait.
 
 ### `/grok:status`
 

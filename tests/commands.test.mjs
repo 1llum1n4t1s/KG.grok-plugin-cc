@@ -30,7 +30,8 @@ test("the plugin exposes exactly the supported commands", () => {
     "result",
     "review",
     "setup",
-    "status"
+    "status",
+    "x"
   ]);
 });
 

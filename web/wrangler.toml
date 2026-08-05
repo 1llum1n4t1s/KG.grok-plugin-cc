@@ -6,11 +6,17 @@ name = "grok-plugin-landing"
 main = "worker.js"
 compatibility_date = "2026-05-01"
 
+# パターンルートではなく Custom Domain にする。パターンルートは既存の DNS
+# レコードへ乗る仕組みで、レコード自体は作られない。このホストは Worker 専用で
+# 他のオリジンを持たないので、DNS レコードと証明書ごと wrangler に用意させる。
 routes = [
-  { pattern = "grok-plugin.kagayoi.com/*", zone_name = "kagayoi.com" },
+  { pattern = "grok-plugin.kagayoi.com", custom_domain = true },
 ]
 
 # index.html を文字列として worker.js に import する（Text モジュール）。
 [[rules]]
 type = "Text"
 globs = ["**/*.html"]
+# 既定ルール（txt / html / sql）を上書きする形になるので、既定へ落とさないことを
+# 明示して wrangler の警告を消す。このプロジェクトが読むのは html だけ。
+fallthrough = false
