@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.3
+
+- Fixed `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, and `/grok:x` still returning
+  noisy or missing output when run in the foreground. The 1.0.2 fix only rewired the background
+  flow; foreground runs kept treating the `Bash` call's own merged stdout/stderr as the report, so
+  progress lines (`[grok] Tool: ...`) and Node warnings still leaked in, and some runs answered with
+  a pointer or a summary instead of the report itself. Foreground now reads the finished job back
+  with `grok-companion.mjs result`, exactly like the background flow, and each command spells out
+  that the report only reaches the user through the assistant's own reply, verbatim, in full.
+
 ## 1.0.2
 
 - Fixed background `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, and `/grok:x` runs
