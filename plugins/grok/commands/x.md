@@ -42,7 +42,16 @@ Foreground flow (default, and whenever the arguments include `--wait`):
 node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" task --fresh [--model <model>] "<search prompt>"
 ```
 - A search normally takes several minutes because it drives a full Grok Build session. Give the `Bash` call a timeout of at least 600000 ms.
-- Return the command stdout verbatim, exactly as-is. Do not paraphrase, summarize, or add commentary before or after it.
+- Do not treat that call's own output as the answer, and do not quote it. `Bash` hands you the run's
+  stdout and stderr merged into a single result, so it opens with the companion's progress lines
+  (`[grok] Tool: ...`) and any Node warnings, and where the answer actually begins is ambiguous.
+- Read the stored result instead, exactly as the background flow does:
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
+```
+- With no job id it resolves the most recent finished job for this session — foreground runs are
+  recorded the same way background ones are, so this is the search you just ran.
+- Then follow "Returning the answer" below.
 
 Background flow (whenever the arguments include `--background`):
 - Launch the search with `Bash` in the background:
@@ -66,8 +75,16 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
 ```
 - With no job id it resolves the most recent finished job for this session, which is the run you
   launched.
-- Return that stdout verbatim, exactly as-is. Do not paraphrase, summarize, or add commentary before
-  or after it.
+- Then follow "Returning the answer" below.
+
+Returning the answer (both flows):
+- The user cannot see command output. Nothing the `result` call printed is on their screen, so the
+  answer reaches them only through the text you write in your own reply.
+- Write the whole thing out in that reply, from the first line of that stdout to the last.
+- Never answer with a pointer to it ("the search result is above", "see the output"), with a count of
+  posts, or with a summary. That leaves the user with nothing.
+- Reproduce it verbatim: do not paraphrase, translate, reorder, shorten, or wrap it in extra
+  formatting, and add no commentary before or after it.
 
 Failure handling:
 - If the helper reports that Grok Build is missing or unauthenticated, stop and tell the user to run `/grok:setup`.

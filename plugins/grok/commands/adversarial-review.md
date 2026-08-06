@@ -56,9 +56,18 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" adversarial-review "$ARG
   its result.
 - If the call times out anyway, do not re-run the review. Tell the user to check `/grok:status` and
   read the stored output with `/grok:result` — the finished run is already recorded.
-- Return the command stdout verbatim, exactly as-is.
-- Do not paraphrase, summarize, or add commentary before or after it.
-- Do not fix any issues mentioned in the review output.
+- Do not treat that call's own output as the report, and do not quote it. `Bash` hands you the run's
+  stdout and stderr merged into a single result, so it opens with the companion's progress lines
+  (`[grok] Tool: ...`, dozens of them) and any Node warnings, and where the report actually begins is
+  ambiguous.
+- Read the stored report instead, exactly as the background flow does:
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
+```
+- With no job id it resolves the most recent finished job for this session — foreground runs are
+  recorded the same way background ones are, so this is the review you just ran. That output is the
+  rendered report only, with no progress lines mixed in.
+- Then follow "Returning the report" below.
 
 Background flow:
 - Launch the review with `Bash` in the background:
@@ -83,7 +92,16 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
 ```
 - With no job id it resolves the most recent finished job for this session, which is the run you
   launched. That output is the rendered report only, with no progress lines mixed in.
-- Return that stdout verbatim, exactly as-is. Do not paraphrase, summarize, or add commentary before
-  or after it, and do not fix any issues mentioned in the review output.
+- Then follow "Returning the report" below.
 - If the command reports that the job is still running, do not re-run the review. Tell the user to
   check `/grok:status`.
+
+Returning the report (both flows):
+- The user cannot see command output. Nothing the `result` call printed is on their screen, so the
+  report reaches them only through the text you write in your own reply.
+- Write the whole thing out in that reply, from the first line of that stdout to the last.
+- Never answer with a pointer to it ("the review result is above", "see the output"), with a count of
+  findings, or with a summary. That leaves the user with nothing.
+- Reproduce it verbatim: do not paraphrase, translate, reorder, shorten, or wrap it in extra
+  formatting, and add no commentary before or after it.
+- Do not fix any issues mentioned in the review output.
