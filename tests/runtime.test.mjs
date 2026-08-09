@@ -105,14 +105,30 @@ ${result.stderr}`);
 });
 
 test("review joins streamed thought chunks into readable sentences", () => {
+  // 思考ストリームは診断目的でパース失敗時にだけ描画されるので、失敗経路で確認する。
   const { repo, env } = setupWorkspace({
-    replies: [{ text: REVIEW_JSON, thoughts: ["Check", "ing ", "the ", "diff ", "care", "fully."] }]
+    replies: [
+      { text: "not json at all", thoughts: ["Check", "ing ", "the ", "diff ", "care", "fully."] },
+      { text: "still not json" }
+    ]
   });
 
   const result = companion(["review", "--wait"], { repo, env });
   assert.match(result.stdout, /Checking the diff carefully\./);
   // 断片が 1 行ずつに分解されていないこと。
   assert.doesNotMatch(result.stdout, /^- Check$/m);
+});
+
+test("review omits the thought stream when the structured result parsed", () => {
+  // 思考ストリームは応答言語指定が効かず英語のまま出るので、成功時は出さない。
+  const { repo, env } = setupWorkspace({
+    replies: [{ text: REVIEW_JSON, thoughts: ["Let me dig deeper into the diff."] }]
+  });
+
+  const result = companion(["review", "--wait"], { repo, env });
+  assert.match(result.stdout, /Verdict: needs-attention/);
+  assert.doesNotMatch(result.stdout, /^Reasoning:$/m);
+  assert.doesNotMatch(result.stdout, /Let me dig deeper/);
 });
 
 test("review asks Grok to re-emit when the first reply is not valid JSON", () => {

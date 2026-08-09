@@ -172,6 +172,15 @@ function pushJobDetails(lines, job, options = {}) {
   }
 }
 
+/**
+ * Grok の思考ストリーム（ACP の agent_thought_chunk）を出す。
+ *
+ * これはモデルの内部独白であり、プロンプトの応答言語指定が効かないため
+ * 応答が日本語でもここだけ英語で出る。内容も「次はどこを読むか」「〜しようか？」
+ * といった作業中の断片で、成果物としての価値がない。
+ * したがって出すのは、最終メッセージが構造化結果として読めず、
+ * 何が起きたかの手がかりが他に無い失敗経路だけに限る。
+ */
 function appendReasoningSection(lines, reasoningSummary) {
   if (!Array.isArray(reasoningSummary) || reasoningSummary.length === 0) {
     return;
@@ -313,8 +322,6 @@ export function renderReviewResult(parsedResult, meta) {
     }
   }
 
-  appendReasoningSection(lines, meta.reasoningSummary);
-
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
@@ -328,8 +335,10 @@ export function renderNativeReviewResult(result, meta) {
     ""
   ];
 
+  let hasUsableOutput = false;
   if (stdout) {
     lines.push(stdout);
+    hasUsableOutput = true;
   } else if (result.status === 0) {
     lines.push("Grok review completed without any stdout output.");
   } else {
@@ -340,7 +349,9 @@ export function renderNativeReviewResult(result, meta) {
     lines.push("", "stderr:", "", "```text", stderr, "```");
   }
 
-  appendReasoningSection(lines, meta.reasoningSummary);
+  if (!hasUsableOutput) {
+    appendReasoningSection(lines, meta.reasoningSummary);
+  }
 
   return `${lines.join("\n").trimEnd()}\n`;
 }
