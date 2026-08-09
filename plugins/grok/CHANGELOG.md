@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.4
+
+- Stopped rendering Grok's internal thought stream (the `Reasoning:` section) in
+  `/grok:review`, `/grok:audit`, and `/grok:adversarial-review` output once the structured
+  result parsed successfully. The thought stream is not subject to the response-language
+  instruction, so it always came out in English even when the rest of the report was in the
+  user's language, and it carries no information beyond conversational fragments. It is still
+  shown when the structured result fails to parse, since it is the only diagnostic trail left
+  in that case.
+
 ## 1.0.3
 
 - Fixed `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, and `/grok:x` still returning
