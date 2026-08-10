@@ -46,7 +46,7 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
 }
 
 export async function sendBrokerShutdown(endpoint, timeoutMs = BROKER_SHUTDOWN_TIMEOUT_MS) {
-  await new Promise((resolve) => {
+  await /** @type {Promise<void>} */ (new Promise((resolve) => {
     const socket = connectToEndpoint(endpoint);
     socket.setEncoding("utf8");
 
@@ -71,7 +71,7 @@ export async function sendBrokerShutdown(endpoint, timeoutMs = BROKER_SHUTDOWN_T
     socket.on("data", finish);
     socket.on("error", finish);
     socket.on("close", finish);
-  });
+  }));
 }
 
 export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile, env = process.env }) {
