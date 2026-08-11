@@ -177,7 +177,9 @@ set of eyes on it."
 /grok:rescue --model latest --effort high
 ```
 
-By default the run is read-only. Pass `--write` when you want Grok to change files.
+Unlike the review commands, `/grok:rescue` runs write-capable by default, so Grok can edit files
+while it works. Say so in the request when you only want diagnosis — "read-only", "just
+investigate", "don't change anything" — and the run stays read-only.
 
 Model aliases: `fast`, `reasoning`, `multi`, `build`, `latest`. Anything else is passed through as
 a model ID, so `--model grok-4.5` works too. `--effort` accepts `low`, `medium`, or `high`.
