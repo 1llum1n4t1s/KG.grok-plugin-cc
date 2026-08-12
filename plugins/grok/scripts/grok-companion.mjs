@@ -639,9 +639,9 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
-function spawnDetachedTaskWorker(cwd, jobId) {
+function spawnDetachedWorker(cwd, jobId, subcommand) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "grok-companion.mjs");
-  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
+  const child = spawn(process.execPath, [scriptPath, subcommand, "--cwd", cwd, "--job-id", jobId], {
     cwd,
     env: process.env,
     detached: true,
@@ -652,21 +652,24 @@ function spawnDetachedTaskWorker(cwd, jobId) {
   return child;
 }
 
-function enqueueBackgroundTask(cwd, job, request) {
+function enqueueBackgroundJob(cwd, job, request, workerSubcommand) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: null,
     logFile,
     request
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
+
+  // ジョブ定義を先に保存し、起動直後の worker が未作成ファイルを読む競合を避ける。
+  // 起動後は親から再保存しない。高速な worker の完了状態を queued へ巻き戻さないため。
+  spawnDetachedWorker(cwd, job.id, workerSubcommand);
 
   return {
     payload: {
@@ -711,17 +714,30 @@ async function handleReviewCommand(argv, config) {
     jobClass: "review",
     summary: metadata.summary
   });
+
+  const request = {
+    cwd,
+    base: options.base,
+    scope,
+    model: options.model,
+    language: options.language,
+    focusText,
+    reviewName: config.reviewName
+  };
+
+  if (options.background) {
+    ensureGrokAvailable(cwd);
+    ensureGitRepository(cwd);
+    const { payload } = enqueueBackgroundJob(cwd, job, request, "review-worker");
+    outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
+    return;
+  }
+
   await runForegroundCommand(
     job,
     (progress) =>
       executeReviewRun({
-        cwd,
-        base: options.base,
-        scope,
-        model: options.model,
-        language: options.language,
-        focusText,
-        reviewName: config.reviewName,
+        ...request,
         onProgress: progress
       }),
     { json: options.json }
@@ -778,7 +794,7 @@ async function handleTask(argv) {
       resumeLast,
       jobId: job.id
     });
-    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    const { payload } = enqueueBackgroundJob(cwd, job, request, "task-worker");
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
     return;
   }
@@ -801,13 +817,13 @@ async function handleTask(argv) {
   );
 }
 
-async function handleTaskWorker(argv) {
+async function handleStoredJobWorker(argv, { expectedJobClass, execute }) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "job-id"]
   });
 
   if (!options["job-id"]) {
-    throw new Error("Missing required --job-id for task-worker.");
+    throw new Error(`Missing required --job-id for ${expectedJobClass}-worker.`);
   }
 
   const cwd = resolveCommandCwd(options);
@@ -819,7 +835,12 @@ async function handleTaskWorker(argv) {
 
   const request = storedJob.request;
   if (!request || typeof request !== "object") {
-    throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
+    throw new Error(`Stored job ${options["job-id"]} is missing its ${expectedJobClass} request payload.`);
+  }
+  if (storedJob.jobClass !== expectedJobClass) {
+    throw new Error(
+      `Stored job ${options["job-id"]} has class ${storedJob.jobClass ?? "<missing>"}, expected ${expectedJobClass}.`
+    );
   }
 
   const { logFile, progress } = createTrackedProgress(
@@ -838,12 +859,26 @@ async function handleTaskWorker(argv) {
       logFile
     },
     () =>
-      executeTaskRun({
+      execute({
         ...request,
         onProgress: progress
       }),
     { logFile }
   );
+}
+
+async function handleTaskWorker(argv) {
+  return handleStoredJobWorker(argv, {
+    expectedJobClass: "task",
+    execute: executeTaskRun
+  });
+}
+
+async function handleReviewWorker(argv) {
+  return handleStoredJobWorker(argv, {
+    expectedJobClass: "review",
+    execute: executeReviewRun
+  });
 }
 
 async function handleStatus(argv) {
@@ -1023,6 +1058,9 @@ async function main() {
       break;
     case "task-worker":
       await handleTaskWorker(argv);
+      break;
+    case "review-worker":
+      await handleReviewWorker(argv);
       break;
     case "status":
       await handleStatus(argv);

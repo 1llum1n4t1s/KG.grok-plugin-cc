@@ -258,6 +258,29 @@ ${result.stderr}`);
   assert.doesNotMatch(prompt, /export const a = 2;/);
 });
 
+test("audit can detach through the companion without a host-specific background API", () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
+
+  const launched = companion(["audit", "--background", "--json", "focus on auth"], { repo, env });
+  assert.equal(launched.status, 0, launched.stderr);
+  const queued = JSON.parse(launched.stdout);
+  assert.equal(queued.status, "queued");
+  assert.match(queued.jobId, /^review-/);
+
+  const waited = companion(
+    ["status", queued.jobId, "--wait", "--timeout-ms", "10000", "--json"],
+    { repo, env }
+  );
+  assert.equal(waited.status, 0, waited.stderr);
+  const snapshot = JSON.parse(waited.stdout);
+  assert.equal(snapshot.job.status, "completed");
+  assert.equal(snapshot.job.kind, "audit");
+
+  const prompt = fake.readState().prompts[0];
+  assert.match(prompt, /full-repository audit/i);
+  assert.match(prompt, /focus on auth/);
+});
+
 test("status tracks a finished review as completed, not failed", () => {
   const { repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
 
