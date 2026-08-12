@@ -21,4 +21,3 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
 - For a background launch, return the launch output and job ID, then stop without polling.
 - For a foreground run, reproduce the companion's final stdout verbatim. Do not summarize it or
   continue the implementation yourself.
-

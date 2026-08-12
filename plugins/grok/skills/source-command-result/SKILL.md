@@ -14,4 +14,3 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then run:
   follow-up commands. Do not summarize or truncate it.
 - If the job is still running, direct the user to `grok:source-command-status`; do not start a
   replacement job.
-

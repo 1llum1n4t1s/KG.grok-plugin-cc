@@ -13,4 +13,3 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then run:
 - If no ID is supplied, let the companion select the latest active job.
 - Reproduce the cancellation output verbatim.
 - Do not cancel any job unless the user explicitly asked to stop it.
-

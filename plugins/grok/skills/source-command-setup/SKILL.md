@@ -15,4 +15,3 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then run:
 - If `grok agent stdio` is unavailable, tell the user to run `grok update`.
 - If authentication is missing, preserve the helper's `grok login` and `XAI_API_KEY` guidance.
 - Do not install or update Grok Build automatically.
-

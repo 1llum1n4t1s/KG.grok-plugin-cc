@@ -18,4 +18,3 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
   and reproduce that stored report verbatim, without commentary before or after it.
 - If a foreground call times out, do not rerun it; direct the user to `grok:source-command-status`
   and `grok:source-command-result`.
-

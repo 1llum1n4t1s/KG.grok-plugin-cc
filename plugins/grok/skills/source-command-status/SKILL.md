@@ -13,4 +13,3 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then run:
 - Job IDs may contain only letters, digits, `.`, `_`, and `-`.
 - Without a job ID, present the command output as one compact Markdown table.
 - With a job ID, reproduce the full status output without summarizing it.
-
