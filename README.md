@@ -1,15 +1,21 @@
-# Grok plugin for Claude Code
+# Grok plugin for Claude Code and Codex
 
-Use Grok Build from inside Claude Code for code reviews or to delegate tasks.
+Use Grok Build from inside Claude Code or Codex for code reviews, repository audits, X searches,
+or delegated tasks.
 
-This plugin is for Claude Code users who already have Grok Build installed and want to reach it
-from the workflow they are already in.
+This plugin is for Claude Code and Codex users who already have Grok Build installed and want to
+reach it from the workflow they are already in.
 
 It is a fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), retargeted
 from the OpenAI Codex CLI to xAI's Grok Build CLI. See [NOTICE](./NOTICE) for attribution and a
 summary of what changed.
 
 ## What You Get
+
+The examples below use Claude Code's `/grok:<name>` slash commands. In Codex, open `/skills` and
+choose the matching `grok:source-command-<name>` skill, or ask Codex to use it by name. The explicit
+`source-command-` prefix prevents Claude's slash commands from colliding with Codex skills. Both
+hosts route through the same companion runtime and job store.
 
 - `/grok:review` for a read-only Grok review of your local git state
 - `/grok:adversarial-review` for a deliberately skeptical ship/no-ship review
@@ -42,6 +48,8 @@ subcommand. `/grok:setup` tells you if yours is too old.
 
 ## Install
 
+### Claude Code
+
 Add the marketplace in Claude Code:
 
 ```bash
@@ -53,6 +61,19 @@ Install the plugin:
 ```bash
 /plugin install grok@kagayoi-grok
 ```
+
+### Codex
+
+Add the same marketplace and install the plugin from a terminal:
+
+```bash
+codex plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc
+codex plugin add grok@kagayoi-grok
+```
+
+Start a new Codex task after installation so its skill catalog includes the plugin. Open `/skills`
+and select `grok:source-command-setup` to verify Grok Build and authentication. Codex may also ask
+you to trust the plugin's lifecycle hooks the first time it loads them.
 
 Reload plugins:
 
@@ -79,7 +100,7 @@ Worth knowing before you install, because this plugin does more than add prompts
   first and can block until it finishes. Turn it back off with
   `/grok:setup --disable-review-gate`.
 
-Then run:
+Then run `/grok:setup` in Claude Code, or select `grok:source-command-setup` from `/skills` in Codex:
 
 ```bash
 /grok:setup

@@ -1,0 +1,38 @@
+{
+  "name": "grok",
+  "version": "1.0.4",
+  "description": "Use Grok Build from Claude Code or Codex to review code, audit repositories, search X, or delegate tasks.",
+  "author": {
+    "name": "Kagayoi",
+    "url": "https://github.com/1llum1n4t1s"
+  },
+  "homepage": "https://github.com/1llum1n4t1s/KG.grok-plugin-cc#readme",
+  "repository": "https://github.com/1llum1n4t1s/KG.grok-plugin-cc",
+  "license": "Apache-2.0",
+  "keywords": [
+    "grok",
+    "xai",
+    "code-review",
+    "audit",
+    "delegation",
+    "second-opinion"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Grok Build Companion",
+    "shortDescription": "Run Grok reviews, audits, searches, and delegated tasks",
+    "longDescription": "Use the locally installed Grok Build CLI from Codex for read-only code reviews, full-repository audits, X searches, and explicitly delegated investigation or implementation work.",
+    "developerName": "Kagayoi",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/1llum1n4t1s/KG.grok-plugin-cc",
+    "defaultPrompt": [
+      "Ask Grok to audit this repository.",
+      "Ask Grok to review my current changes.",
+      "Ask Grok for a second opinion on this bug."
+    ]
+  }
+}

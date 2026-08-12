@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Grok plugin for Claude Code — Claude Code から Grok Build を呼ぶプラグイン</title>
-<meta name="description" content="Claude Code の中から xAI の Grok Build を呼び出すプラグイン。/grok:review で読み取り専用のコードレビュー、/grok:audit でコードベース全体の監査、/grok:rescue で行き詰まった問題の委譲、/grok:x で X（Twitter）投稿の検索。Agent Client Protocol で Grok がリポジトリを直接読みます。A Claude Code plugin that delegates code review and stuck problems to xAI's Grok Build." />
-<meta name="keywords" content="Grok, Claude Code, plugin, xAI, Grok Build, code review, ACP, Agent Client Protocol, コードレビュー, プラグイン, grok:review, grok:rescue, grok:x, X search, Twitter 検索, x_keyword_search" />
+<title>Grok plugin for Claude Code and Codex — Grok Build を呼ぶプラグイン</title>
+<meta name="description" content="Claude Code または Codex から xAI の Grok Build を呼び出すプラグイン。読み取り専用のコードレビュー、コードベース全体の監査、行き詰まった問題の委譲、X（Twitter）投稿の検索に対応します。Agent Client Protocol で Grok がリポジトリを直接読みます。A Claude Code and Codex plugin that delegates reviews and stuck problems to xAI's Grok Build." />
+<meta name="keywords" content="Grok, Claude Code, Codex, plugin, xAI, Grok Build, code review, ACP, Agent Client Protocol, コードレビュー, プラグイン, grok:review, grok:rescue, grok:x, X search, Twitter 検索, x_keyword_search" />
 <meta name="author" content="ゆろち" />
 <meta name="robots" content="index, follow" />
 <meta name="theme-color" content="#0a0a0c" />
@@ -13,17 +13,17 @@
 
 <!-- Open Graph -->
 <meta property="og:type" content="website" />
-<meta property="og:site_name" content="Grok plugin for Claude Code" />
-<meta property="og:title" content="Grok plugin for Claude Code" />
-<meta property="og:description" content="Claude Code から出ずに Grok へレビューを頼み、詰まった問題を投げる。/grok:review · /grok:audit · /grok:rescue · /grok:x。Ask Grok for a review without leaving Claude Code." />
+<meta property="og:site_name" content="Grok plugin for Claude Code and Codex" />
+<meta property="og:title" content="Grok plugin for Claude Code and Codex" />
+<meta property="og:description" content="Claude Code や Codex から Grok へレビューを頼み、詰まった問題を投げる。Ask Grok for a review without leaving your coding agent." />
 <meta property="og:url" content="https://grok-plugin.kagayoi.com/" />
 <meta property="og:locale" content="ja_JP" />
 <meta property="og:locale:alternate" content="en_US" />
 
 <!-- Twitter -->
 <meta name="twitter:card" content="summary" />
-<meta name="twitter:title" content="Grok plugin for Claude Code" />
-<meta name="twitter:description" content="Claude Code の中から Grok Build を呼ぶ。レビュー・監査・救援・X 検索を委譲するプラグイン。" />
+<meta name="twitter:title" content="Grok plugin for Claude Code and Codex" />
+<meta name="twitter:description" content="Claude Code や Codex から Grok Build を呼ぶ。レビュー・監査・救援・X 検索を委譲するプラグイン。" />
 
 <!-- Inline SVG favicon: a terminal caret handing off to a spark (Claude → Grok) -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0c'/%3E%3Cpath d='M7 11l4 4-4 4' stroke='%23d97757' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Cpath d='M15 21h10' stroke='%23e9e9ee' stroke-width='2.2' stroke-linecap='round'/%3E%3Cpath d='M21 6l1.3 3.2L25.5 10.5 22.3 11.8 21 15l-1.3-3.2L16.5 10.5l3.2-1.3z' fill='%23e9e9ee'/%3E%3C/svg%3E" />
@@ -441,7 +441,7 @@
         <path d="M15 21h10" stroke="#e9e9ee" stroke-width="2.2" stroke-linecap="round"/>
         <path d="M21 6l1.3 3.2L25.5 10.5 22.3 11.8 21 15l-1.3-3.2L16.5 10.5l3.2-1.3z" fill="#e9e9ee"/>
       </svg>
-      <span><b>Grok plugin</b><span class="sub">for Claude Code</span></span>
+      <span><b>Grok plugin</b><span class="sub">for Claude Code + Codex</span></span>
     </a>
     <nav class="nav-links" aria-label="Primary">
       <a class="nav-anchor" href="#commands"><span data-ja>コマンド</span><span data-en>Commands</span></a>
@@ -467,17 +467,17 @@
     <div class="wrap hero-grid">
       <div class="hero-copy">
         <div class="badge-row reveal" style="--d:60ms">
-          <span class="badge"><span class="dot"></span>Claude Code plugin</span>
+          <span class="badge"><span class="dot"></span>Claude Code + Codex plugin</span>
           <span class="badge">xAI Grok Build</span>
           <span class="badge">Node.js 18.18+</span>
           <span class="badge">Apache-2.0</span>
         </div>
 
-        <h1 class="title reveal" id="hero-title" style="--d:120ms"><span class="gradtext">Grok, inside<br>Claude Code.</span></h1>
-        <p class="title-sub reveal" style="--d:180ms"><span data-ja>グロック プラグイン</span><span data-en>A Claude Code plugin for Grok Build</span></p>
+        <h1 class="title reveal" id="hero-title" style="--d:120ms"><span class="gradtext">Grok, inside<br>your coding agent.</span></h1>
+        <p class="title-sub reveal" style="--d:180ms"><span data-ja>Claude Code・Codex 対応</span><span data-en>A Claude Code and Codex plugin for Grok Build</span></p>
 
         <p class="tagline reveal" style="--d:240ms"><span data-ja lang="ja">エディタから出ずに、Grok へ渡す。</span><span data-en>Hand it to Grok without leaving your editor.</span></p>
-        <p class="tagline-en reveal" style="--d:300ms"><span data-ja lang="ja">いま書いた差分のレビュー、コードベース全体の監査、行き詰まった問題の救援 —— スラッシュコマンド 1 行で Grok Build に任せて、答えをそのまま Claude Code の会話へ戻します。すでに入っている Grok Build と、そのサインインをそのまま使います。</span><span data-en>Review the diff you just wrote, audit the whole codebase, or hand off a problem you're stuck on — one slash command delegates it to Grok Build and brings the answer straight back into your Claude Code session. It uses the Grok Build you already have, signed in the way you already are.</span></p>
+        <p class="tagline-en reveal" style="--d:300ms"><span data-ja lang="ja">いま書いた差分のレビュー、コードベース全体の監査、行き詰まった問題の救援 —— Claude Code のスラッシュコマンドまたは Codex の Skill で Grok Build に任せ、答えを会話へ戻します。すでに入っている Grok Build と、そのサインインをそのまま使います。</span><span data-en>Review the diff you just wrote, audit the whole codebase, or hand off a problem you're stuck on — use a Claude Code slash command or a Codex skill to delegate it to Grok Build and bring the answer back into your conversation. It uses the Grok Build you already have, signed in the way you already are.</span></p>
 
         <div class="cta-row reveal" style="--d:360ms">
           <a class="btn btn-primary" href="#install">
@@ -691,8 +691,8 @@
           <div class="v">18.18+<small><span data-ja>プラグイン本体の実行に使用</span><span data-en>used to run the plugin itself</span></small></div>
         </div>
         <div class="req reveal" style="--d:190ms">
-          <div class="k">Claude Code</div>
-          <div class="v"><span data-ja>プラグイン対応版</span><span data-en>Plugin-capable</span><small><span data-ja><code>/plugin marketplace</code> が使えること</span><span data-en>with <code>/plugin marketplace</code> available</span></small></div>
+          <div class="k">Claude Code / Codex</div>
+          <div class="v"><span data-ja>プラグイン対応版</span><span data-en>Plugin-capable</span><small><span data-ja>いずれかのホストでプラグインを追加できること</span><span data-en>with plugin installation available in either host</span></small></div>
         </div>
       </div>
 
@@ -742,10 +742,13 @@
             <span class="n">3</span>
             <div class="body">
               <b><span data-ja>プラグインを入れる</span><span data-en>Install the plugin</span></b>
-              <span class="desc"><span data-ja lang="ja">Claude Code の中で、マーケットプレイスを追加してインストールし、再読み込みします。</span><span data-en>Inside Claude Code, add the marketplace, install, then reload.</span></span>
+              <span class="desc"><span data-ja lang="ja">Claude Code では次のスラッシュコマンドで追加します。</span><span data-en>In Claude Code, add and install it with these slash commands:</span></span>
               <div class="cmd-block"><code><span class="p">/</span>plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc</code><button class="copy" type="button" data-copy="/plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc">COPY</button></div>
               <div class="cmd-block"><code><span class="p">/</span>plugin install grok@kagayoi-grok</code><button class="copy" type="button" data-copy="/plugin install grok@kagayoi-grok">COPY</button></div>
               <div class="cmd-block"><code><span class="p">/</span>reload-plugins</code><button class="copy" type="button" data-copy="/reload-plugins">COPY</button></div>
+              <span class="desc"><span data-ja lang="ja">Codex ではターミナルから追加し、新しいタスクを開始します。</span><span data-en>In Codex, run these commands in a terminal, then start a new task:</span></span>
+              <div class="cmd-block"><code>codex plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc</code><button class="copy" type="button" data-copy="codex plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc">COPY</button></div>
+              <div class="cmd-block"><code>codex plugin add grok@kagayoi-grok</code><button class="copy" type="button" data-copy="codex plugin add grok@kagayoi-grok">COPY</button></div>
             </div>
           </div>
 
@@ -754,7 +757,8 @@
             <div class="body">
               <b><span data-ja>配線を確認する</span><span data-en>Check the wiring</span></b>
               <span class="desc"><span data-ja lang="ja">Grok Build の有無、<code>grok agent stdio</code> の可否、サインイン状態を報告します。何かをインストールすることはありません。</span><span data-en>It reports whether Grok Build is installed, whether <code>grok agent stdio</code> is available, and whether you're signed in. It doesn't install anything for you.</span></span>
-              <div class="cmd-block"><code><span class="p">/</span>grok:setup</code><button class="copy" type="button" data-copy="/grok:setup">COPY</button></div>
+              <div class="cmd-block"><code><span class="p">/</span>grok:setup <span class="dim"># Claude Code</span></code><button class="copy" type="button" data-copy="/grok:setup">COPY</button></div>
+              <div class="cmd-block"><code>grok:source-command-setup <span class="dim"># Codex /skills</span></code><button class="copy" type="button" data-copy="grok:source-command-setup">COPY</button></div>
               <span class="desc"><span data-ja lang="ja">あとは出荷前に 1 行。</span><span data-en>Then, before you ship:</span></span>
               <div class="cmd-block"><code><span class="p">/</span>grok:review --wait</code><button class="copy" type="button" data-copy="/grok:review --wait">COPY</button></div>
             </div>
@@ -827,9 +831,9 @@
             <path d="M15 21h10" stroke="#e9e9ee" stroke-width="2.2" stroke-linecap="round"/>
             <path d="M21 6l1.3 3.2L25.5 10.5 22.3 11.8 21 15l-1.3-3.2L16.5 10.5l3.2-1.3z" fill="#e9e9ee"/>
           </svg>
-          <span><b>Grok plugin</b><span class="sub">for Claude Code</span></span>
+          <span><b>Grok plugin</b><span class="sub">for Claude Code + Codex</span></span>
         </a>
-        <p><span data-ja lang="ja">Claude Code の中から xAI の Grok Build を呼び出すプラグイン。差分レビュー、コードベース監査、行き詰まった問題の委譲を、Agent Client Protocol 経由で任せられます。</span><span data-en>A Claude Code plugin that reaches xAI's Grok Build for diff reviews, codebase audits, and handing off problems you're stuck on — over the Agent Client Protocol.</span></p>
+        <p><span data-ja lang="ja">Claude Code や Codex から xAI の Grok Build を呼び出すプラグイン。差分レビュー、コードベース監査、行き詰まった問題の委譲を、Agent Client Protocol 経由で任せられます。</span><span data-en>A Claude Code and Codex plugin that reaches xAI's Grok Build for diff reviews, codebase audits, and handing off problems you're stuck on — over the Agent Client Protocol.</span></p>
       </div>
 
       <nav class="foot-col" aria-label="Product">

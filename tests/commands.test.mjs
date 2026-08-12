@@ -21,18 +21,39 @@ function listCommands() {
     .sort();
 }
 
+const PUBLIC_WORKFLOWS = [
+  "adversarial-review",
+  "audit",
+  "cancel",
+  "rescue",
+  "result",
+  "review",
+  "setup",
+  "status",
+  "x"
+];
+
 test("the plugin exposes exactly the supported commands", () => {
-  assert.deepEqual(listCommands(), [
-    "adversarial-review",
-    "audit",
-    "cancel",
-    "rescue",
-    "result",
-    "review",
-    "setup",
-    "status",
-    "x"
-  ]);
+  assert.deepEqual(listCommands(), PUBLIC_WORKFLOWS);
+});
+
+test("Codex exposes the same workflows as native skills", () => {
+  const nativeSkillNames = PUBLIC_WORKFLOWS.map((name) => `source-command-${name}`);
+
+  for (const name of nativeSkillNames) {
+    const source = read(`skills/${name}/SKILL.md`);
+    assert.match(source, /^---\r?\n/, `${name} is missing skill frontmatter`);
+    assert.match(source, new RegExp(`^name: ${name}$`, "m"), `${name} has the wrong skill name`);
+    assert.match(source, /^description: .+$/m, `${name} is missing a skill description`);
+    assert.match(source, /references\/codex-runtime\.md/, `${name} does not load the shared runtime contract`);
+    assert.match(source, /grok-companion\.mjs/, `${name} does not call the companion script`);
+    assert.doesNotMatch(source, /AskUserQuestion|run_in_background|CLAUDE_PLUGIN_ROOT/);
+  }
+
+  const audit = read("skills/source-command-audit/SKILL.md");
+  assert.match(audit, /subcommand.*`audit`|`audit`\s*subcommand/i);
+  assert.match(audit, /--background/);
+  assert.match(audit, /review-only/i);
 });
 
 test("transfer is gone because Grok has no Claude session import", () => {
@@ -150,10 +171,14 @@ test("hooks keep session lifecycle cleanup and stop gating wired", () => {
 
 test("plugin and marketplace manifests agree on name and version", () => {
   const plugin = JSON.parse(read(".claude-plugin/plugin.json"));
+  const codexPlugin = JSON.parse(read(".codex-plugin/plugin.json"));
   const marketplace = JSON.parse(fs.readFileSync(path.join(ROOT, ".claude-plugin", "marketplace.json"), "utf8"));
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
 
   assert.equal(plugin.name, "grok");
+  assert.equal(codexPlugin.name, plugin.name);
+  assert.equal(codexPlugin.version, plugin.version);
+  assert.equal(codexPlugin.skills, "./skills/");
   assert.equal(marketplace.plugins[0].name, "grok");
   assert.equal(marketplace.plugins[0].source, "./plugins/grok");
   assert.equal(marketplace.plugins[0].version, plugin.version);
@@ -164,13 +189,14 @@ test("plugin and marketplace manifests agree on name and version", () => {
 // コミュニティマーケットプレイスに出す以上、掲載カードに出る情報は
 // 欠けたままリリースしたくない。bump-version は version しか触らないので、
 // 他のフィールドが落ちても気づけるようにここで固定する。
-test("both manifests carry the metadata a marketplace listing needs", () => {
+test("all manifests carry the metadata a marketplace listing needs", () => {
   const plugin = JSON.parse(read(".claude-plugin/plugin.json"));
+  const codexPlugin = JSON.parse(read(".codex-plugin/plugin.json"));
   const marketplace = JSON.parse(fs.readFileSync(path.join(ROOT, ".claude-plugin", "marketplace.json"), "utf8"));
   const entry = marketplace.plugins[0];
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
 
-  for (const manifest of [plugin, entry]) {
+  for (const manifest of [plugin, codexPlugin, entry]) {
     assert.equal(manifest.license, "Apache-2.0");
     assert.match(manifest.homepage, /^https:\/\/github\.com\//);
     assert.match(manifest.repository, /^https:\/\/github\.com\//);
@@ -189,6 +215,9 @@ test("both manifests carry the metadata a marketplace listing needs", () => {
   // 技術名 `grok` は xAI のブランドそのものなので、掲載カードでは
   // 第三者クライアントと分かる名前を出す。
   assert.equal(entry.displayName, "Grok Build Companion");
+  assert.equal(codexPlugin.interface.displayName, entry.displayName);
+  assert.equal(codexPlugin.interface.developerName, "Kagayoi");
+  assert.ok(codexPlugin.interface.defaultPrompt.length <= 3);
 });
 
 test("the marketplace name does not collide with the reserved Anthropic names", () => {
@@ -240,6 +269,9 @@ test("the README documents every exposed command", () => {
   // 禁じるのは、この plugin では動かない `/codex:` コマンドの案内。
   assert.doesNotMatch(readme, /\/codex:/);
   assert.match(readme, /openai\/codex-plugin-cc/, "README should credit the upstream project");
+  assert.match(readme, /Claude Code and Codex/);
+  assert.match(readme, /codex plugin add grok@kagayoi-grok/);
+  assert.match(readme, /\/skills/);
 });
 
 test("自由記述より後ろのダッシュ付きトークンはフラグとして解釈しない", () => {
