@@ -203,7 +203,7 @@ while it works. Say so in the request when you only want diagnosis — "read-onl
 investigate", "don't change anything" — and the run stays read-only.
 
 Model aliases: `fast`, `reasoning`, `multi`, `build`, `latest`. Anything else is passed through as
-a model ID, so `--model grok-4.5` works too. `--effort` accepts `low`, `medium`, or `high`.
+a model ID, so `--model grok-4.6` works too. `--effort` accepts `low`, `medium`, or `high`.
 
 ### `/grok:x`
 
@@ -302,7 +302,7 @@ starting its own Grok process.
 
 ### Choosing a model
 
-The plugin asks for `grok-4.5` by default. Override it for a single run with `--model`, or for
+The plugin asks for `grok-4.6` by default. Override it for a single run with `--model`, or for
 every run by setting `GROK_PLUGIN_MODEL`.
 
 This matters more than it looks: when you authenticate with `XAI_API_KEY`, Grok's own default for a

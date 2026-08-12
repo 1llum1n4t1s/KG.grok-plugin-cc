@@ -65,7 +65,7 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
-// grok-4.5 の initialize が申告する reasoningEfforts（実測: high が既定）。
+// grok-4.6 の initialize が申告する reasoningEfforts（実測: high が既定）。
 const VALID_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
 // 言語タグの形。`ja`, `en-US`, `zh-Hans-CN` などを想定した緩めの BCP 47。
 const BCP47_PATTERN = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,4}$/;
@@ -75,7 +75,7 @@ const MODEL_ALIASES = new Map([
   ["reasoning", "grok-4.20-0309-reasoning"],
   ["multi", "grok-4.20-multi-agent-0309"],
   ["build", "grok-build-0.1"],
-  ["latest", "grok-4.5"]
+  ["latest", "grok-4.6"]
 ]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 

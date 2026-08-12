@@ -75,7 +75,7 @@ function handle(message) {
           agentVersion: "9.9.9",
           modelState: {
             currentModelId: scenario.defaultModel ?? "grok-fake-nonreasoning",
-            availableModels: (scenario.availableModels ?? ["grok-fake-nonreasoning", "grok-4.5"]).map((m) => ({ modelId: m, name: m }))
+            availableModels: (scenario.availableModels ?? ["grok-fake-nonreasoning", "grok-4.6", "grok-4.5"]).map((m) => ({ modelId: m, name: m }))
           }
         }
       }});
@@ -92,7 +92,7 @@ function handle(message) {
         sessionId: "fake-session-" + state.sessions,
         models: {
           currentModelId: scenario.defaultModel ?? "grok-fake-nonreasoning",
-          availableModels: (scenario.availableModels ?? ["grok-fake-nonreasoning", "grok-4.5"]).map((m) => ({ modelId: m, name: m }))
+          availableModels: (scenario.availableModels ?? ["grok-fake-nonreasoning", "grok-4.6", "grok-4.5"]).map((m) => ({ modelId: m, name: m }))
         },
         configOptions: scenario.configOptions ?? []
       }});

@@ -46,7 +46,7 @@ const DEFAULT_CONTINUE_PROMPT =
  * 推論なしモデルではレビュー品質が落ちる。明示的に推論可能な最上位を指す。
  * 環境変数 GROK_PLUGIN_MODEL で上書きできる。
  */
-const DEFAULT_REVIEW_MODEL = "grok-4.5";
+const DEFAULT_REVIEW_MODEL = "grok-4.6";
 
 /**
  * ツール名だけで書き込みと判定できるもの。

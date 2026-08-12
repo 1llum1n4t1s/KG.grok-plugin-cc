@@ -84,7 +84,7 @@ ${result.stderr}`);
 
 test("review renders structured findings and asks for the reasoning model", () => {
   const { fake, repo, env } = setupWorkspace({
-    availableModels: ["grok-fake-nonreasoning", "grok-4.5"],
+    availableModels: ["grok-fake-nonreasoning", "grok-4.6"],
     replies: [{ text: REVIEW_JSON, tools: ["read_file"], thoughts: ["Looking", " at", " the", " diff."] }]
   });
 
@@ -101,7 +101,7 @@ ${result.stderr}`);
 
   // API キー認証時の既定は非推論モデルなので、明示的に差し替えていること。
   const state = fake.readState();
-  assert.deepEqual(state.models, ["grok-4.5"]);
+  assert.deepEqual(state.models, ["grok-4.6"]);
 });
 
 test("review joins streamed thought chunks into readable sentences", () => {
@@ -396,6 +396,18 @@ ${result.stdout}
 stderr:
 ${result.stderr}`);
   assert.deepEqual(fake.readState().models, ["grok-4.5"]);
+});
+
+test("task asks for grok-4.6 when the model is omitted", () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+
+  const result = companion(["task", "do a thing"], { repo, env });
+
+  assert.equal(result.status, 0, `stdout:
+${result.stdout}
+stderr:
+${result.stderr}`);
+  assert.deepEqual(fake.readState().models, ["grok-4.6"]);
 });
 
 const THOUGHT_LEVEL_OPTION = {
