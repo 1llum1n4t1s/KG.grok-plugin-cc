@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.5
+
+- Added native Codex plugin support alongside Claude Code. The plugin now ships a Codex manifest
+  and matching skills for review, adversarial review, repository audit, rescue, job status,
+  cancellation, stored results, setup, and X search, all routed through the same companion runtime
+  and job store. The README and landing page now document installation and usage in both hosts.
+- Added detached background execution for review and audit jobs without relying on a host-specific
+  background API. Job state is now persisted before the worker starts, preventing fast workers from
+  racing the parent process or having completed state overwritten as queued.
+
 ## 1.0.4
 
 - Stopped rendering Grok's internal thought stream (the `Reasoning:` section) in
