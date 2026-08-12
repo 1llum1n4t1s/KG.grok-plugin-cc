@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.6
+
+- Updated the explicitly selected default model and the `latest` alias from Grok 4.5 to Grok 4.6,
+  including the documentation and landing page. Explicit model overrides remain supported.
+
 ## 1.0.5
 
 - Added native Codex plugin support alongside Claude Code. The plugin now ships a Codex manifest
