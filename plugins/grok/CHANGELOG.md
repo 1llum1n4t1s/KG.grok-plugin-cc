@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.8
+
+- Hardened read-only reviews against shell-control bypasses, write-capable Git forms, repository
+  path escapes, symlink traversal, and oversized untracked-file context.
+- Made cancellation, job state, process cleanup, shared-broker reuse, and ACP timeouts safe under
+  concurrent sessions. Commands now retrieve the exact job they launched instead of guessing from
+  the most recently finished result.
+- Review, adversarial-review, and audit now start immediately in the host-managed background mode
+  unless `--wait` is explicit. Audits without a focus use a risk-directed deep tracing pass.
+- Raised the minimum runtime to Node.js 22 and improved the landing page's copy feedback,
+  accessibility labels, text contrast, and sticky-header anchor behavior.
+
 ## 1.0.7
 
 - Fixed Codex background execution for review, adversarial review, audit, rescue, and X search.
