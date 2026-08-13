@@ -633,6 +633,7 @@ async function runForegroundCommand(job, runner, options = {}) {
     logFile: options.logFile,
     stderr: !options.json
   });
+  process.stderr.write(`[grok] Job ID: ${job.id}\n`);
   const execution = await runTrackedJob(job, () => runner(progress), { logFile });
   outputResult(options.json ? execution.payload : execution.rendered, options.json);
   process.exitCode = exitCodeForStatus(execution.exitStatus);

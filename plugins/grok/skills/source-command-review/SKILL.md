@@ -10,13 +10,16 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
 
 - Accept `--wait`, `--background`, `--base <ref>`, `--scope auto|working-tree|branch`,
   `--language <bcp47>`, and optional focus text.
-- If neither execution flag is present, add `--background` unless the review is clearly limited to
-  one or two small files; for a clearly tiny review, add `--wait`.
+- If neither execution flag is present, ask the user once to choose between `Run in background` and
+  `Wait for results`. Recommend waiting for a review clearly limited to one or two small files;
+  otherwise recommend background. Do not start the review until the user chooses.
+- Follow the shared Codex-managed background execution contract for the selected mode.
 - Unless supplied, add `--language` for the conversation language before the focus text.
-- Preserve the user's target flags and focus text exactly.
+- Preserve the user's target flags and focus text exactly apart from the execution control removed
+  by the shared contract.
 - Run `node <plugin-root>/scripts/grok-companion.mjs review <arguments>`.
-- For a background launch, return the launch output and job ID, then stop without polling.
-- For `--wait`, allow at least 600 seconds, then run the companion's `result` command and reproduce
-  the stored report verbatim, without commentary before or after it.
+- For foreground mode, allow at least 600 seconds and surface concise progress.
+- After any completed run, run the companion's `result <job-id>` command and reproduce the stored
+  report verbatim, without commentary before or after it.
 - If the call times out, do not rerun it; direct the user to `grok:source-command-status` and
   `grok:source-command-result`.

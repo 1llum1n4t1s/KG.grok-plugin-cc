@@ -9,13 +9,15 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
 `adversarial-review` subcommand. This workflow is review-only: do not fix findings or edit files.
 
 - Accept the same flags as `grok:source-command-review` and preserve any focus text exactly.
-- If neither `--wait` nor `--background` is present, add `--background` unless the review is clearly
-  tiny.
+- If neither `--wait` nor `--background` is present, ask the user once to choose between `Run in
+  background` and `Wait for results`. Recommend waiting for a clearly tiny review; otherwise
+  recommend background. Do not start the review until the user chooses.
+- Follow the shared Codex-managed background execution contract for the selected mode.
 - Unless supplied, add `--language` for the conversation language before the focus text.
 - Do not weaken or supplement the adversarial framing.
 - Run `node <plugin-root>/scripts/grok-companion.mjs adversarial-review <arguments>`.
-- For a background launch, return the launch output and job ID, then stop without polling.
-- For `--wait`, allow at least 600 seconds, then run the companion's `result` command and reproduce
-  the stored report verbatim, without commentary before or after it.
+- For foreground mode, allow at least 600 seconds and surface concise progress.
+- After any completed run, run the companion's `result <job-id>` command and reproduce the stored
+  report verbatim, without commentary before or after it.
 - If the call times out, do not rerun it; direct the user to `grok:source-command-status` and
   `grok:source-command-result`.

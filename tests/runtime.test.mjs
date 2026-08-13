@@ -99,6 +99,14 @@ ${result.stderr}`);
   assert.match(result.stdout, /\[high\] Unvalidated input \(auth\.js:2\)/);
   assert.match(result.stdout, /Parameterize the query\./);
 
+  const jobIdMatch = result.stderr.match(/^\[grok\] Job ID: (review-[a-z0-9-]+)$/m);
+  assert.ok(jobIdMatch, `foreground review did not announce its job ID:\n${result.stderr}`);
+
+  const stored = companion(["result", jobIdMatch[1]], { repo, env });
+  assert.equal(stored.status, 0, `stdout:\n${stored.stdout}\nstderr:\n${stored.stderr}`);
+  assert.match(stored.stdout, /# Grok Review/);
+  assert.match(stored.stdout, /Verdict: needs-attention/);
+
   // API キー認証時の既定は非推論モデルなので、明示的に差し替えていること。
   const state = fake.readState();
   assert.deepEqual(state.models, ["grok-4.6"]);

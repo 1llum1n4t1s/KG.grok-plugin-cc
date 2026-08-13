@@ -11,13 +11,14 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
 - Require a concrete task unless the user explicitly asks to resume the previous Grok task.
 - Preserve explicit `--model` and `--effort` values. Accepted effort values are `low`, `medium`, and
   `high`.
-- Map `--resume` to `--resume-last`; preserve `--fresh`. Strip `--wait` because foreground is the
-  default. Pass `--background` through to the companion.
+- Map `--resume` to `--resume-last` and preserve `--fresh`. Foreground is the default when neither
+  execution control is supplied.
+- Follow the shared Codex-managed background execution contract when `--background` is supplied;
+  use its foreground rules when `--wait` is supplied.
 - Default to `--write`, unless the user asks for review, diagnosis, research, or other read-only work.
 - If neither resume nor fresh is explicit, use `task-resume-candidate --json`: resume only for a
   clear follow-up; otherwise start with `--fresh`.
 - Keep the task in the user's language and pass it as one prompt argument.
 - Run `node <plugin-root>/scripts/grok-companion.mjs task <flags> <prompt>`.
-- For a background launch, return the launch output and job ID, then stop without polling.
-- For a foreground run, reproduce the companion's final stdout verbatim. Do not summarize it or
-  continue the implementation yourself.
+- After any completed run, reproduce the companion's stored final output verbatim. Do not summarize
+  it or continue the implementation yourself.

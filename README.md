@@ -155,6 +155,11 @@ should change; it does not change it.
 Without `--wait` or `--background`, Claude estimates the size of the change and asks which mode
 you want.
 
+In Codex, the review, adversarial-review, and audit skills also ask before choosing an execution
+mode. Rescue and X search remain foreground by default unless `--background` is explicit. Every
+Codex background run stays attached as a Codex-managed process and returns the Codex process ID,
+Grok job ID, and initial progress instead of detaching inside the companion.
+
 ### `/grok:adversarial-review`
 
 Same targeting as `/grok:review`, but Grok is told to argue against shipping and to report the

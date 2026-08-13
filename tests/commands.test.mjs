@@ -56,6 +56,33 @@ test("Codex exposes the same workflows as native skills", () => {
   assert.match(audit, /review-only/i);
 });
 
+test("Codex keeps every supported background workflow visible and managed", () => {
+  const runtime = read("references/codex-runtime.md");
+  assert.match(runtime, /Codex-managed background execution/i);
+  assert.match(runtime, /Do not pass `--background` to the companion/i);
+  assert.match(runtime, /Codex process or cell ID/i);
+  assert.match(runtime, /\[grok\] Job ID: <job-id>/i);
+  assert.match(runtime, /never infer[\s\S]*set difference/i);
+  assert.match(runtime, /status <job-id>/i);
+  assert.match(runtime, /result <job-id>/i);
+  assert.match(runtime, /do not change `source-command-status --wait`/i);
+
+  for (const name of ["review", "adversarial-review", "audit", "rescue", "x"]) {
+    const source = read(`skills/source-command-${name}/SKILL.md`);
+    assert.match(source, /Codex-managed background execution/i, `${name} ignores the managed background contract`);
+    assert.match(source, /After any completed run/i, `${name} does not define background result handling`);
+    assert.doesNotMatch(source, /add `--background`|pass `--background` through/i, `${name} still detaches through the companion`);
+  }
+
+  for (const name of ["review", "adversarial-review", "audit"]) {
+    assert.match(read(`skills/source-command-${name}/SKILL.md`), /ask the user once to choose/i);
+  }
+
+  for (const name of ["rescue", "x"]) {
+    assert.match(read(`skills/source-command-${name}/SKILL.md`), /foreground is the default/i);
+  }
+});
+
 test("transfer is gone because Grok has no Claude session import", () => {
   assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, "commands", "transfer.md")), false);
   assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, "scripts", "lib", "claude-session-transfer.mjs")), false);
