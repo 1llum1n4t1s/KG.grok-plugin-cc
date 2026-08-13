@@ -1,3 +1,7 @@
+[English](#english) | [日本語](#japanese)
+
+<a id="english"></a>
+
 # Grok plugin for Claude Code and Codex
 
 Use Grok Build from inside Claude Code or Codex for code reviews, repository audits, X searches,
@@ -342,3 +346,358 @@ equivalent, so the command was removed rather than faked.
 ## License
 
 Apache-2.0. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+
+---
+
+<a id="japanese"></a>
+
+# Claude Code / Codex 向け Grok プラグイン
+
+Claude Code や Codex の中から Grok Build を使い、コードレビュー、リポジトリ監査、X の検索、
+タスクの委任を行えます。
+
+このプラグインは、Grok Build をすでにインストールしており、普段使っている Claude Code や
+Codex のワークフローからそのまま呼び出したい方を対象としています。
+
+[openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) をフォークし、OpenAI Codex
+CLI 向けの実装を xAI の Grok Build CLI 向けに変更したものです。帰属表示と主な変更点については
+[NOTICE](./NOTICE) を参照してください。
+
+## 主な機能
+
+以下の例では、Claude Code の `/grok:<name>` スラッシュコマンドを使用します。Codex では
+`/skills` を開き、対応する `grok:source-command-<name>` スキルを選択するか、スキル名を指定して
+Codex に実行を依頼してください。明示的な `source-command-` プレフィックスにより、Claude の
+スラッシュコマンドと Codex のスキルが衝突するのを防いでいます。どちらのホストも、同じ
+コンパニオンランタイムとジョブストアを使用します。
+
+- `/grok:review`: ローカルの Git 状態を Grok が読み取り専用でレビュー
+- `/grok:adversarial-review`: 出荷可否を意図的かつ懐疑的にレビュー
+- `/grok:audit`: 現在の差分を無視し、既存コードベース全体を読み取り専用で監査
+- `/grok:rescue`: 問題を Grok に任せ、具体的な回答を取得
+- `/grok:x`: 通常の Web 検索では読み取れない X（Twitter）の投稿を検索
+- `/grok:status`、`/grok:result`、`/grok:cancel`: バックグラウンドジョブを管理
+- `/grok:setup`: 必要な設定が正しく機能しているか確認
+
+## 必要要件
+
+- **Grok Build**: SuperGrok または X Premium+ アカウントでサインインするか、
+  `XAI_API_KEY` を設定してください。使用量は、利用した認証方式のアカウントに計上されます。
+- **Node.js 22 以降**
+
+[x.ai/cli](https://x.ai/cli) から Grok Build をインストールします。
+
+```bash
+irm https://x.ai/cli/install.ps1 | iex
+```
+
+macOS または Linux の場合:
+
+```bash
+curl -fsSL https://x.ai/cli/install.sh | bash
+```
+
+このプラグインは `grok agent stdio` を介して Grok と通信するため、このサブコマンドを提供する
+新しいバージョンの Grok Build が必要です。バージョンが古い場合は `/grok:setup` で確認できます。
+
+## インストール
+
+### Claude Code
+
+Claude Code にマーケットプレイスを追加します。
+
+```bash
+/plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc
+```
+
+プラグインをインストールします。
+
+```bash
+/plugin install grok@kagayoi-grok
+```
+
+### Codex
+
+ターミナルから同じマーケットプレイスを追加し、プラグインをインストールします。
+
+```bash
+codex plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc
+codex plugin add grok@kagayoi-grok
+```
+
+インストール後は、新しい Codex タスクを開始して、プラグインのスキルをスキルカタログへ反映させます。
+`/skills` を開いて `grok:source-command-setup` を選択し、Grok Build と認証を確認してください。
+ライフサイクルフックを初めて読み込むときは、Codex からプラグインを信頼するか確認される場合があります。
+
+プラグインを再読み込みするには、次を実行します。
+
+```bash
+/reload-plugins
+```
+
+### このプラグインがローカル環境で実行する処理
+
+このプラグインはプロンプトを追加するだけではありません。インストール前に次の点を確認してください。
+
+- `grok agent stdio` を子プロセスとして起動し、Agent Client Protocol を介して通信します。
+  Grok Build 自体はこのリポジトリではなく、x.ai から提供されます。
+- 同じリポジトリ内の実行は、小さなブローカーを介して 1 つの Grok プロセスを共有します。
+  このプロセスはコマンド間も常駐します。実行中の処理は `/grok:status` で確認でき、
+  `/grok:cancel` で停止できます。
+- ジョブ記録と Grok の出力は、リポジトリごとに分けられたプラグイン専用のデータディレクトリへ
+  書き込まれます。
+- Grok は回答のためにリポジトリを読み取ります。そのため、Grok が開いたコードは Grok Build の
+  サインイン先アカウントを通じて xAI へ送信されます。それ以外の場所へは送信されず、この
+  プラグイン独自のバックエンドもありません。
+- 終了時のレビューゲートは**既定で無効**です。`/grok:setup --enable-review-gate` で有効にすると、
+  Claude セッションの終了前に新しいレビューが実行され、完了するまで終了がブロックされる場合が
+  あります。`/grok:setup --disable-review-gate` で再び無効にできます。
+
+続いて、Claude Code では `/grok:setup` を実行します。Codex では `/skills` から
+`grok:source-command-setup` を選択します。
+
+```bash
+/grok:setup
+```
+
+`/grok:setup` は、Grok Build がインストール済みか、`grok agent stdio` が利用可能か、
+サインイン済みかを報告します。Grok Build はパッケージレジストリではなく x.ai から提供されるため、
+このコマンド自体は何もインストールしません。
+
+### サインイン
+
+対話形式でサインインする場合:
+
+```bash
+grok login
+```
+
+ヘッドレス環境または従量課金で利用する場合は、[console.x.ai](https://console.x.ai) で取得した
+API キーを設定します。
+
+```bash
+$env:XAI_API_KEY = "xai-..."
+```
+
+API キーはブラウザの認証情報より優先されます。
+
+## 使い方
+
+### `/grok:review`
+
+ローカルの Git 状態を読み取り専用でレビューし、Grok の指摘をそのまま返します。
+
+```bash
+/grok:review
+/grok:review --wait
+/grok:review --background
+/grok:review --base main
+/grok:review --scope working-tree
+/grok:review focus on the retry logic
+```
+
+フラグより後に残ったテキストは、レビューの注目点として Grok に渡されます。
+
+指摘は利用者の言語で返されます。スラッシュコマンドとして実行した場合、Claude は会話の言語を
+`--language <bcp47>` で自動的に渡します。コンパニオンスクリプトを直接呼び出す場合は、
+`--language` を自分で指定してください。指定しなければ、注目点として渡したテキストの言語、
+それも判定できなければ英語が使われます。これは `/grok:adversarial-review` と `/grok:audit` にも
+適用されます。
+
+レビューは読み取り専用です。Grok はファイルを読み、`git diff` や `git log` などの読み取り専用
+コマンドを実行できますが、ディスクへ書き込む操作はプラグインによって拒否されます。Grok は
+変更すべき内容を報告しますが、実際の変更は行いません。
+
+`--wait` も `--background` も指定しない場合、review、adversarial-review、audit は Claude Code と
+Codex のどちらでも、ホストのバックグラウンドモードですぐに開始されます。フォアグラウンドで
+実行するには `--wait` を指定してください。rescue と X 検索は、明示的に `--background` を
+指定しない限りフォアグラウンドで実行されます。Codex のバックグラウンド実行はすべて Codex 管理の
+プロセスとして接続を維持し、コンパニオン内部で切り離す代わりに、Codex プロセス ID、Grok ジョブ
+ID、初期進捗を返します。
+
+### `/grok:adversarial-review`
+
+対象の指定方法は `/grok:review` と同じですが、Grok は出荷に反対する立場から、変更をまだ
+取り込むべきでない最も強い理由を報告します。
+
+```bash
+/grok:adversarial-review
+/grok:adversarial-review --base main
+/grok:adversarial-review focus on the migration path
+```
+
+バランスの取れた要約ではなく、強い反論が欲しい場合に使用します。
+
+### `/grok:audit`
+
+差分ではなく、既存コードベース全体を監査します。現在の変更内容とは無関係に、現状のソースに
+対する Grok の見解が欲しい場合に使用します。
+
+```bash
+/grok:audit
+/grok:audit --background
+/grok:audit focus on the auth module
+```
+
+監査コンテキストには意図的に差分もファイル内容も含めず、ファイル一覧だけを渡します。Grok は
+読み取り専用コマンドを使い、調査対象のファイルを自分で選んで読み取ります。注目点を指定しない場合は、
+アーキテクチャを把握し、最もリスクの高い実行経路を選び、呼び出し元、状態遷移、境界、失敗経路、
+並行処理、テストまで追跡する、リスク指向の詳細監査を実行します。大規模なリポジトリでは、特定の
+サブシステムや観点に詳細監査を絞りたいときに注目点を指定すると効果的です。
+
+`/grok:review` と同じ読み取り専用の保証が適用されます。
+
+### `/grok:rescue`
+
+問題を Grok に渡し、その回答を返します。「行き詰まったので、別の視点で見てほしい」という場合に
+使うコマンドです。
+
+```bash
+/grok:rescue why does the upload retry loop never terminate?
+/grok:rescue --background investigate the flaky auth test
+/grok:rescue --resume
+/grok:rescue --model latest --effort high
+```
+
+レビューコマンドとは異なり、`/grok:rescue` は既定で書き込み可能な状態で実行されるため、Grok は
+作業中にファイルを編集できます。診断だけが必要な場合は、依頼文に `read-only`、`just investigate`、
+`don't change anything` などと明記すると、読み取り専用で実行されます。
+
+モデルの別名は `fast`、`reasoning`、`multi`、`build`、`latest` です。それ以外の値はモデル ID として
+そのまま渡されるため、`--model grok-4.6` のような指定もできます。`--effort` には `low`、`medium`、
+`high` を指定できます。
+
+### `/grok:x`
+
+Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハンドル、日付、投稿 URL を含む結果を
+返します。Grok Build 独自の `x_keyword_search` と `x_semantic_search` ツールを使って X へ
+アクセスするため、他のコマンドと同じ `grok login` の認証情報で利用でき、xAI API キーは不要です。
+通常の Web 検索では X のタイムラインを読み取れないため、独立したコマンドとして用意されています。
+
+```bash
+/grok:x what are people saying about the latest Avalonia release
+/grok:x --background reports of regressions in Node 24 over the past week
+/grok:x --model latest reaction to the new pricing announcement
+```
+
+実行は常に読み取り専用です。1 回の検索で Grok Build の完全なセッションを実行するため、通常は
+数分かかります。待ちたくない場合は `--background` を指定してください。
+
+### `/grok:status`
+
+リポジトリの実行中および最近の Grok ジョブと、レビューゲートの状態を表示します。
+
+```bash
+/grok:status
+/grok:status --all
+/grok:status <job-id> --wait
+```
+
+### `/grok:result`
+
+完了したジョブの保存済み最終出力を表示します。
+
+```bash
+/grok:result
+/grok:result <job-id>
+```
+
+各結果には Grok セッション ID と `grok --resume <id>` コマンドが含まれるため、Grok 独自の TUI で
+会話を再開できます。
+
+### `/grok:cancel`
+
+実行中のバックグラウンドジョブをキャンセルし、その背後で動いている Grok のターンを停止します。
+
+```bash
+/grok:cancel
+/grok:cancel <job-id>
+```
+
+ジョブ ID を省略すると、現在のセッションで唯一実行中のジョブが選択されます。複数のジョブが
+実行中の場合は推測で選ばずに停止し、ジョブ ID の指定を求めます。`/grok:status` で対象を
+選んでください。
+
+### `/grok:setup`
+
+ローカル環境のインストール状態を確認し、必要に応じて終了時のレビューゲートを切り替えます。
+
+```bash
+/grok:setup
+/grok:setup --enable-review-gate
+/grok:setup --disable-review-gate
+```
+
+ゲートは有効にするまで無効です。有効にすると、Claude セッションの終了時に新しい adversarial
+review が実行され、その完了まで終了がブロックされます。そのため、大きな変更ではセッションの
+終了に時間がかかる場合があります。`/grok:setup --disable-review-gate` で再び無効にできます。
+
+## よくある使い方
+
+### 出荷前にレビューする
+
+```bash
+/grok:review --wait
+```
+
+指摘を読み、必要な箇所を修正してから、もう一度実行します。
+
+### 問題を Grok に任せる
+
+```bash
+/grok:rescue the websocket reconnect drops messages under load
+```
+
+### 時間のかかる処理を開始する
+
+```bash
+/grok:rescue --background port the settings screen to the new form API
+/grok:status
+/grok:result
+```
+
+## Grok との通信方法
+
+このプラグインは `grok agent stdio` を実行し、Agent Client Protocol を介して通信します。
+貼り付けた差分を Grok に渡す方式ではなく、Grok 自身がリポジトリを読み取るため、実行中の
+ツール呼び出しも確認できます。
+
+同じリポジトリ内の実行は、小さなブローカーを介して 1 つの Grok プロセスを共有します。そのため、
+レビューと委任タスクのたびに起動コストが発生することはありません。ブローカーへ接続できない場合は、
+プラグインが独自の Grok プロセスを起動します。
+
+### モデルの選択
+
+このプラグインは既定で `grok-4.6` を指定します。1 回の実行だけ変更するには `--model` を、
+すべての実行で変更するには `GROK_PLUGIN_MODEL` を設定してください。
+
+これは見た目以上に重要です。`XAI_API_KEY` で認証した場合、Grok の新しいセッションでは既定で
+推論を行わないモデルが使われ、レビューの品質が明確に低下するためです。
+
+## よくある質問
+
+### このプラグイン専用のアカウントは必要ですか？
+
+いいえ。ローカル環境の Grok Build が現在サインインしているアカウントをそのまま使用します。
+
+### 既存の Grok 設定は使用されますか？
+
+はい。ただし 1 つ例外があります。レビューは MCP サーバーを接続せずに開始されるため、グローバルの
+MCP 設定がレビューのたびに読み込まれてトークン数を増やすことはありません。委任された
+`/grok:rescue` の実行では通常の設定が使用されます。
+
+### `/grok:review` は本当に読み取り専用ですか？
+
+Grok はファイルを読み、読み取り専用コマンドを実行できます。それ以外の権限要求は、読み取り専用の
+許可リストにないシェルコマンドやファイルへの出力リダイレクトを含め、すべてプラグインによって
+拒否されます。
+
+### `/grok:transfer` がないのはなぜですか？
+
+上流の Codex プラグインは Claude Code のセッションを Codex のタスクへ取り込めましたが、
+Grok Build には同等の機能がありません。そのため、不完全な代替機能を装うのではなく、コマンドを
+削除しています。
+
+## ライセンス
+
+Apache-2.0 です。[LICENSE](./LICENSE) と [NOTICE](./NOTICE) を参照してください。
