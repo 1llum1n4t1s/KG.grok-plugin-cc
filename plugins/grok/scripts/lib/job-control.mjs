@@ -2,7 +2,7 @@ import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./grok.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
-import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
+import { resolveCurrentSessionId } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
@@ -13,9 +13,7 @@ export function sortJobsNewestFirst(jobs) {
 }
 
 function getCurrentSessionId(options = {}) {
-  return options.env
-    ? options.env[SESSION_ID_ENV] ?? null
-    : process.env[SESSION_ID_ENV] ?? null;
+  return resolveCurrentSessionId(options.env ?? process.env);
 }
 
 function filterJobsForCurrentSession(jobs, options = {}) {
@@ -217,8 +215,8 @@ function reconcileOrphanedJobs(workspaceRoot) {
 
     const completedAt = new Date(now).toISOString();
     const errorMessage = queuedTooLong
-      ? "Background worker did not start within 60 seconds."
-      : "Background worker process exited without recording a final result.";
+      ? "Job process did not start within 60 seconds."
+      : "Job process exited without recording a final result.";
     const stored = readStoredJob(workspaceRoot, job.id) ?? job;
     const failed = { ...stored, status: "failed", phase: "failed", pid: null, completedAt, errorMessage };
     writeJobFile(workspaceRoot, job.id, failed);

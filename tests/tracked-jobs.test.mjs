@@ -1,13 +1,32 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runTrackedJob } from "../plugins/grok/scripts/lib/tracked-jobs.mjs";
+import {
+  createJobRecord,
+  resolveCurrentSessionId,
+  runTrackedJob
+} from "../plugins/grok/scripts/lib/tracked-jobs.mjs";
 import { readJobFile, resolveJobFile, saveState, upsertJob, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
 import { makeTempDir } from "./helpers.mjs";
 
 function baseJob(workspace, id) {
   return { id, workspaceRoot: workspace, status: "queued", jobClass: "review", title: "Review" };
 }
+
+test("session identity prefers the shared id and falls back to the Codex thread id", () => {
+  assert.equal(
+    resolveCurrentSessionId({ GROK_COMPANION_SESSION_ID: "claude-session", CODEX_THREAD_ID: "codex-task" }),
+    "claude-session"
+  );
+  assert.equal(resolveCurrentSessionId({ CODEX_THREAD_ID: "codex-task" }), "codex-task");
+  assert.equal(resolveCurrentSessionId({ CODEX_THREAD_ID: "   " }), null);
+
+  const record = createJobRecord(
+    { id: "codex-job" },
+    { env: { CODEX_THREAD_ID: "codex-task" } }
+  );
+  assert.equal(record.sessionId, "codex-task");
+});
 
 test("a worker never starts a queued job that was already cancelled", async () => {
   const workspace = makeTempDir();

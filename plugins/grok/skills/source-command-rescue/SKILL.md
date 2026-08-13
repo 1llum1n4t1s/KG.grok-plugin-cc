@@ -11,10 +11,8 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
 - Require a concrete task unless the user explicitly asks to resume the previous Grok task.
 - Preserve explicit `--model` and `--effort` values. Accepted effort values are `low`, `medium`, and
   `high`.
-- Map `--resume` to `--resume-last` and preserve `--fresh`. Foreground is the default when neither
-  execution control is supplied.
-- Follow the shared Codex-managed background execution contract when `--background` is supplied;
-  use its foreground rules when `--wait` is supplied.
+- Map `--resume` to `--resume-last` and preserve `--fresh`.
+- Follow the shared foreground execution contract. Reject `--background`; accept legacy `--wait` only as a no-op.
 - Default to `--write`, unless the user asks for review, diagnosis, research, or other read-only work.
 - If neither resume nor fresh is explicit, use `task-resume-candidate --json`: resume only for a
   clear follow-up; otherwise start with `--fresh`.

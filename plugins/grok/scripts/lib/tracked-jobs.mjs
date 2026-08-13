@@ -4,7 +4,19 @@ import process from "node:process";
 import { readJobFile, resolveJobFile, resolveJobLogFile, updateState, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "GROK_COMPANION_SESSION_ID";
+export const CODEX_SESSION_ID_ENV = "CODEX_THREAD_ID";
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+function normalizeSessionId(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+export function resolveCurrentSessionId(env = process.env, preferredEnv = SESSION_ID_ENV) {
+  return (
+    normalizeSessionId(env?.[preferredEnv]) ??
+    (preferredEnv === SESSION_ID_ENV ? normalizeSessionId(env?.[CODEX_SESSION_ID_ENV]) : null)
+  );
+}
 
 export function nowIso() {
   return new Date().toISOString();
@@ -58,7 +70,7 @@ export function createJobLogFile(workspaceRoot, jobId, title) {
 
 export function createJobRecord(base, options = {}) {
   const env = options.env ?? process.env;
-  const sessionId = env[options.sessionIdEnv ?? SESSION_ID_ENV];
+  const sessionId = resolveCurrentSessionId(env, options.sessionIdEnv ?? SESSION_ID_ENV);
   return {
     ...base,
     createdAt: nowIso(),

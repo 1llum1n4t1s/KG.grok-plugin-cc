@@ -1,6 +1,6 @@
 ---
 name: source-command-cancel
-description: Cancel an active background Grok job for the current repository. Use when the user invokes grok:source-command-cancel or explicitly asks to stop a Grok job.
+description: Cancel an active Grok job for the current repository. Use when the user invokes grok:source-command-cancel or explicitly asks to stop a Grok job.
 ---
 
 # Cancel a Grok job

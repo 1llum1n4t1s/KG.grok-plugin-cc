@@ -56,34 +56,20 @@ test("Codex exposes the same workflows as native skills", () => {
   assert.match(audit, /review-only/i);
 });
 
-test("Codex keeps every supported background workflow visible and managed", () => {
+test("Codex runs every Grok workflow in the foreground", () => {
   const runtime = read("references/codex-runtime.md");
-  assert.match(runtime, /Codex-managed background execution/i);
-  assert.match(runtime, /Do not pass `--background` to the companion/i);
-  assert.match(runtime, /Codex process or cell ID/i);
+  assert.match(runtime, /Foreground execution/i);
+  assert.match(runtime, /Always invoke the companion in the foreground/i);
+  assert.match(runtime, /Reject `--background`/i);
   assert.match(runtime, /\[grok\] Job ID: <job-id>/i);
-  assert.match(runtime, /never infer[\s\S]*set difference/i);
-  assert.match(runtime, /status <job-id>/i);
+  assert.match(runtime, /Never infer it from status ordering/i);
   assert.match(runtime, /result <job-id>/i);
-  assert.match(runtime, /do not change `source-command-status --wait`/i);
+  assert.match(runtime, /source-command-status --wait[\s\S]*synchronous status-polling/i);
 
   for (const name of ["review", "adversarial-review", "audit", "rescue", "x"]) {
     const source = read(`skills/source-command-${name}/SKILL.md`);
-    assert.match(source, /Codex-managed background execution/i, `${name} ignores the managed background contract`);
-    assert.match(source, /After any completed run/i, `${name} does not define background result handling`);
-    assert.doesNotMatch(source, /add `--background`|pass `--background` through/i, `${name} still detaches through the companion`);
-  }
-
-  for (const name of ["review", "adversarial-review", "audit"]) {
-    const source = read(`skills/source-command-${name}/SKILL.md`);
-    assert.match(source, /neither[\s\S]*Codex-managed background mode/i, `${name} does not default to managed background mode`);
-    assert.match(source, /start\s+immediately/i, `${name} does not start immediately by default`);
-    assert.match(source, /explicit `--wait`[\s\S]*foreground/i, `${name} does not preserve explicit foreground mode`);
-    assert.doesNotMatch(source, /ask the user once to choose/i, `${name} still asks for an unavailable Codex mode choice`);
-  }
-
-  for (const name of ["rescue", "x"]) {
-    assert.match(read(`skills/source-command-${name}/SKILL.md`), /foreground is the default/i);
+    assert.match(source, /shared foreground execution contract/i, `${name} ignores the foreground contract`);
+    assert.match(source, /Reject `--background`/i, `${name} does not reject background execution`);
   }
 });
 
@@ -127,21 +113,25 @@ test("every command declares frontmatter and routes through the companion script
 test("review and adversarial-review wire to their own companion subcommands", () => {
   const review = read("commands/review.md");
   assert.match(review, /grok-companion\.mjs" review "\$ARGUMENTS"/);
-  assert.match(review, /run_in_background: true/);
-  assert.match(review, /neither execution flag[\s\S]*immediately in a Claude background task/i);
+  assert.match(review, /Always run the review in the foreground/i);
+  assert.match(review, /`--background`[\s\S]*no longer supported/i);
+  assert.doesNotMatch(review, /run_in_background:\s*true/);
   assert.doesNotMatch(review, /AskUserQuestion/);
 
   const adversarial = read("commands/adversarial-review.md");
   assert.match(adversarial, /grok-companion\.mjs" adversarial-review "\$ARGUMENTS"/);
-  assert.match(adversarial, /neither execution flag[\s\S]*immediately in a Claude background task/i);
+  assert.match(adversarial, /Always run the review in the foreground/i);
+  assert.match(adversarial, /`--background`[\s\S]*no longer supported/i);
+  assert.doesNotMatch(adversarial, /run_in_background:\s*true/);
   assert.doesNotMatch(adversarial, /AskUserQuestion/);
 });
 
 test("audit wires to its own subcommand, template, and repo scope", () => {
   const audit = read("commands/audit.md");
   assert.match(audit, /grok-companion\.mjs" audit "\$ARGUMENTS"/);
-  assert.match(audit, /run_in_background: true/);
-  assert.match(audit, /neither execution flag[\s\S]*immediately in a Claude background task/i);
+  assert.match(audit, /Always run the audit in the foreground/i);
+  assert.match(audit, /`--background`[\s\S]*no longer supported/i);
+  assert.doesNotMatch(audit, /run_in_background:\s*true/);
   assert.doesNotMatch(audit, /AskUserQuestion/);
   // 監査は差分レビューではないことを利用者向けに明言していること。
   assert.match(audit, /ignores the current git diff/i);
@@ -150,6 +140,13 @@ test("audit wires to its own subcommand, template, and repo scope", () => {
   assert.match(companion, /case "audit":/);
   assert.match(companion, /scope: "repo"/);
   assert.ok(fs.existsSync(path.join(PLUGIN_ROOT, "prompts", "audit.md")), "prompts/audit.md is missing");
+});
+
+test("the companion has no detached execution entry points", () => {
+  const companion = read("scripts/grok-companion.mjs");
+  assert.doesNotMatch(companion, /spawnDetachedWorker|enqueueBackgroundJob/);
+  assert.doesNotMatch(companion, /case "(?:task|review)-worker"/);
+  assert.match(companion, /`--background` is no longer supported/);
 });
 
 test("review commands stay review-only", () => {

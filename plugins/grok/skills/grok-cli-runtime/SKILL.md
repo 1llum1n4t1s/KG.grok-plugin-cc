@@ -26,7 +26,7 @@ Execution rules:
 
 Command selection:
 - Use exactly one `task` invocation per rescue handoff.
-- If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
+- If the forwarded request includes `--background`, reject it because Grok commands are foreground-only. Treat a legacy `--wait` as a no-op, strip it before calling `task`, and do not include it in the natural-language task text.
 - If the forwarded request includes `--model`, pass the value through to `task` unchanged; the companion resolves aliases.
 - If the forwarded request includes `--effort`, pass it through to `task`.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.

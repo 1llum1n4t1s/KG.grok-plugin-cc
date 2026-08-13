@@ -20,8 +20,7 @@ Selection guidance:
 Forwarding rules:
 
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" task ...`.
-- Preserve the execution mode selected by the parent command. Never choose a different foreground
-  or background mode based on task complexity.
+- Always invoke the companion in the foreground. Never use a background task or detached process.
 - You may use the `grok-prompting` skill only to tighten the user's request into a better Grok prompt before forwarding it.
 - Keep the forwarded task text in the user's original language. Do not translate it while tightening; Grok answers in the language the task is written in.
 - Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work beyond shaping the forwarded prompt text.

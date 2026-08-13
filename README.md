@@ -26,7 +26,7 @@ hosts route through the same companion runtime and job store.
 - `/grok:audit` for a read-only audit of the entire existing codebase, ignoring the current diff
 - `/grok:rescue` to hand a problem to Grok and get a worked answer back
 - `/grok:x` to search X (Twitter) posts, which plain web search cannot read
-- `/grok:status`, `/grok:result`, and `/grok:cancel` to manage background jobs
+- `/grok:status`, `/grok:result`, and `/grok:cancel` to inspect, recover, or stop tracked jobs
 - `/grok:setup` to check that everything is wired up
 
 ## Requirements
@@ -138,8 +138,6 @@ Runs a read-only review of your local git state and returns Grok's findings verb
 
 ```bash
 /grok:review
-/grok:review --wait
-/grok:review --background
 /grok:review --base main
 /grok:review --scope working-tree
 /grok:review focus on the retry logic
@@ -156,11 +154,10 @@ The review is read-only: Grok may read files and run read-only commands such as 
 `git log`, but the plugin denies anything that would write to disk. Grok reports what it thinks
 should change; it does not change it.
 
-Without `--wait` or `--background`, review, adversarial-review, and audit start immediately in the
-host's background mode in both Claude Code and Codex; pass `--wait` to run them in the foreground.
-Rescue and X search remain foreground by default unless `--background` is explicit. Every Codex
-background run stays attached as a Codex-managed process and returns the Codex process ID, Grok job
-ID, and initial progress instead of detaching inside the companion.
+Every Grok command runs in the foreground in both Claude Code and Codex. This keeps command output,
+the exact Grok job ID, cancellation, and stored results under one consistent lifecycle. The old
+`--wait` flag is accepted as a no-op for compatibility; `--background` is rejected instead of
+silently changing execution behavior.
 
 ### `/grok:adversarial-review`
 
@@ -182,7 +179,6 @@ source as it stands, independent of whatever you are currently changing.
 
 ```bash
 /grok:audit
-/grok:audit --background
 /grok:audit focus on the auth module
 ```
 
@@ -202,7 +198,6 @@ set of eyes on it."
 
 ```bash
 /grok:rescue why does the upload retry loop never terminate?
-/grok:rescue --background investigate the flaky auth test
 /grok:rescue --resume
 /grok:rescue --model latest --effort high
 ```
@@ -223,12 +218,11 @@ Ordinary web search cannot read X timelines, which is why this is a separate com
 
 ```bash
 /grok:x what are people saying about the latest Avalonia release
-/grok:x --background reports of regressions in Node 24 over the past week
 /grok:x --model latest reaction to the new pricing announcement
 ```
 
 The run is always read-only. A search drives a full Grok Build session, so it usually takes a few
-minutes; pass `--background` when you would rather not wait.
+minutes and remains attached until it completes.
 
 ### `/grok:status`
 
@@ -254,7 +248,7 @@ conversation back up in Grok's own TUI.
 
 ### `/grok:cancel`
 
-Cancels a running background job and stops the Grok turn behind it.
+Cancels a running tracked job and stops the Grok turn behind it.
 
 ```bash
 /grok:cancel
@@ -283,7 +277,7 @@ large change. Turn it back off with `/grok:setup --disable-review-gate`.
 ### Review before shipping
 
 ```bash
-/grok:review --wait
+/grok:review
 ```
 
 Read the findings, fix what matters, then run it again.
@@ -294,12 +288,10 @@ Read the findings, fix what matters, then run it again.
 /grok:rescue the websocket reconnect drops messages under load
 ```
 
-### Start something long-running
+### Run something long-running
 
 ```bash
-/grok:rescue --background port the settings screen to the new form API
-/grok:status
-/grok:result
+/grok:rescue port the settings screen to the new form API
 ```
 
 ## How It Talks To Grok
@@ -376,7 +368,7 @@ Codex に実行を依頼してください。明示的な `source-command-` プ�
 - `/grok:audit`: 現在の差分を無視し、既存コードベース全体を読み取り専用で監査
 - `/grok:rescue`: 問題を Grok に任せ、具体的な回答を取得
 - `/grok:x`: 通常の Web 検索では読み取れない X（Twitter）の投稿を検索
-- `/grok:status`、`/grok:result`、`/grok:cancel`: バックグラウンドジョブを管理
+- `/grok:status`、`/grok:result`、`/grok:cancel`: 追跡ジョブの確認、結果復旧、停止
 - `/grok:setup`: 必要な設定が正しく機能しているか確認
 
 ## 必要要件
@@ -489,8 +481,6 @@ API キーはブラウザの認証情報より優先されます。
 
 ```bash
 /grok:review
-/grok:review --wait
-/grok:review --background
 /grok:review --base main
 /grok:review --scope working-tree
 /grok:review focus on the retry logic
@@ -508,12 +498,10 @@ API キーはブラウザの認証情報より優先されます。
 コマンドを実行できますが、ディスクへ書き込む操作はプラグインによって拒否されます。Grok は
 変更すべき内容を報告しますが、実際の変更は行いません。
 
-`--wait` も `--background` も指定しない場合、review、adversarial-review、audit は Claude Code と
-Codex のどちらでも、ホストのバックグラウンドモードですぐに開始されます。フォアグラウンドで
-実行するには `--wait` を指定してください。rescue と X 検索は、明示的に `--background` を
-指定しない限りフォアグラウンドで実行されます。Codex のバックグラウンド実行はすべて Codex 管理の
-プロセスとして接続を維持し、コンパニオン内部で切り離す代わりに、Codex プロセス ID、Grok ジョブ
-ID、初期進捗を返します。
+Claude Code と Codex のどちらでも、すべての Grok コマンドをフォアグラウンドで実行します。
+コマンド出力、正確な Grok ジョブ ID、キャンセル、保存済み結果を一つの一貫したライフサイクルで
+扱えるためです。旧 `--wait` は互換性のため何もしないフラグとして受け付けますが、`--background` は
+実行方法を暗黙に変えず、明確なエラーとして拒否します。
 
 ### `/grok:adversarial-review`
 
@@ -535,7 +523,6 @@ ID、初期進捗を返します。
 
 ```bash
 /grok:audit
-/grok:audit --background
 /grok:audit focus on the auth module
 ```
 
@@ -554,7 +541,6 @@ ID、初期進捗を返します。
 
 ```bash
 /grok:rescue why does the upload retry loop never terminate?
-/grok:rescue --background investigate the flaky auth test
 /grok:rescue --resume
 /grok:rescue --model latest --effort high
 ```
@@ -576,12 +562,11 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 
 ```bash
 /grok:x what are people saying about the latest Avalonia release
-/grok:x --background reports of regressions in Node 24 over the past week
 /grok:x --model latest reaction to the new pricing announcement
 ```
 
 実行は常に読み取り専用です。1 回の検索で Grok Build の完全なセッションを実行するため、通常は
-数分かかります。待ちたくない場合は `--background` を指定してください。
+数分かかり、完了まで接続を維持します。
 
 ### `/grok:status`
 
@@ -607,7 +592,7 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 
 ### `/grok:cancel`
 
-実行中のバックグラウンドジョブをキャンセルし、その背後で動いている Grok のターンを停止します。
+実行中の追跡ジョブをキャンセルし、そのジョブで動いている Grok のターンを停止します。
 
 ```bash
 /grok:cancel
@@ -637,7 +622,7 @@ review が実行され、その完了まで終了がブロックされます。�
 ### 出荷前にレビューする
 
 ```bash
-/grok:review --wait
+/grok:review
 ```
 
 指摘を読み、必要な箇所を修正してから、もう一度実行します。
@@ -648,12 +633,10 @@ review が実行され、その完了まで終了がブロックされます。�
 /grok:rescue the websocket reconnect drops messages under load
 ```
 
-### 時間のかかる処理を開始する
+### 時間のかかる処理を実行する
 
 ```bash
-/grok:rescue --background port the settings screen to the new form API
-/grok:status
-/grok:result
+/grok:rescue port the settings screen to the new form API
 ```
 
 ## Grok との通信方法

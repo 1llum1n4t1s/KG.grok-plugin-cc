@@ -50,7 +50,7 @@ test("buildShellCommand folds the binary and its arguments into one string", () 
  * shell 実行で DEP0190 を出さないことの回帰テスト。
  *
  * `shell` と引数配列を同時に渡していた頃は Node 22 以降が stderr へ警告を書き、
- * バックグラウンド実行の出力ファイルでレポート本文の前に混ざっていた。
+ * ホストが統合する出力でレポート本文の前に混ざっていた。
  */
 test("runCommand runs through a shell without emitting deprecation warnings", () => {
   const result = runCommand(process.execPath, ["-e", ECHO_ARGV_SCRIPT, "a b", "c"], { shell: true });

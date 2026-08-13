@@ -283,27 +283,29 @@ test("audit applies a risk-directed deep investigation when focus is omitted", (
   assert.doesNotMatch(prompt, /No extra focus provided\./);
 });
 
-test("audit can detach through the companion without a host-specific background API", () => {
+test("review and task commands reject background execution", () => {
   const { fake, repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
 
-  const launched = companion(["audit", "--background", "--json", "focus on auth"], { repo, env });
-  assert.equal(launched.status, 0, launched.stderr);
-  const queued = JSON.parse(launched.stdout);
-  assert.equal(queued.status, "queued");
-  assert.match(queued.jobId, /^review-/);
+  for (const args of [
+    ["audit", "--background", "focus on auth"],
+    ["task", "--background", "investigate auth"]
+  ]) {
+    const result = companion(args, { repo, env });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--background.*no longer supported.*foreground/i);
+  }
 
-  const waited = companion(
-    ["status", queued.jobId, "--wait", "--timeout-ms", "10000", "--json"],
-    { repo, env }
-  );
-  assert.equal(waited.status, 0, waited.stderr);
-  const snapshot = JSON.parse(waited.stdout);
-  assert.equal(snapshot.job.status, "completed");
-  assert.equal(snapshot.job.kind, "audit");
+  assert.equal(fake.readState(), null, "background rejection must happen before starting Grok");
+});
 
-  const prompt = fake.readState().prompts[0];
-  assert.match(prompt, /full-repository audit/i);
-  assert.match(prompt, /focus on auth/);
+test("task accepts legacy --wait as a foreground no-op", () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+
+  const result = companion(["task", "--wait", "investigate auth"], { repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(fake.readState().prompts[0], /investigate auth/);
+  assert.doesNotMatch(fake.readState().prompts[0], /--wait/);
 });
 
 test("status tracks a finished review as completed, not failed", () => {

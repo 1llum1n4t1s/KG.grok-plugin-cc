@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -21,7 +20,7 @@ import {
     runGrokTurn
   } from "./lib/grok.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { collectReviewContext, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, processCommandContains, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -47,8 +46,8 @@ import {
   createJobRecord,
   createProgressReporter,
   nowIso,
+  resolveCurrentSessionId,
   runTrackedJob,
-  SESSION_ID_ENV
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
@@ -84,10 +83,10 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/grok-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/grok-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--language <bcp47>] [focus text]",
-      "  node scripts/grok-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--language <bcp47>] [focus text]",
-      "  node scripts/grok-companion.mjs audit [--wait|--background] [--language <bcp47>] [focus text]",
-      "  node scripts/grok-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|fast|reasoning|multi|build|latest>] [--effort <low|medium|high>] [prompt]",
+      "  node scripts/grok-companion.mjs review [--base <ref>] [--scope <auto|working-tree|branch>] [--language <bcp47>] [focus text]",
+      "  node scripts/grok-companion.mjs adversarial-review [--base <ref>] [--scope <auto|working-tree|branch>] [--language <bcp47>] [focus text]",
+      "  node scripts/grok-companion.mjs audit [--language <bcp47>] [focus text]",
+      "  node scripts/grok-companion.mjs task [--write] [--resume-last|--resume|--fresh] [--model <model|fast|reasoning|multi|build|latest>] [--effort <low|medium|high>] [prompt]",
       "  node scripts/grok-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/grok-companion.mjs result [job-id] [--json]",
       "  node scripts/grok-companion.mjs cancel [job-id] [--json]"
@@ -322,13 +321,6 @@ function buildReviewPromptFor(reviewName, context, focusText, language) {
   });
 }
 
-function ensureGrokAvailable(cwd) {
-  const availability = getGrokAvailability(cwd);
-  if (!availability.available) {
-    throw new Error("Grok Build is not installed or is missing `grok agent stdio`. Install it from https://x.ai/cli, then rerun `/grok:setup`.");
-  }
-}
-
 function renderStatusPayload(report, asJson) {
   return asJson ? report : renderStatusReport(report);
 }
@@ -337,12 +329,8 @@ function isActiveJobStatus(status) {
   return status === "queued" || status === "running";
 }
 
-function getCurrentClaudeSessionId() {
-  return process.env[SESSION_ID_ENV] ?? null;
-}
-
-function filterJobsForCurrentClaudeSession(jobs) {
-  const sessionId = getCurrentClaudeSessionId();
+function filterJobsForCurrentSession(jobs) {
+  const sessionId = resolveCurrentSessionId();
   if (!sessionId) {
     return jobs;
   }
@@ -381,9 +369,9 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
 
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const sessionId = getCurrentClaudeSessionId();
+  const sessionId = resolveCurrentSessionId();
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
-  const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
+  const visibleJobs = filterJobsForCurrentSession(jobs);
   const activeTask = visibleJobs.find((job) => job.jobClass === "task" && (job.status === "queued" || job.status === "running"));
   if (activeTask) {
     throw new Error(`Task ${activeTask.id} is still running. Use /grok:status before continuing it.`);
@@ -564,10 +552,6 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
   };
 }
 
-function renderQueuedTaskLaunch(payload) {
-  return `${payload.title} started in the background as ${payload.jobId}. Check /grok:status ${payload.jobId} for progress.\n`;
-}
-
 function getJobKindLabel(kind, jobClass) {
   if (kind === "adversarial-review" || kind === "audit") {
     return kind;
@@ -612,18 +596,6 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
-  return {
-    cwd,
-    model,
-    effort,
-    prompt,
-    write,
-    resumeLast,
-    jobId
-  };
-}
-
 function readTaskPrompt(cwd, options, positionals) {
   if (options["prompt-file"]) {
     return fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
@@ -662,64 +634,6 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
-function spawnDetachedWorker(cwd, workspaceRoot, jobId, subcommand, logFile) {
-  const scriptPath = path.join(ROOT_DIR, "scripts", "grok-companion.mjs");
-  const logFd = fs.openSync(logFile, "a", 0o600);
-  const child = spawn(process.execPath, [scriptPath, subcommand, "--cwd", cwd, "--job-id", jobId], {
-    cwd,
-    env: process.env,
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-    windowsHide: true
-  });
-  fs.closeSync(logFd);
-  child.on("error", (error) => {
-    const completedAt = nowIso();
-    appendLogLine(logFile, `Worker failed to start: ${error.message}`);
-    upsertJob(workspaceRoot, {
-      id: jobId,
-      status: "failed",
-      phase: "failed",
-      pid: null,
-      errorMessage: error.message,
-      completedAt
-    });
-  });
-  child.unref();
-  return child;
-}
-
-function enqueueBackgroundJob(cwd, job, request, workerSubcommand) {
-  const { logFile } = createTrackedProgress(job);
-  appendLogLine(logFile, "Queued for background execution.");
-
-  const queuedRecord = {
-    ...job,
-    status: "queued",
-    phase: "queued",
-    pid: null,
-    logFile,
-    request
-  };
-  writeJobFile(job.workspaceRoot, job.id, queuedRecord);
-  upsertJob(job.workspaceRoot, queuedRecord);
-
-  // ジョブ定義を先に保存し、起動直後の worker が未作成ファイルを読む競合を避ける。
-  // 起動後は親から再保存しない。高速な worker の完了状態を queued へ巻き戻さないため。
-  spawnDetachedWorker(cwd, job.workspaceRoot, job.id, workerSubcommand, logFile);
-
-  return {
-    payload: {
-      jobId: job.id,
-      status: "queued",
-      title: job.title,
-      summary: job.summary,
-      logFile
-    },
-    logFile
-  };
-}
-
 async function handleReviewCommand(argv, config) {
   // フラグは自由記述より前に置く契約（commands/*.md にもそう書いてある）。
   // 本文に紛れた `--...` をフラグとして拾わないよう、最初の非オプションで打ち切る。
@@ -731,6 +645,10 @@ async function handleReviewCommand(argv, config) {
       m: "model"
     }
   });
+
+  if (options.background) {
+    throw new Error("`--background` is no longer supported. Grok commands always run in the foreground.");
+  }
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -763,14 +681,6 @@ async function handleReviewCommand(argv, config) {
     reviewName: config.reviewName
   };
 
-  if (options.background) {
-    ensureGrokAvailable(cwd);
-    ensureGitRepository(cwd);
-    const { payload } = enqueueBackgroundJob(cwd, job, request, "review-worker");
-    outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
-    return;
-  }
-
   await runForegroundCommand(
     job,
     (progress) =>
@@ -794,12 +704,16 @@ async function handleTask(argv) {
   // ここを緩めると、読み取り専用のつもりの依頼が書き込み許可で走る。
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "wait"],
     stopAtFirstPositional: true,
     aliasMap: {
       m: "model"
     }
   });
+
+  if (options.background) {
+    throw new Error("`--background` is no longer supported. Grok commands always run in the foreground.");
+  }
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -820,23 +734,6 @@ async function handleTask(argv) {
     resumeLast
   });
 
-  if (options.background) {
-    ensureGrokAvailable(cwd);
-    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
-    const request = buildTaskRequest({
-      cwd,
-      model,
-      effort,
-      prompt,
-      write,
-      resumeLast,
-      jobId: job.id
-    });
-    const { payload } = enqueueBackgroundJob(cwd, job, request, "task-worker");
-    outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
-    return;
-  }
-
   const job = buildTaskJob(workspaceRoot, taskMetadata, write);
   await runForegroundCommand(
     job,
@@ -853,92 +750,6 @@ async function handleTask(argv) {
       }),
     { json: options.json }
   );
-}
-
-async function handleStoredJobWorker(argv, { expectedJobClass, execute }) {
-  const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "job-id"]
-  });
-
-  if (!options["job-id"]) {
-    throw new Error(`Missing required --job-id for ${expectedJobClass}-worker.`);
-  }
-
-  const cwd = resolveCommandCwd(options);
-  const workspaceRoot = resolveCommandWorkspace(options);
-  const storedJob = readStoredJob(workspaceRoot, options["job-id"]);
-  if (!storedJob) {
-    throw new Error(`No stored job found for ${options["job-id"]}.`);
-  }
-
-  try {
-    const request = storedJob.request;
-    if (!request || typeof request !== "object") {
-      throw new Error(`Stored job ${options["job-id"]} is missing its ${expectedJobClass} request payload.`);
-    }
-    if (storedJob.jobClass !== expectedJobClass) {
-      throw new Error(
-        `Stored job ${options["job-id"]} has class ${storedJob.jobClass ?? "<missing>"}, expected ${expectedJobClass}.`
-      );
-    }
-
-    const { logFile, progress } = createTrackedProgress(
-      {
-        ...storedJob,
-        workspaceRoot
-      },
-      {
-        logFile: storedJob.logFile ?? null
-      }
-    );
-    await runTrackedJob(
-      {
-        ...storedJob,
-        workspaceRoot,
-        logFile
-      },
-      () => execute({ ...request, onProgress: progress }),
-      { logFile }
-    );
-  } catch (error) {
-    const current = readStoredJob(workspaceRoot, storedJob.id) ?? storedJob;
-    if (!["completed", "failed", "cancelled"].includes(current.status)) {
-      const completedAt = nowIso();
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      appendLogLine(current.logFile, `Worker failed: ${errorMessage}`);
-      writeJobFile(workspaceRoot, current.id, {
-        ...current,
-        status: "failed",
-        phase: "failed",
-        pid: null,
-        completedAt,
-        errorMessage
-      });
-      upsertJob(workspaceRoot, {
-        id: current.id,
-        status: "failed",
-        phase: "failed",
-        pid: null,
-        completedAt,
-        errorMessage
-      });
-    }
-    throw error;
-  }
-}
-
-async function handleTaskWorker(argv) {
-  return handleStoredJobWorker(argv, {
-    expectedJobClass: "task",
-    execute: executeTaskRun
-  });
-}
-
-async function handleReviewWorker(argv) {
-  return handleStoredJobWorker(argv, {
-    expectedJobClass: "review",
-    execute: executeReviewRun
-  });
 }
 
 async function handleStatus(argv) {
@@ -994,8 +805,8 @@ function handleTaskResumeCandidate(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const sessionId = getCurrentClaudeSessionId();
-  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
+  const sessionId = resolveCurrentSessionId();
+  const jobs = filterJobsForCurrentSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
   const candidate = findLatestResumableTaskJob(jobs);
 
   const payload = {
@@ -1135,12 +946,6 @@ async function main() {
       break;
     case "task":
       await handleTask(argv);
-      break;
-    case "task-worker":
-      await handleTaskWorker(argv);
-      break;
-    case "review-worker":
-      await handleReviewWorker(argv);
       break;
     case "status":
       await handleStatus(argv);

@@ -441,7 +441,7 @@ class SpawnedAcpClient extends AcpClientBase {
     const useShell = process.platform === "win32";
     const args = ["agent", "stdio"];
     // shell 有効のまま引数配列を渡すと Node 22 以降が DEP0190 を stderr へ出し、
-    // バックグラウンド実行の出力に混ざる。shell のときは 1 本の文字列へ畳む。
+    // ホストが統合する出力に混ざる。shell のときは 1 本の文字列へ畳む。
     this.proc = spawn(
       useShell ? buildShellCommand(quoteIfNeeded(command), args) : command,
       useShell ? [] : args,

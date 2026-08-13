@@ -1,6 +1,6 @@
 ---
 description: Search X (Twitter) posts through Grok Build and return the findings verbatim
-argument-hint: '[--wait|--background] [--model <model|fast|reasoning|multi|build|latest>] [what to look for on X]'
+argument-hint: '[--model <model|fast|reasoning|multi|build|latest>] [what to look for on X]'
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
@@ -21,7 +21,9 @@ Why this command exists:
 
 Argument handling:
 - Everything left after the flags is the search topic. Preserve the user's wording.
-- `--wait` and `--background` are execution flags for Claude Code. Do not put them into the search topic.
+- Always run the search in the foreground. Do not use a background task, `run_in_background`, or a detached process.
+- If the request includes `--background`, stop and say that background execution is no longer supported.
+- Treat a legacy `--wait` as a no-op and do not put it into the search topic.
 - `--model` is a runtime-selection flag. Preserve it for the forwarded `task` call and keep it out of the search topic.
 - Leave the model unset unless the user explicitly asks for one. Accepted aliases are `fast`, `reasoning`, `multi`, `build`, and `latest`.
 - If the user did not supply a topic, ask what they want looked up on X.
@@ -35,7 +37,7 @@ Build the search prompt:
   - state plainly when nothing relevant was found instead of padding the answer with general knowledge.
 - Always add `--fresh` so the search starts a clean Grok thread instead of resuming unrelated rescue work.
 
-Foreground flow (default, and whenever the arguments include `--wait`):
+Execution flow:
 - Run, substituting the composed prompt for `<search prompt>`. Include `--model <model>` only when
   the user asked for a specific model, and drop the placeholder entirely otherwise:
 ```bash
@@ -46,37 +48,14 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" task --fresh [--model <m
   stdout and stderr merged into a single result, so it opens with the companion's progress lines
   (`[grok] Tool: ...`) and any Node warnings, and where the answer actually begins is ambiguous.
 - Capture the exact job id from the `[grok] Job ID: <job-id>` progress line.
-- Read the stored result instead, exactly as the background flow does:
+- Read the stored result instead:
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result "<job-id>"
 ```
 - Substitute the exact id captured from this search.
 - Then follow "Returning the answer" below.
 
-Background flow (whenever the arguments include `--background`):
-- Launch the search with `Bash` in the background:
-```typescript
-Bash({
-  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" task --fresh [--model <model>] "<search prompt>"`,
-  description: "Grok X search",
-  run_in_background: true
-})
-```
-- Do not wait for completion in this turn.
-- After launching the command, tell the user: "Grok X search started in the background. Check `/grok:status` for progress."
-
-When the background run finishes (a later turn):
-- Do not read, quote, or paste the background task's output file, and do not call `BashOutput`.
-  A background task merges the run's stderr into the same stream as its stdout, so that file holds
-  the companion's progress lines (`[grok] Tool: ...`) and any Node warnings ahead of the answer.
-- Read the stored result instead:
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result "<job-id>"
-```
-- Substitute the exact id from the completed background task's `[grok] Job ID: <job-id>` line.
-- Then follow "Returning the answer" below.
-
-Returning the answer (both flows):
+Returning the answer:
 - The user cannot see command output. Nothing the `result` call printed is on their screen, so the
   answer reaches them only through the text you write in your own reply.
 - Write the whole thing out in that reply, from the first line of that stdout to the last.

@@ -72,7 +72,7 @@ function parseStopReviewOutput(rawOutput) {
     return {
       ok: false,
       reason:
-        "The stop-time Grok review task returned no final output. Run /grok:review --wait manually or bypass the gate."
+        "The stop-time Grok review task returned no final output. Run /grok:review manually or bypass the gate."
     };
   }
 
@@ -91,7 +91,7 @@ function parseStopReviewOutput(rawOutput) {
   return {
     ok: false,
     reason:
-      "The stop-time Grok review task returned an unexpected answer. Run /grok:review --wait manually or bypass the gate."
+      "The stop-time Grok review task returned an unexpected answer. Run /grok:review manually or bypass the gate."
   };
 }
 
@@ -113,7 +113,7 @@ function runStopReview(cwd, input = {}) {
     return {
       ok: false,
       reason:
-        "The stop-time Grok review task timed out after 15 minutes. Run /grok:review --wait manually or bypass the gate."
+        "The stop-time Grok review task timed out after 15 minutes. Run /grok:review manually or bypass the gate."
     };
   }
 
@@ -123,7 +123,7 @@ function runStopReview(cwd, input = {}) {
       ok: false,
       reason: detail
         ? `The stop-time Grok review task failed: ${detail}`
-        : "The stop-time Grok review task failed. Run /grok:review --wait manually or bypass the gate."
+        : "The stop-time Grok review task failed. Run /grok:review manually or bypass the gate."
     };
   }
 
@@ -134,7 +134,7 @@ function runStopReview(cwd, input = {}) {
     return {
       ok: false,
       reason:
-        "The stop-time Grok review task returned invalid JSON. Run /grok:review --wait manually or bypass the gate."
+        "The stop-time Grok review task returned invalid JSON. Run /grok:review manually or bypass the gate."
     };
   }
 }

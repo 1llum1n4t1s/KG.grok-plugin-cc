@@ -189,8 +189,8 @@ function pushJobDetails(lines, job, options = {}) {
     lines.push(`  Result: /grok:result ${job.id}`);
   }
   if (job.status !== "queued" && job.status !== "running" && job.jobClass === "task" && job.write && options.showReviewHint) {
-    lines.push("  Review changes: /grok:review --wait");
-    lines.push("  Stricter review: /grok:adversarial-review --wait");
+    lines.push("  Review changes: /grok:review");
+    lines.push("  Stricter review: /grok:adversarial-review");
   }
   if (job.progressPreview?.length) {
     lines.push("  Progress:");

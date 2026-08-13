@@ -27,6 +27,16 @@ test("cancel without an id selects only the sole active job in the current sessi
   assert.equal(resolveCancelableJob(workspace, "", { env: { GROK_COMPANION_SESSION_ID: "session-a" } }).job.id, "mine");
 });
 
+test("cancel without an id accepts the Codex thread id as session identity", () => {
+  const workspace = makeTempDir();
+  seedJobs(workspace, [
+    { id: "mine", status: "running", sessionId: "codex-task" },
+    { id: "theirs", status: "running", sessionId: "other-task" }
+  ]);
+
+  assert.equal(resolveCancelableJob(workspace, "", { env: { CODEX_THREAD_ID: "codex-task" } }).job.id, "mine");
+});
+
 test("cancel without an id rejects multiple active jobs in the current session", () => {
   const workspace = makeTempDir();
   seedJobs(workspace, [
@@ -61,5 +71,25 @@ test("bare result rejects ambiguous parallel results", () => {
   } finally {
     if (previous == null) delete process.env.GROK_COMPANION_SESSION_ID;
     else process.env.GROK_COMPANION_SESSION_ID = previous;
+  }
+});
+
+test("bare result uses CODEX_THREAD_ID when the shared session variable is absent", () => {
+  const workspace = makeTempDir();
+  seedJobs(workspace, [
+    { id: "codex-result", status: "completed", sessionId: "codex-task" },
+    { id: "other-result", status: "completed", sessionId: "other-task" }
+  ]);
+  const previousShared = process.env.GROK_COMPANION_SESSION_ID;
+  const previousCodex = process.env.CODEX_THREAD_ID;
+  delete process.env.GROK_COMPANION_SESSION_ID;
+  process.env.CODEX_THREAD_ID = "codex-task";
+  try {
+    assert.equal(resolveResultJob(workspace, "").job.id, "codex-result");
+  } finally {
+    if (previousShared == null) delete process.env.GROK_COMPANION_SESSION_ID;
+    else process.env.GROK_COMPANION_SESSION_ID = previousShared;
+    if (previousCodex == null) delete process.env.CODEX_THREAD_ID;
+    else process.env.CODEX_THREAD_ID = previousCodex;
   }
 });

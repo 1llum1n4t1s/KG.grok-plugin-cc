@@ -25,8 +25,8 @@ export function quoteShellArgument(value) {
  * 実行ファイルと引数を、shell に渡せる 1 本のコマンド文字列へ畳む。
  *
  * `shell` を有効にしたまま引数配列を渡すと Node 22 以降が DEP0190 を出す。
- * 警告は stderr へ書かれるので、Claude Code のバックグラウンド実行のように
- * stdout と stderr が 1 つのファイルへ合流する経路では、レポート本文の前に
+ * 警告は stderr へ書かれるので、ホストが stdout と stderr を 1 つの結果へ
+ * 合流する経路では、レポート本文の前に
  * 警告が挟まって出力が汚れる。shell 経由のときは自前で連結して、引数配列は
  * 空のまま spawn する。
  */
