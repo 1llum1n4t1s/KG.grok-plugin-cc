@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.7
+
+- Fixed Codex background execution for review, adversarial review, audit, rescue, and X search.
+  Long-running jobs now stay attached to a Codex-managed process, announce their exact Grok job ID,
+  and expose initial progress instead of detaching invisibly inside the companion. Review and audit
+  skills ask for the execution mode when it is not explicit, while rescue and X search remain
+  foreground by default.
+
 ## 1.0.6
 
 - Updated the explicitly selected default model and the `latest` alias from Grok 4.5 to Grok 4.6,
