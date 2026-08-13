@@ -24,7 +24,7 @@ jobs:
       # このリポジトリの lockfile は pnpm-lock.yaml のみ。
       # npm ci は package-lock.json が要るので使えない。
       - name: Install pnpm
-        run: npm install -g pnpm@11
+        run: npm install -g pnpm@11.4.0
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

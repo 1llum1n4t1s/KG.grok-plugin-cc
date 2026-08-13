@@ -54,7 +54,7 @@
     --ink:#f5f5f7;         /* primary text */
     --frost:#d5d5dc;       /* body text */
     --muted:#9494a1;       /* secondary / EN line */
-    --muted-2:#63636f;     /* faint */
+    --muted-2:#858591;     /* faint, but still readable on dark panels */
     --line:#26262c;        /* hairline */
     --line-bright:#d9775733;
     --ok:#7fd39a;          /* read-only / allowed */
@@ -72,7 +72,7 @@
   }
 
   *,*::before,*::after{ box-sizing:border-box; }
-  html{ scroll-behavior:smooth; -webkit-text-size-adjust:100%; }
+  html{ scroll-behavior:smooth; scroll-padding-top:5rem; -webkit-text-size-adjust:100%; }
   body{
     margin:0; background:var(--bg-1); color:var(--ink);
     font-family:var(--f-body); line-height:1.65;
@@ -419,6 +419,7 @@
 </head>
 
 <body>
+<div id="copyStatus" class="sr-only" role="status" aria-live="polite"></div>
 <div class="bgwrap" aria-hidden="true">
   <svg class="ray-bg" preserveAspectRatio="xMidYMid slice" viewBox="0 0 1200 800" fill="none">
     <g stroke="#d97757" stroke-width="1">
@@ -469,7 +470,7 @@
         <div class="badge-row reveal" style="--d:60ms">
           <span class="badge"><span class="dot"></span>Claude Code + Codex plugin</span>
           <span class="badge">xAI Grok Build</span>
-          <span class="badge">Node.js 18.18+</span>
+          <span class="badge">Node.js 22+</span>
           <span class="badge">Apache-2.0</span>
         </div>
 
@@ -575,7 +576,7 @@
           <div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h10l4 4v10H4z"/><path d="M8 12h6M8 16h4"/></svg></div>
           <span class="h3-en">Review your diff</span>
           <h3>/grok:review</h3>
-          <p><span data-ja lang="ja">ローカルの Git 状態を読み取り専用でレビューし、Grok の指摘をそのまま返します。<code>--base main</code> で比較先を、<code>--scope working-tree</code> で範囲を指定でき、フラグの後ろに残したテキストはそのまま「どこを重点的に見るか」として渡されます。<code>--wait</code> / <code>--background</code> を付けない場合は、Claude Code と Codex のどちらでも実行モードを確認します。Codex のバックグラウンド実行はCodex管理プロセスとして追跡され、GrokジョブIDと初期進捗を表示します。</span><span data-en>Runs a read-only review of your local git state and returns Grok's findings verbatim. Point it with <code>--base main</code>, narrow it with <code>--scope working-tree</code>, and any text left after the flags is passed through as review focus. Without <code>--wait</code> or <code>--background</code>, both Claude Code and Codex ask which mode you want. Codex background runs stay attached as managed processes and report the Grok job ID and initial progress.</span></p>
+          <p><span data-ja lang="ja">ローカルの Git 状態を読み取り専用でレビューし、Grok の指摘をそのまま返します。<code>--base main</code> で比較先を、<code>--scope working-tree</code> で範囲を指定でき、フラグの後ろに残したテキストはそのまま「どこを重点的に見るか」として渡されます。<code>--wait</code> / <code>--background</code> を付けない場合、Claude Code と Codex のどちらも各ホストのバックグラウンドで直ちに開始します。<code>--wait</code> を指定すればフォアグラウンドで実行できます。Codex のバックグラウンド実行は管理プロセスとして追跡され、GrokジョブIDと初期進捗を表示します。</span><span data-en>Runs a read-only review of your local git state and returns Grok's findings verbatim. Point it with <code>--base main</code>, narrow it with <code>--scope working-tree</code>, and any text left after the flags is passed through as review focus. Without <code>--wait</code> or <code>--background</code>, both Claude Code and Codex start immediately in their host-managed background mode. Pass <code>--wait</code> to run in the foreground. Codex background runs stay attached as managed processes and report the Grok job ID and initial progress.</span></p>
           <div class="tags"><span class="hot">--wait</span><span>--background</span><span>--base</span><span>--scope</span></div>
         </article>
 
@@ -591,8 +592,8 @@
           <div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16 16l5 5"/></svg></div>
           <span class="h3-en">Audit the whole codebase</span>
           <h3>/grok:audit</h3>
-          <p><span data-ja lang="ja">差分ではなく、いまあるソースそのものを監査します。渡すのはファイル一覧だけで差分もファイル内容も含めないため、Grok は読み取り専用コマンドで自分が見るべきファイルを選んで読みます。差分レビューよりトークンを食うので、大きなリポジトリでは重点を指定して深く掘らせるのがおすすめです。</span><span data-en>Audits the source as it stands instead of a diff. The context deliberately carries no diff and no file contents — only a file inventory — so Grok reads what it decides to inspect with read-only commands. That makes it noticeably more token-hungry than a diff review; on large repositories, a focus keeps the audit deep instead of broad.</span></p>
-          <div class="tags"><span class="hot"><span data-ja>差分なし</span><span data-en>no diff</span></span><span><span data-ja>重点指定推奨</span><span data-en>focus advised</span></span></div>
+          <p><span data-ja lang="ja">差分ではなく、いまあるソースそのものを監査します。渡すのはファイル一覧だけで差分もファイル内容も含めないため、Grok は読み取り専用コマンドで自分が見るべきファイルを選んで読みます。重点を指定しなくても、アーキテクチャを把握して高リスクな実行経路を選び、呼び出し元、状態遷移、境界、失敗経路、並行性、テストまで既定で深掘りします。大きなリポジトリで特定領域に絞りたい場合だけ、重点を追加できます。</span><span data-en>Audits the source as it stands instead of a diff. The context deliberately carries no diff and no file contents — only a file inventory — so Grok reads what it decides to inspect with read-only commands. Even without a focus, it maps the architecture, selects high-risk execution paths, and traces callers, state transitions, boundaries, failures, concurrency, and tests by default. Add a focus only when you want that deep pass confined to a particular area of a large repository.</span></p>
+          <div class="tags"><span class="hot"><span data-ja>既定で深掘り</span><span data-en>deep by default</span></span><span><span data-ja>重点指定可</span><span data-en>optional focus</span></span></div>
         </article>
 
         <article class="card reveal" style="--d:60ms">
@@ -615,7 +616,7 @@
           <div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9h4M7 13h7M7 17h5"/></svg></div>
           <span class="h3-en">Manage background jobs</span>
           <h3>/grok:status · result · cancel</h3>
-          <p><span data-ja lang="ja"><code>/grok:status</code> でリポジトリの実行中・最近のジョブとレビューゲートの状態を確認。<code>/grok:result</code> は終了したジョブの最終出力を表示し、Grok のセッション ID と <code>grok --resume &lt;id&gt;</code> も併記するので、Grok 自身の TUI で会話を続けられます。<code>/grok:cancel</code> は実行中のジョブと、その背後の Grok のターンを止めます。</span><span data-en><code>/grok:status</code> shows active and recent jobs for the repository plus the state of the review gate. <code>/grok:result</code> prints a finished job's stored output — including the Grok session ID and the <code>grok --resume &lt;id&gt;</code> command, so you can pick the conversation back up in Grok's own TUI. <code>/grok:cancel</code> stops a running job and the Grok turn behind it.</span></p>
+          <p><span data-ja lang="ja"><code>/grok:status</code> でリポジトリの実行中・最近のジョブとレビューゲートの状態を確認。<code>/grok:result</code> は終了したジョブの最終出力を表示し、Grok のセッション ID と <code>grok --resume &lt;id&gt;</code> も併記するので、Grok 自身の TUI で会話を続けられます。<code>/grok:cancel</code> は実行中のジョブと、その背後の Grok のターンを止めます。IDを省略した場合は現在のセッションで実行中のジョブが1件だけなら停止し、複数ある場合は勝手に選ばずIDの指定を求めます。</span><span data-en><code>/grok:status</code> shows active and recent jobs for the repository plus the state of the review gate. <code>/grok:result</code> prints a finished job's stored output — including the Grok session ID and the <code>grok --resume &lt;id&gt;</code> command, so you can pick the conversation back up in Grok's own TUI. <code>/grok:cancel</code> stops a running job and the Grok turn behind it. With no ID, it cancels only when the current session has exactly one active job; if several are active, it asks for an ID instead of guessing.</span></p>
           <div class="tags"><span class="hot">--all</span><span>--wait</span><span>&lt;job-id&gt;</span></div>
         </article>
 
@@ -675,7 +676,7 @@
       <div class="sec-head reveal">
         <span class="eyebrow">Requirements</span>
         <h2 id="req-title"><span data-ja>動作環境</span><span data-en>What you need</span></h2>
-        <p class="h2-en">Grok Build, signed in, on Node 18.18+.</p>
+        <p class="h2-en">Grok Build, signed in, on Node 22+.</p>
       </div>
       <div class="req-grid">
         <div class="req reveal" style="--d:40ms">
@@ -688,7 +689,7 @@
         </div>
         <div class="req reveal" style="--d:140ms">
           <div class="k">Node.js</div>
-          <div class="v">18.18+<small><span data-ja>プラグイン本体の実行に使用</span><span data-en>used to run the plugin itself</span></small></div>
+          <div class="v">22+<small><span data-ja>プラグイン本体の実行に使用</span><span data-en>used to run the plugin itself</span></small></div>
         </div>
         <div class="req reveal" style="--d:190ms">
           <div class="k">Claude Code / Codex</div>
@@ -888,24 +889,43 @@
   /* 2) コマンドのコピーボタン。clipboard API が無い環境では選択用の
         フォールバック（textarea + execCommand）に落とす。 */
   document.querySelectorAll('.copy').forEach(function(b){
+    var command = b.getAttribute('data-copy') || '';
+    b.setAttribute('aria-label', (doc.classList.contains('lang-en') ? 'Copy command: ' : 'コマンドをコピー: ') + command);
     b.addEventListener('click', function(){
       var text = b.getAttribute('data-copy') || '';
+      var previousFocus = document.activeElement;
+      var status = document.getElementById('copyStatus');
+      b.disabled = true;
+      if (b._copyResetTimer) clearTimeout(b._copyResetTimer);
       var done = function(){
         var prev = b.textContent;
         b.textContent = doc.classList.contains('lang-en') ? 'COPIED' : 'コピー済';
         b.classList.add('done');
-        setTimeout(function(){ b.textContent = prev; b.classList.remove('done'); }, 1600);
+        b.disabled = false;
+        if (status) status.textContent = doc.classList.contains('lang-en') ? 'Command copied.' : 'コマンドをコピーしました。';
+        if (previousFocus && previousFocus.focus) previousFocus.focus();
+        b._copyResetTimer = setTimeout(function(){ b.textContent = prev; b.classList.remove('done'); }, 1600);
+      };
+      var failed = function(){
+        b.disabled = false;
+        if (status) status.textContent = doc.classList.contains('lang-en') ? 'Copy failed.' : 'コピーできませんでした。';
+        if (previousFocus && previousFocus.focus) previousFocus.focus();
+      };
+      var fallback = function(){
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.setAttribute('readonly','');
+        ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        var copied = false;
+        try { copied = document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+        if (copied) done(); else failed();
       };
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(done, function(){});
+        navigator.clipboard.writeText(text).then(done, fallback);
         return;
       }
-      var ta = document.createElement('textarea');
-      ta.value = text; ta.setAttribute('readonly','');
-      ta.style.position = 'fixed'; ta.style.opacity = '0';
-      document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); done(); } catch (e) {}
-      document.body.removeChild(ta);
+      fallback();
     });
   });
 
