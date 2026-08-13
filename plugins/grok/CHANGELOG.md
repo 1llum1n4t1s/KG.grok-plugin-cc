@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+## 1.0.9
+
+- Unified Claude Code, Codex, and the companion runtime on foreground-only Grok execution. Legacy
+  `--wait` remains a no-op, while `--background` now fails clearly instead of creating a second
+  process lifecycle.
+- Added `CODEX_THREAD_ID` as the Codex session identity fallback so tracked jobs, bare results,
+  cancellation, and rescue continuation remain scoped to the current Codex task.
+- Added complete Japanese installation and usage documentation alongside the English README.
+
 ## 1.0.8
 
 - Hardened read-only reviews against shell-control bypasses, write-capable Git forms, repository
