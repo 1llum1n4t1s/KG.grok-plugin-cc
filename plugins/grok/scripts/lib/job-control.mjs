@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./grok.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
+import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -13,7 +13,9 @@ export function sortJobsNewestFirst(jobs) {
 }
 
 function getCurrentSessionId(options = {}) {
-  return options.env?.[SESSION_ID_ENV] ?? process.env[SESSION_ID_ENV] ?? null;
+  return options.env
+    ? options.env[SESSION_ID_ENV] ?? null
+    : process.env[SESSION_ID_ENV] ?? null;
 }
 
 function filterJobsForCurrentSession(jobs, options = {}) {
@@ -194,6 +196,35 @@ export function readStoredJob(workspaceRoot, jobId) {
  * 検索する前に弾く。シェルのメタ文字が紛れ込んだまま先へ流れるのも防ぐ。
  */
 const JOB_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const STALE_QUEUED_JOB_MS = 60_000;
+
+function processExists(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function reconcileOrphanedJobs(workspaceRoot) {
+  const now = Date.now();
+  for (const job of listJobs(workspaceRoot)) {
+    const queuedTooLong = job.status === "queued" && now - Date.parse(job.createdAt ?? job.updatedAt ?? "") > STALE_QUEUED_JOB_MS;
+    const runningProcessExited = job.status === "running" && Number.isInteger(job.pid) && !processExists(job.pid);
+    if (!queuedTooLong && !runningProcessExited) continue;
+
+    const completedAt = new Date(now).toISOString();
+    const errorMessage = queuedTooLong
+      ? "Background worker did not start within 60 seconds."
+      : "Background worker process exited without recording a final result.";
+    const stored = readStoredJob(workspaceRoot, job.id) ?? job;
+    const failed = { ...stored, status: "failed", phase: "failed", pid: null, completedAt, errorMessage };
+    writeJobFile(workspaceRoot, job.id, failed);
+    upsertJob(workspaceRoot, { id: job.id, status: "failed", phase: "failed", pid: null, completedAt, errorMessage });
+  }
+}
 
 function matchJobReference(jobs, reference, predicate = () => true) {
   const filtered = jobs.filter(predicate);
@@ -225,6 +256,7 @@ function matchJobReference(jobs, reference, predicate = () => true) {
 
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  reconcileOrphanedJobs(workspaceRoot);
   const config = getConfig(workspaceRoot);
   const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
@@ -268,7 +300,17 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
 
 export function resolveResultJob(cwd, reference) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const sessionId = getCurrentSessionId();
+  if (!reference && !sessionId) {
+    throw new Error("Pass a job id to /grok:result when no current session id is available.");
+  }
   const jobs = sortJobsNewestFirst(reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot)));
+  if (!reference) {
+    const finishedJobs = jobs.filter((job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled");
+    if (finishedJobs.length > 1) {
+      throw new Error("Multiple finished Grok jobs exist for this session. Pass the exact job id to /grok:result.");
+    }
+  }
   const selected = matchJobReference(
     jobs,
     reference,
@@ -304,6 +346,10 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
     return { workspaceRoot, job: selected };
   }
 
+  const currentSessionId = getCurrentSessionId(options);
+  if (!currentSessionId) {
+    throw new Error("No active Grok jobs to cancel for a known session. Pass an exact job id.");
+  }
   const sessionScopedActiveJobs = filterJobsForCurrentSession(activeJobs, options);
 
   if (sessionScopedActiveJobs.length === 1) {
@@ -313,9 +359,5 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
     throw new Error("Multiple Grok jobs are active. Pass a job id to /grok:cancel.");
   }
 
-  if (getCurrentSessionId(options)) {
-    throw new Error("No active Grok jobs to cancel for this session.");
-  }
-
-  throw new Error("No active Grok jobs to cancel.");
+  throw new Error("No active Grok jobs to cancel for this session.");
 }

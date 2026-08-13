@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { terminateProcessTree } from "./lib/process.mjs";
+import { processCommandContains, terminateProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/acp.mjs";
 import {
   clearBrokerSession,
@@ -13,7 +13,7 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
+import { listJobs, resolveStateFile, updateState } from "./lib/state.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -52,8 +52,11 @@ function cleanupSessionJobs(cwd, sessionId) {
     return;
   }
 
-  const state = loadState(workspaceRoot);
-  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
+  let removedJobs = [];
+  updateState(workspaceRoot, (state) => {
+    removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
+    state.jobs = state.jobs.filter((job) => job.sessionId !== sessionId);
+  });
   if (removedJobs.length === 0) {
     return;
   }
@@ -64,16 +67,13 @@ function cleanupSessionJobs(cwd, sessionId) {
       continue;
     }
     try {
-      terminateProcessTree(job.pid ?? Number.NaN);
+      if (processCommandContains(job.pid, job.id)) {
+        terminateProcessTree(job.pid);
+      }
     } catch {
       // Ignore teardown failures during session shutdown.
     }
   }
-
-  saveState(workspaceRoot, {
-    ...state,
-    jobs: state.jobs.filter((job) => job.sessionId !== sessionId)
-  });
 }
 
 function handleSessionStart(input) {
@@ -101,11 +101,17 @@ async function handleSessionEnd(input) {
   const sessionDir = brokerSession?.sessionDir ?? null;
   const pid = brokerSession?.pid ?? null;
 
-  if (brokerEndpoint) {
-    await sendBrokerShutdown(brokerEndpoint);
+  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const otherActiveJobs = listJobs(workspaceRoot).some((job) => job.status === "queued" || job.status === "running");
+  if (otherActiveJobs) {
+    return;
   }
 
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  if (brokerEndpoint) {
+    await sendBrokerShutdown(brokerEndpoint, 250);
+  }
+
   teardownBrokerSession({
     endpoint: brokerEndpoint,
     pidFile,

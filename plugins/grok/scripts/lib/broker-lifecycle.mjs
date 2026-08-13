@@ -6,7 +6,7 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
-import { terminateProcessTree } from "./process.mjs";
+import { processCommandContains, terminateProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
 
 export const PID_FILE_ENV = "GROK_COMPANION_APP_SERVER_PID_FILE";
@@ -106,8 +106,17 @@ export function loadBrokerSession(cwd) {
 
 export function saveBrokerSession(cwd, session) {
   const stateDir = resolveStateDir(cwd);
-  fs.mkdirSync(stateDir, { recursive: true });
-  fs.writeFileSync(resolveBrokerStateFile(cwd), `${JSON.stringify(session, null, 2)}\n`, "utf8");
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const stateFile = resolveBrokerStateFile(cwd);
+  const temporaryFile = `${stateFile}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    fs.writeFileSync(temporaryFile, `${JSON.stringify(session, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporaryFile, stateFile);
+  } finally {
+    if (fs.existsSync(temporaryFile)) {
+      fs.rmSync(temporaryFile, { force: true });
+    }
+  }
 }
 
 export function clearBrokerSession(cwd) {
@@ -177,19 +186,22 @@ function releaseBrokerLock(cwd) {
 
 export async function ensureBrokerSession(cwd, options = {}) {
   const existing = loadBrokerSession(cwd);
-  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
+  const authMode = (options.env ?? process.env).XAI_API_KEY ? "api-key" : "browser";
+  if (existing?.authMode && existing.authMode !== authMode) {
+    // 異なる認証コンテキストの broker は再利用しない。
+  } else if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
     return existing;
   }
 
   if (!acquireBrokerLock(cwd)) {
     // 別プロセスが今まさに立ち上げている。その結果を待って使い回す。
-    const rival = loadBrokerSession(cwd);
-    if (rival && (await isBrokerEndpointReady(rival.endpoint))) {
-      return rival;
-    }
-    const retried = loadBrokerSession(cwd);
-    if (retried && (await waitForBrokerEndpoint(retried.endpoint, options.timeoutMs ?? 2000))) {
-      return retried;
+    const deadline = Date.now() + (options.timeoutMs ?? 2000);
+    while (Date.now() < deadline) {
+      const rival = loadBrokerSession(cwd);
+      if (rival && (!rival.authMode || rival.authMode === authMode) && (await isBrokerEndpointReady(rival.endpoint))) {
+        return rival;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
     // 待っても使えなければ、呼び出し側の直接起動フォールバックへ委ねる。
     return null;
@@ -206,7 +218,8 @@ async function startBrokerSession(cwd, options, existing) {
   // ロックを取った後にもう一度見る。待っている間に別プロセスが
   // 立ち上げ切っているかもしれない。
   const current = loadBrokerSession(cwd);
-  if (current && current.endpoint !== existing?.endpoint && (await isBrokerEndpointReady(current.endpoint))) {
+  const authMode = (options.env ?? process.env).XAI_API_KEY ? "api-key" : "browser";
+  if (current && current.endpoint !== existing?.endpoint && (!current.authMode || current.authMode === authMode) && (await isBrokerEndpointReady(current.endpoint))) {
     return current;
   }
 
@@ -264,7 +277,8 @@ async function startBrokerSession(cwd, options, existing) {
     pidFile,
     logFile,
     sessionDir,
-    pid: child.pid ?? null
+    pid: child.pid ?? null,
+    authMode
   };
   saveBrokerSession(cwd, session);
   return session;
@@ -279,7 +293,7 @@ export function teardownBrokerSession({
   killProcess = null,
   keepLog = false
 }) {
-  if (Number.isFinite(pid) && killProcess) {
+  if (Number.isFinite(pid) && killProcess && processCommandContains(pid, "acp-broker.mjs")) {
     try {
       killProcess(pid);
     } catch {

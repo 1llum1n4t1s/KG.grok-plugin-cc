@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { makeTempDir } from "./helpers.mjs";
-import { resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/grok/scripts/lib/state.mjs";
+import { loadState, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
 
 test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   const workspace = makeTempDir();
@@ -14,6 +14,30 @@ test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   assert.equal(stateDir.startsWith(os.tmpdir()), true);
   assert.match(path.basename(stateDir), /.+-[a-f0-9]{16}$/);
   assert.match(stateDir, new RegExp(`^${os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+});
+
+test("corrupt state is reported and never silently replaced", () => {
+  const workspace = makeTempDir();
+  const stateFile = resolveStateFile(workspace);
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, "{broken", "utf8");
+
+  assert.throws(() => loadState(workspace), /state is corrupt/i);
+  assert.equal(fs.readFileSync(stateFile, "utf8"), "{broken");
+});
+
+test("state and job JSON writes leave no temporary files", () => {
+  const workspace = makeTempDir();
+  saveState(workspace, { version: 1, config: {}, jobs: [] });
+  writeJobFile(workspace, "job-atomic", { id: "job-atomic", status: "queued" });
+
+  const stateDir = resolveStateDir(workspace);
+  const files = fs.readdirSync(stateDir, { recursive: true }).map(String);
+  assert.equal(files.some((name) => name.endsWith(".tmp")), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(resolveJobFile(workspace, "job-atomic"), "utf8")), {
+    id: "job-atomic",
+    status: "queued"
+  });
 });
 
 test("resolveStateDir uses CLAUDE_PLUGIN_DATA when it is provided", () => {

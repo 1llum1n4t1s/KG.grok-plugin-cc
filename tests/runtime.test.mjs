@@ -259,11 +259,28 @@ ${result.stderr}`);
   assert.match(prompt, /full-repository audit/i);
   assert.match(prompt, /ignore any uncommitted diff/i);
   assert.match(prompt, /focus on auth/);
+  assert.doesNotMatch(prompt, /default deep-audit focus/i);
   assert.match(prompt, /## Tracked Files/);
   // setupWorkspace は auth.js を書き換えて working tree を汚しているが、
   // 監査プロンプトにその差分が混入しないこと。
   assert.doesNotMatch(prompt, /Unstaged Diff/);
   assert.doesNotMatch(prompt, /export const a = 2;/);
+});
+
+test("audit applies a risk-directed deep investigation when focus is omitted", () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
+
+  const result = companion(["audit", "--wait"], { repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  const prompt = fake.readState().prompts[0];
+  assert.match(prompt, /default deep-audit focus/i);
+  assert.match(prompt, /highest-risk execution paths/i);
+  assert.match(prompt, /callers, callees, state transitions, trust boundaries/i);
+  assert.match(prompt, /failure and cleanup paths, concurrency behavior/i);
+  assert.match(prompt, /relevant tests or documented contracts/i);
+  assert.match(prompt, /<depth_gate>/);
+  assert.doesNotMatch(prompt, /No extra focus provided\./);
 });
 
 test("audit can detach through the companion without a host-specific background API", () => {
@@ -320,7 +337,8 @@ test("result replays the stored rendering of a finished job", () => {
   const { repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
 
   companion(["review", "--wait"], { repo, env });
-  const result = companion(["result"], { repo, env });
+  const status = JSON.parse(companion(["status", "--json", "--all"], { repo, env }).stdout);
+  const result = companion(["result", status.latestFinished.id], { repo, env });
 
   assert.equal(result.status, 0, `stdout:
 ${result.stdout}
@@ -333,6 +351,38 @@ ${result.stderr}`);
 
 // --- task（/grok:rescue の実体）---------------------------------------
 // ここは書き込みを許しうる唯一の経路なので、権限分岐を実プロセスで確かめる。
+
+test("task rejects an omitted rescue request without recording a failed job", () => {
+  const workspace = setupWorkspace({ replies: [{ text: "should not run" }] });
+
+  const result = companion(["task"], workspace);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Provide a prompt.*or use --resume-last/i);
+  assert.equal(workspace.fake.readState(), null);
+
+  const status = companion(["status", "--json", "--all"], workspace);
+  assert.equal(status.status, 0, status.stderr);
+  const payload = JSON.parse(status.stdout);
+  assert.deepEqual(payload.running, []);
+  assert.equal(payload.latestFinished, null);
+  assert.deepEqual(payload.recent, []);
+});
+
+test("status marks schema-invalid review JSON as failed", () => {
+  const malformedShape = JSON.stringify({
+    verdict: "approve",
+    summary: "Looks fine.",
+    findings: [{ severity: "urgent", title: "Bad enum" }],
+    next_steps: []
+  });
+  const { repo, env } = setupWorkspace({ replies: [{ text: malformedShape }] });
+
+  companion(["review", "--wait"], { repo, env });
+  const payload = JSON.parse(companion(["status", "--json", "--all"], { repo, env }).stdout);
+
+  assert.equal(payload.latestFinished.status, "failed");
+});
 
 test("task without --write denies write permission requests", () => {
   const { repo, env } = setupWorkspace({

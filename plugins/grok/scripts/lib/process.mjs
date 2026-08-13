@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import process from "node:process";
 
 /**
@@ -135,19 +136,42 @@ export function terminateProcessTree(pid, options = {}) {
     killImpl(-pid, "SIGTERM");
     return { attempted: true, delivered: true, method: "process-group" };
   } catch (error) {
-    if (error?.code !== "ESRCH") {
-      try {
-        killImpl(pid, "SIGTERM");
-        return { attempted: true, delivered: true, method: "process" };
-      } catch (innerError) {
-        if (innerError?.code === "ESRCH") {
-          return { attempted: true, delivered: false, method: "process" };
-        }
-        throw innerError;
+    // detached process group が無い場合でも、正の PID のプロセス自体は
+    // 存在し得る。ESRCH を含む group kill の全失敗で個別 kill を試す。
+    try {
+      killImpl(pid, "SIGTERM");
+      return { attempted: true, delivered: true, method: "process" };
+    } catch (innerError) {
+      if (innerError?.code === "ESRCH") {
+        return { attempted: true, delivered: false, method: "process" };
       }
+      throw innerError;
     }
+  }
+}
 
-    return { attempted: true, delivered: false, method: "process-group" };
+export function processCommandContains(pid, marker, options = {}) {
+  if (!Number.isInteger(pid) || pid <= 0 || typeof marker !== "string" || !marker) {
+    return false;
+  }
+  const platform = options.platform ?? process.platform;
+  const runCommandImpl = options.runCommandImpl ?? runCommand;
+  try {
+    if (platform === "linux") {
+      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ");
+      return cmdline.includes(marker);
+    }
+    const result = platform === "win32"
+      ? runCommandImpl("powershell.exe", [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`
+        ], { shell: false })
+      : runCommandImpl("ps", ["-p", String(pid), "-o", "command="], { shell: false });
+    return !result.error && result.status === 0 && String(result.stdout).includes(marker);
+  } catch {
+    return false;
   }
 }
 

@@ -45,6 +45,32 @@ test("パイプや連結の全セグメントを検査する", () => {
   assert.equal(classifyShellCommand("ls | grep foo | wc -l").allowed, true);
 });
 
+test("改行や各 shell 固有の連結・展開構文は拒否する", () => {
+  for (const command of [
+    "git diff\nrm -rf .",
+    "git diff & rm -rf .",
+    "cat package.json < payload.txt",
+    "echo %USERPROFILE%",
+    "echo !TEMP!"
+  ]) {
+    assert.equal(classifyShellCommand(command).allowed, false, command);
+  }
+});
+
+test("書き込み可能な git 照会風サブコマンドとリポジトリ外パスを拒否する", () => {
+  for (const command of [
+    "git branch scratch",
+    "git tag release-candidate",
+    "git remote set-url origin example.invalid/repo",
+    "git config user.name attacker",
+    "cat ../secret.txt",
+    "cat C:\\Users\\someone\\secret.txt",
+    "cat /etc/passwd"
+  ]) {
+    assert.equal(classifyShellCommand(command).allowed, false, command);
+  }
+});
+
 test("環境変数の前置きを読み飛ばす", () => {
   assert.equal(classifyShellCommand("GIT_PAGER=cat git log -1").allowed, true);
 });

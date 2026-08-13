@@ -96,17 +96,20 @@ export function splitRawArgumentString(raw) {
   const tokens = [];
   let current = "";
   let quote = null;
-  let escaping = false;
 
-  for (const character of raw) {
-    if (escaping) {
-      current += character;
-      escaping = false;
-      continue;
-    }
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index];
 
     if (character === "\\") {
-      escaping = true;
+      const next = raw[index + 1];
+      // Windows のパス区切りは通常文字として保持する。引用符・空白・
+      // バックスラッシュを明示的に escape した場合だけ escape と解釈する。
+      if (next === "\\" || next === quote || (!quote && (next === "\"" || next === "'" || /\s/.test(next ?? "")))) {
+        current += next;
+        index += 1;
+      } else {
+        current += character;
+      }
       continue;
     }
 
@@ -133,10 +136,6 @@ export function splitRawArgumentString(raw) {
     }
 
     current += character;
-  }
-
-  if (escaping) {
-    current += "\\";
   }
 
   if (current) {

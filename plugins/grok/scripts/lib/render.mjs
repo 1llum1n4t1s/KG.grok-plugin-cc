@@ -30,7 +30,7 @@ function formatLineRange(finding) {
   return `:${finding.line_start}-${finding.line_end}`;
 }
 
-function validateReviewResultShape(data) {
+export function validateReviewResultShape(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     return "Expected a top-level JSON object.";
   }
@@ -45,6 +45,34 @@ function validateReviewResultShape(data) {
   }
   if (!Array.isArray(data.next_steps)) {
     return "Missing array `next_steps`.";
+  }
+  if (!new Set(["approve", "needs-attention"]).has(data.verdict)) {
+    return "Invalid `verdict`.";
+  }
+  const severities = new Set(["critical", "high", "medium", "low"]);
+  for (let index = 0; index < data.findings.length; index += 1) {
+    const finding = data.findings[index];
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)) {
+      return `Finding ${index + 1} must be an object.`;
+    }
+    for (const field of ["title", "body", "file", "recommendation"]) {
+      if (typeof finding[field] !== "string" || (field !== "recommendation" && !finding[field].trim())) {
+        return `Finding ${index + 1} has invalid \`${field}\`.`;
+      }
+    }
+    if (!severities.has(finding.severity)) {
+      return `Finding ${index + 1} has invalid \`severity\`.`;
+    }
+    if (!Number.isInteger(finding.line_start) || finding.line_start < 1 ||
+        !Number.isInteger(finding.line_end) || finding.line_end < finding.line_start) {
+      return `Finding ${index + 1} has invalid line range.`;
+    }
+    if (typeof finding.confidence !== "number" || finding.confidence < 0 || finding.confidence > 1) {
+      return `Finding ${index + 1} has invalid \`confidence\`.`;
+    }
+  }
+  if (data.next_steps.some((step) => typeof step !== "string" || !step.trim())) {
+    return "Invalid item in `next_steps`.";
   }
   return null;
 }
@@ -428,8 +456,11 @@ export function renderStatusReport(report) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-export function renderJobStatusReport(job) {
+export function renderJobStatusReport(job, options = {}) {
   const lines = ["# Grok Job Status", ""];
+  if (options.waitTimedOut) {
+    lines.push(`Wait timed out after ${options.timeoutMs}ms; the job is still ${job.status}.`, "");
+  }
   pushJobDetails(lines, job, {
     showElapsed: job.status === "queued" || job.status === "running",
     showDuration: job.status !== "queued" && job.status !== "running",

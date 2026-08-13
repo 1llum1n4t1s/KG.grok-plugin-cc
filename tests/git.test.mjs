@@ -255,3 +255,19 @@ test("collectReviewContext keeps untracked file content in lightweight working t
   assert.match(context.content, /## Untracked Files/);
   assert.match(context.content, /UNTRACKED_RISK_MARKER/);
 });
+
+test("collectReviewContext caps aggregate untracked file content", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "tracked.js"), "export const tracked = true;\n");
+  run("git", ["add", "tracked.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  for (let index = 0; index < 12; index += 1) {
+    fs.writeFileSync(path.join(cwd, `untracked-${String(index).padStart(2, "0")}.txt`), `${index}: ${"x".repeat(23 * 1024)}\n`);
+  }
+
+  const context = collectReviewContext(cwd, resolveReviewTarget(cwd, {}));
+
+  assert.match(context.content, /aggregate untracked-file limit reached/);
+  assert.ok(Buffer.byteLength(context.content, "utf8") < 300 * 1024);
+});

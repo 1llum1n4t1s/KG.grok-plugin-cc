@@ -59,7 +59,13 @@ export function resolveJobsDir(cwd) {
 }
 
 export function ensureStateDir(cwd) {
-  fs.mkdirSync(resolveJobsDir(cwd), { recursive: true });
+  fs.mkdirSync(resolveJobsDir(cwd), { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(resolveStateDir(cwd), 0o700);
+    fs.chmodSync(resolveJobsDir(cwd), 0o700);
+  } catch {
+    // Windows では POSIX mode が実質無効。作成自体が成功していれば続行する。
+  }
 }
 
 export function loadState(cwd) {
@@ -79,8 +85,25 @@ export function loadState(cwd) {
       },
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : []
     };
-  } catch {
-    return defaultState();
+  } catch (error) {
+    throw new Error(`Grok state is corrupt and was left untouched: ${stateFile}`, { cause: error });
+  }
+}
+
+function writeJsonAtomic(filePath, payload) {
+  const temporaryPath = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporaryPath, filePath);
+    try {
+      fs.chmodSync(filePath, 0o600);
+    } catch {
+      // Windows では POSIX mode が実質無効。
+    }
+  } finally {
+    if (fs.existsSync(temporaryPath)) {
+      fs.rmSync(temporaryPath, { force: true });
+    }
   }
 }
 
@@ -118,7 +141,7 @@ export function saveState(cwd, state) {
     removeFileIfExists(job.logFile);
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  writeJsonAtomic(resolveStateFile(cwd), nextState);
   return nextState;
 }
 
@@ -134,8 +157,8 @@ function resolveStateLockFile(cwd) {
  * 後から書いた側が相手の更新を丸ごと消し、止めたはずのジョブが
  * running のまま残ったり、進行中ジョブのログが消えたりする。
  *
- * ロックが取れないまま待ち切った場合でも更新自体は行う。ここで諦めると
- * ジョブの完了記録が失われる方が実害が大きい。
+ * ロックが取れない場合は fail closed にする。競合した read-modify-write で
+ * cancel や完了記録を消すより、呼び出し元へ再試行可能な失敗を返す。
  */
 function withStateLock(cwd, run) {
   ensureStateDir(cwd);
@@ -163,6 +186,10 @@ function withStateLock(cwd, run) {
     }
 
     Atomics.wait(SLEEP_SIGNAL, 0, 0, STATE_LOCK_RETRY_INTERVAL_MS);
+  }
+
+  if (!held) {
+    throw new Error(`Timed out acquiring Grok state lock: ${lockFile}`);
   }
 
   try {
@@ -231,23 +258,21 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  writeJsonAtomic(jobFile, payload);
   return jobFile;
 }
 
 /**
  * ジョブ JSON を読む。
  *
- * 書き込みは非アトミックなので、途中で落ちたプロセスが壊れたファイルを
- * 残すことがある。素の JSON.parse だと `/grok:result` や `/grok:cancel` が
- * パースエラーだけ出して終わり、利用者は直しようがなくなる。
- * 読めないものは「無い」ものとして扱い、上位の復旧経路へ委ねる。
+ * 書き込みは atomic rename だが、旧版や外部破損の診断性を保つため、
+ * 読めないファイルを「存在しない」と偽らず明示エラーにする。
  */
 export function readJobFile(jobFile) {
   try {
     return JSON.parse(fs.readFileSync(jobFile, "utf8"));
-  } catch {
-    return null;
+  } catch (error) {
+    throw new Error(`Grok job record is corrupt: ${jobFile}`, { cause: error });
   }
 }
 

@@ -5,6 +5,7 @@ import process from "node:process";
 import {
   buildShellCommand,
   quoteShellArgument,
+  processCommandContains,
   runCommand,
   terminateProcessTree
 } from "../plugins/grok/scripts/lib/process.mjs";
@@ -16,6 +17,21 @@ test("quoteShellArgument leaves plain words and pre-quoted values alone", () => 
   assert.equal(quoteShellArgument("grok"), "grok");
   assert.equal(quoteShellArgument("C:\\tools\\grok.cmd"), "C:\\tools\\grok.cmd");
   assert.equal(quoteShellArgument("\"C:\\Program Files\\grok.cmd\""), "\"C:\\Program Files\\grok.cmd\"");
+});
+
+test("processCommandContains verifies a job marker before termination", () => {
+  assert.equal(processCommandContains(1234, "job-exact", {
+    platform: "darwin",
+    runCommandImpl() {
+      return { status: 0, stdout: "node grok-companion.mjs review-worker --job-id job-exact", stderr: "", error: null };
+    }
+  }), true);
+  assert.equal(processCommandContains(1234, "job-other", {
+    platform: "darwin",
+    runCommandImpl() {
+      return { status: 0, stdout: "node grok-companion.mjs review-worker --job-id job-exact", stderr: "", error: null };
+    }
+  }), false);
 });
 
 test("quoteShellArgument quotes spaces without mangling backslashes", () => {
@@ -97,4 +113,23 @@ test("terminateProcessTree treats missing Windows processes as already stopped",
   assert.equal(outcome.method, "taskkill");
   assert.equal(outcome.result.status, 128);
   assert.match(outcome.result.stdout, /not found/i);
+});
+
+test("terminateProcessTree falls back to the positive pid when a Unix process group is missing", () => {
+  const calls = [];
+  const outcome = terminateProcessTree(1234, {
+    platform: "linux",
+    killImpl(pid, signal) {
+      calls.push([pid, signal]);
+      if (pid < 0) {
+        const error = new Error("missing process group");
+        error.code = "ESRCH";
+        throw error;
+      }
+    }
+  });
+
+  assert.deepEqual(calls, [[-1234, "SIGTERM"], [1234, "SIGTERM"]]);
+  assert.equal(outcome.delivered, true);
+  assert.equal(outcome.method, "process");
 });

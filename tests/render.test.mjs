@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   renderReviewResult,
+  renderJobStatusReport,
   renderStoredJobResult,
   renderSetupReport,
   renderStatusReport
@@ -30,6 +31,15 @@ test("renderReviewResult degrades gracefully when JSON is missing required revie
   assert.match(output, /Grok returned JSON with an unexpected review shape\./);
   assert.match(output, /Missing array `findings`\./);
   assert.match(output, /Raw final message:/);
+});
+
+test("renderJobStatusReport makes a wait timeout visible", () => {
+  const output = renderJobStatusReport(
+    { id: "job-1", status: "running", title: "Review", phase: "reviewing" },
+    { waitTimedOut: true, timeoutMs: 250 }
+  );
+  assert.match(output, /timed out after 250ms/i);
+  assert.match(output, /still running/i);
 });
 
 test("renderStoredJobResult prefers rendered output for structured review jobs", () => {

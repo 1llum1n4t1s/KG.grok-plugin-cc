@@ -22,7 +22,7 @@ import {
   } from "./lib/grok.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
+import { binaryAvailable, processCommandContains, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   generateJobId,
@@ -53,6 +53,7 @@ import {
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
   renderReviewResult,
+  validateReviewResultShape,
   renderStoredJobResult,
   renderCancelReport,
   renderJobStatusReport,
@@ -68,7 +69,6 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 // grok-4.6 の initialize が申告する reasoningEfforts（実測: high が既定）。
 const VALID_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
 // 言語タグの形。`ja`, `en-US`, `zh-Hans-CN` などを想定した緩めの BCP 47。
-const BCP47_PATTERN = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,4}$/;
 // 打ちやすい別名。右辺は `grok models` / session/new が返す実 ID。
 const MODEL_ALIASES = new Map([
   ["fast", "grok-4.20-0309-non-reasoning"],
@@ -169,13 +169,14 @@ function sleep(ms) {
 
 function shorten(text, limit = 96) {
   const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
+  const characters = Array.from(normalized);
   if (!normalized) {
     return "";
   }
-  if (normalized.length <= limit) {
+  if (characters.length <= limit) {
     return normalized;
   }
-  return `${normalized.slice(0, limit - 3)}...`;
+  return `${characters.slice(0, limit - 3).join("")}...`;
 }
 
 function firstMeaningfulLine(text, fallback) {
@@ -279,8 +280,13 @@ function buildResponseLanguageRule(language, focusText) {
   const fields = "every human-readable field (summary, finding titles and bodies, recommendations, next steps)";
   // タグはそのまま命令文へ埋まるので、BCP 47 の形をしたものだけ通す。
   // 検証しないと、任意の文章を指示としてプロンプトへ差し込めてしまう。
-  if (language && BCP47_PATTERN.test(language)) {
-    return `Write ${fields} in the language identified by the BCP 47 tag "${language}".`;
+  if (language) {
+    try {
+      const normalizedLanguage = new Intl.Locale(language).toString();
+      return `Write ${fields} in the language identified by the BCP 47 tag "${normalizedLanguage}".`;
+    } catch {
+      throw new Error(`Invalid BCP 47 language tag "${language}".`);
+    }
   }
   if (focusText) {
     return `Write ${fields} in the same language as the user focus above.`;
@@ -288,12 +294,28 @@ function buildResponseLanguageRule(language, focusText) {
   return `Write ${fields} in English.`;
 }
 
+function buildUserFocus(reviewName, focusText) {
+  if (focusText) {
+    return focusText;
+  }
+  if (reviewName === "Audit") {
+    return [
+      "No extra focus was supplied. Apply the default deep-audit focus:",
+      "map the architecture, select the highest-risk execution paths proportional to the repository's size,",
+      "and trace each selected path end to end through its callers, callees, state transitions, trust boundaries,",
+      "persistence or external-service boundaries, failure and cleanup paths, concurrency behavior,",
+      "and relevant tests or documented contracts."
+    ].join(" ");
+  }
+  return "No extra focus provided.";
+}
+
 function buildReviewPromptFor(reviewName, context, focusText, language) {
   const template = loadPromptTemplate(ROOT_DIR, reviewTemplateNameFor(reviewName));
   return interpolateTemplate(template, {
     REVIEW_KIND: reviewName,
     TARGET_LABEL: context.target.label,
-    USER_FOCUS: focusText || "No extra focus provided.",
+    USER_FOCUS: buildUserFocus(reviewName, focusText),
     REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
     RESPONSE_LANGUAGE_RULE: buildResponseLanguageRule(language, focusText),
     REVIEW_INPUT: context.content
@@ -380,10 +402,7 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
 }
 
 async function executeReviewRun(request) {
-  ensureGrokAvailable(request.cwd);
-  ensureGitRepository(request.cwd);
-
-  const target = resolveReviewTarget(request.cwd, {
+  const target = request.target ?? resolveReviewTarget(request.cwd, {
     base: request.base,
     scope: request.scope
   });
@@ -402,6 +421,10 @@ async function executeReviewRun(request) {
     status: result.status,
     failureMessage: result.error?.message ?? result.stderr
   });
+  const validationError = parsed.parsed ? validateReviewResultShape(parsed.parsed) : null;
+  if (validationError) {
+    parsed.parseError = validationError;
+  }
   const payload = {
     review: reviewName,
     target,
@@ -448,7 +471,6 @@ async function executeReviewRun(request) {
 
 async function executeTaskRun(request) {
   const workspaceRoot = resolveWorkspaceRoot(request.cwd);
-  ensureGrokAvailable(request.cwd);
 
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
@@ -640,14 +662,28 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
-function spawnDetachedWorker(cwd, jobId, subcommand) {
+function spawnDetachedWorker(cwd, workspaceRoot, jobId, subcommand, logFile) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "grok-companion.mjs");
+  const logFd = fs.openSync(logFile, "a", 0o600);
   const child = spawn(process.execPath, [scriptPath, subcommand, "--cwd", cwd, "--job-id", jobId], {
     cwd,
     env: process.env,
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", logFd, logFd],
     windowsHide: true
+  });
+  fs.closeSync(logFd);
+  child.on("error", (error) => {
+    const completedAt = nowIso();
+    appendLogLine(logFile, `Worker failed to start: ${error.message}`);
+    upsertJob(workspaceRoot, {
+      id: jobId,
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      errorMessage: error.message,
+      completedAt
+    });
   });
   child.unref();
   return child;
@@ -670,7 +706,7 @@ function enqueueBackgroundJob(cwd, job, request, workerSubcommand) {
 
   // ジョブ定義を先に保存し、起動直後の worker が未作成ファイルを読む競合を避ける。
   // 起動後は親から再保存しない。高速な worker の完了状態を queued へ巻き戻さないため。
-  spawnDetachedWorker(cwd, job.id, workerSubcommand);
+  spawnDetachedWorker(cwd, job.workspaceRoot, job.id, workerSubcommand, logFile);
 
   return {
     payload: {
@@ -718,6 +754,7 @@ async function handleReviewCommand(argv, config) {
 
   const request = {
     cwd,
+    target,
     base: options.base,
     scope,
     model: options.model,
@@ -775,6 +812,8 @@ async function handleTask(argv) {
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
+  requireTaskRequest(prompt, resumeLast);
+
   const write = Boolean(options.write);
   const taskMetadata = buildTaskRunMetadata({
     prompt,
@@ -783,8 +822,6 @@ async function handleTask(argv) {
 
   if (options.background) {
     ensureGrokAvailable(cwd);
-    requireTaskRequest(prompt, resumeLast);
-
     const job = buildTaskJob(workspaceRoot, taskMetadata, write);
     const request = buildTaskRequest({
       cwd,
@@ -834,38 +871,60 @@ async function handleStoredJobWorker(argv, { expectedJobClass, execute }) {
     throw new Error(`No stored job found for ${options["job-id"]}.`);
   }
 
-  const request = storedJob.request;
-  if (!request || typeof request !== "object") {
-    throw new Error(`Stored job ${options["job-id"]} is missing its ${expectedJobClass} request payload.`);
-  }
-  if (storedJob.jobClass !== expectedJobClass) {
-    throw new Error(
-      `Stored job ${options["job-id"]} has class ${storedJob.jobClass ?? "<missing>"}, expected ${expectedJobClass}.`
-    );
-  }
-
-  const { logFile, progress } = createTrackedProgress(
-    {
-      ...storedJob,
-      workspaceRoot
-    },
-    {
-      logFile: storedJob.logFile ?? null
+  try {
+    const request = storedJob.request;
+    if (!request || typeof request !== "object") {
+      throw new Error(`Stored job ${options["job-id"]} is missing its ${expectedJobClass} request payload.`);
     }
-  );
-  await runTrackedJob(
-    {
-      ...storedJob,
-      workspaceRoot,
-      logFile
-    },
-    () =>
-      execute({
-        ...request,
-        onProgress: progress
-      }),
-    { logFile }
-  );
+    if (storedJob.jobClass !== expectedJobClass) {
+      throw new Error(
+        `Stored job ${options["job-id"]} has class ${storedJob.jobClass ?? "<missing>"}, expected ${expectedJobClass}.`
+      );
+    }
+
+    const { logFile, progress } = createTrackedProgress(
+      {
+        ...storedJob,
+        workspaceRoot
+      },
+      {
+        logFile: storedJob.logFile ?? null
+      }
+    );
+    await runTrackedJob(
+      {
+        ...storedJob,
+        workspaceRoot,
+        logFile
+      },
+      () => execute({ ...request, onProgress: progress }),
+      { logFile }
+    );
+  } catch (error) {
+    const current = readStoredJob(workspaceRoot, storedJob.id) ?? storedJob;
+    if (!["completed", "failed", "cancelled"].includes(current.status)) {
+      const completedAt = nowIso();
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      appendLogLine(current.logFile, `Worker failed: ${errorMessage}`);
+      writeJobFile(workspaceRoot, current.id, {
+        ...current,
+        status: "failed",
+        phase: "failed",
+        pid: null,
+        completedAt,
+        errorMessage
+      });
+      upsertJob(workspaceRoot, {
+        id: current.id,
+        status: "failed",
+        phase: "failed",
+        pid: null,
+        completedAt,
+        errorMessage
+      });
+    }
+    throw error;
+  }
 }
 
 async function handleTaskWorker(argv) {
@@ -897,7 +956,7 @@ async function handleStatus(argv) {
           pollIntervalMs: options["poll-interval-ms"]
         })
       : buildSingleJobSnapshot(cwd, reference);
-    outputCommandResult(snapshot, renderJobStatusReport(snapshot.job), options.json);
+    outputCommandResult(snapshot, renderJobStatusReport(snapshot.job, snapshot), options.json);
     return;
   }
 
@@ -973,26 +1032,6 @@ async function handleCancel(argv) {
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
   const existing = readStoredJob(workspaceRoot, job.id) ?? {};
   const grokSessionId = existing.grokSessionId ?? job.grokSessionId ?? null;
-
-  // キャンセルは安全弁なので、割り込みが何で失敗しても
-  // この下のプロセス停止とジョブ状態の確定までは必ず通す。
-  let interrupt;
-  try {
-    interrupt = await interruptGrokTurn(cwd, { sessionId: grokSessionId });
-  } catch (error) {
-    interrupt = { attempted: true, interrupted: false, detail: error?.message ?? String(error), sessionId: grokSessionId };
-  }
-
-  appendLogLine(
-    job.logFile,
-    interrupt.interrupted
-      ? `Requested Grok turn interrupt on ${grokSessionId}.`
-      : `Grok turn interrupt skipped${interrupt.detail ? `: ${interrupt.detail}` : "."}`
-  );
-
-  terminateProcessTree(job.pid ?? Number.NaN);
-  appendLogLine(job.logFile, "Cancelled by user.");
-
   const completedAt = nowIso();
   const nextJob = {
     ...job,
@@ -1003,6 +1042,8 @@ async function handleCancel(argv) {
     errorMessage: "Cancelled by user."
   };
 
+  // 最初に terminal state を確定する。割り込み待ちの間に worker が完了しても、
+  // runTrackedJob は cancelled を completed で上書きしない。
   writeJobFile(workspaceRoot, job.id, {
     ...existing,
     ...nextJob,
@@ -1016,6 +1057,44 @@ async function handleCancel(argv) {
     errorMessage: "Cancelled by user.",
     completedAt
   });
+
+  // キャンセルは安全弁なので、割り込みが何で失敗しても
+  // この下のプロセス停止とジョブ状態の確定までは必ず通す。
+  let interrupt;
+  try {
+    interrupt = await Promise.race([
+      interruptGrokTurn(cwd, { sessionId: grokSessionId }),
+      new Promise((resolve) => {
+        const timer = setTimeout(() => resolve({
+          attempted: true,
+          interrupted: false,
+          detail: "interrupt timed out after 750ms",
+          sessionId: grokSessionId
+        }), 750);
+        timer.unref?.();
+      })
+    ]);
+  } catch (error) {
+    interrupt = { attempted: true, interrupted: false, detail: error?.message ?? String(error), sessionId: grokSessionId };
+  }
+
+  appendLogLine(
+    job.logFile,
+    interrupt.interrupted
+      ? `Requested Grok turn interrupt on ${grokSessionId}.`
+      : `Grok turn interrupt skipped${interrupt.detail ? `: ${interrupt.detail}` : "."}`
+  );
+
+  try {
+    if (processCommandContains(job.pid, job.id)) {
+      terminateProcessTree(job.pid);
+    } else if (Number.isFinite(job.pid)) {
+      appendLogLine(job.logFile, "Skipped process termination because the PID no longer identifies this job.");
+    }
+  } catch (error) {
+    appendLogLine(job.logFile, `Process termination failed: ${error?.message ?? String(error)}`);
+  }
+  appendLogLine(job.logFile, "Cancelled by user.");
 
   const payload = {
     jobId: job.id,

@@ -5,6 +5,7 @@ import { isProbablyText } from "./fs.mjs";
 import { formatCommandFailure, runCommand, runCommandChecked } from "./process.mjs";
 
 const MAX_UNTRACKED_BYTES = 24 * 1024;
+const MAX_UNTRACKED_TOTAL_BYTES = 256 * 1024;
 const DEFAULT_INLINE_DIFF_MAX_FILES = 2;
 const DEFAULT_INLINE_DIFF_MAX_BYTES = 256 * 1024;
 const MAX_REPO_LISTING_ENTRIES = 2000;
@@ -216,32 +217,58 @@ function formatSection(title, body) {
   return [`## ${title}`, "", body.trim() ? body.trim() : "(none)", ""].join("\n");
 }
 
-function formatUntrackedFile(cwd, relativePath) {
-  const absolutePath = path.join(cwd, relativePath);
+function formatUntrackedFile(cwd, relativePath, remainingBytes) {
+  const repoRoot = fs.realpathSync(cwd);
+  const absolutePath = path.resolve(repoRoot, relativePath);
+  const relativeToRoot = path.relative(repoRoot, absolutePath);
+  if (relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
+    return { text: `### ${relativePath}\n(skipped: path escapes repository)`, bytes: 0 };
+  }
   let stat;
   try {
-    stat = fs.statSync(absolutePath);
+    stat = fs.lstatSync(absolutePath);
   } catch {
-    return `### ${relativePath}\n(skipped: broken symlink or unreadable file)`;
+    return { text: `### ${relativePath}\n(skipped: unreadable file)`, bytes: 0 };
+  }
+  if (stat.isSymbolicLink()) {
+    return { text: `### ${relativePath}\n(skipped: symbolic link)`, bytes: 0 };
   }
   if (stat.isDirectory()) {
-    return `### ${relativePath}\n(skipped: directory)`;
+    return { text: `### ${relativePath}\n(skipped: directory)`, bytes: 0 };
   }
   if (stat.size > MAX_UNTRACKED_BYTES) {
-    return `### ${relativePath}\n(skipped: ${stat.size} bytes exceeds ${MAX_UNTRACKED_BYTES} byte limit)`;
+    return { text: `### ${relativePath}\n(skipped: ${stat.size} bytes exceeds ${MAX_UNTRACKED_BYTES} byte limit)`, bytes: 0 };
+  }
+  if (stat.size > remainingBytes) {
+    return { text: `### ${relativePath}\n(skipped: aggregate untracked-file limit reached)`, bytes: 0 };
   }
 
   let buffer;
   try {
     buffer = fs.readFileSync(absolutePath);
   } catch {
-    return `### ${relativePath}\n(skipped: broken symlink or unreadable file)`;
+    return { text: `### ${relativePath}\n(skipped: unreadable file)`, bytes: 0 };
+  }
+  if (buffer.length > MAX_UNTRACKED_BYTES || buffer.length > remainingBytes) {
+    return { text: `### ${relativePath}\n(skipped: file grew beyond an untracked-file limit)`, bytes: 0 };
   }
   if (!isProbablyText(buffer)) {
-    return `### ${relativePath}\n(skipped: binary file)`;
+    return { text: `### ${relativePath}\n(skipped: binary file)`, bytes: 0 };
   }
 
-  return [`### ${relativePath}`, "```", buffer.toString("utf8").trimEnd(), "```"].join("\n");
+  return {
+    text: [`### ${relativePath}`, "```", buffer.toString("utf8").trimEnd(), "```"].join("\n"),
+    bytes: buffer.length
+  };
+}
+
+function formatUntrackedFiles(cwd, relativePaths) {
+  let includedBytes = 0;
+  return relativePaths.map((relativePath) => {
+    const formatted = formatUntrackedFile(cwd, relativePath, MAX_UNTRACKED_TOTAL_BYTES - includedBytes);
+    includedBytes += formatted.bytes;
+    return formatted.text;
+  }).join("\n\n");
 }
 
 function collectWorkingTreeContext(cwd, state, options = {}) {
@@ -253,7 +280,7 @@ function collectWorkingTreeContext(cwd, state, options = {}) {
   if (includeDiff) {
     const stagedDiff = gitChecked(cwd, ["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
     const unstagedDiff = gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
-    const untrackedBody = state.untracked.map((file) => formatUntrackedFile(cwd, file)).join("\n\n");
+    const untrackedBody = formatUntrackedFiles(cwd, state.untracked);
     parts = [
       formatSection("Git Status", status),
       formatSection("Staged Diff", stagedDiff),
@@ -263,7 +290,7 @@ function collectWorkingTreeContext(cwd, state, options = {}) {
   } else {
     const stagedStat = gitChecked(cwd, ["diff", "--shortstat", "--cached"]).stdout.trim();
     const unstagedStat = gitChecked(cwd, ["diff", "--shortstat"]).stdout.trim();
-    const untrackedBody = state.untracked.map((file) => formatUntrackedFile(cwd, file)).join("\n\n");
+    const untrackedBody = formatUntrackedFiles(cwd, state.untracked);
     parts = [
       formatSection("Git Status", status),
       formatSection("Staged Diff Stat", stagedStat),

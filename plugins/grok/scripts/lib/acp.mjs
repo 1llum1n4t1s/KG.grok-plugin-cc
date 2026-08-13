@@ -49,6 +49,19 @@ export const ACP_PROTOCOL_VERSION = 1;
  * 永久に待ち続けてしまうため、時間で見切って直接起動へ落とす。
  */
 const BROKER_HANDSHAKE_TIMEOUT_MS = 10_000;
+const DIRECT_HANDSHAKE_TIMEOUT_MS = 10_000;
+const CONTROL_RPC_TIMEOUT_MS = 30_000;
+const CLOSE_TIMEOUT_MS = 1_000;
+
+function waitForExitWithTimeout(exitPromise) {
+  return Promise.race([
+    exitPromise,
+    new Promise((resolve) => {
+      const timer = setTimeout(resolve, CLOSE_TIMEOUT_MS);
+      timer.unref?.();
+    })
+  ]);
+}
 
 class HandshakeTimeoutError extends Error {
   constructor(ms) {
@@ -205,7 +218,25 @@ class AcpClientBase {
     this.nextId += 1;
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
+      const timeoutMs = method === "session/prompt" ? 0 : (this.options.rpcTimeoutMs ?? CONTROL_RPC_TIMEOUT_MS);
+      const timer = timeoutMs > 0
+        ? setTimeout(() => {
+            this.pending.delete(id);
+            reject(new Error(`Grok ACP ${method} timed out after ${timeoutMs}ms.`));
+          }, timeoutMs)
+        : null;
+      timer?.unref?.();
+      this.pending.set(id, {
+        resolve: (value) => {
+          if (timer) clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (error) => {
+          if (timer) clearTimeout(timer);
+          reject(error);
+        },
+        method
+      });
       this.sendMessage({ jsonrpc: "2.0", id, method, params });
     });
   }
@@ -451,12 +482,12 @@ class SpawnedAcpClient extends AcpClientBase {
       this.handleLine(line);
     });
 
-    await this.performInitialize();
+    await withTimeout(this.performInitialize(), DIRECT_HANDSHAKE_TIMEOUT_MS);
   }
 
   async close() {
     if (this.closed) {
-      await this.exitPromise;
+      await waitForExitWithTimeout(this.exitPromise);
       return;
     }
 
@@ -486,7 +517,7 @@ class SpawnedAcpClient extends AcpClientBase {
       }, 50).unref?.();
     }
 
-    await this.exitPromise;
+    await waitForExitWithTimeout(this.exitPromise);
   }
 
   sendMessage(message) {
@@ -531,7 +562,7 @@ class BrokerAcpClient extends AcpClientBase {
 
   async close() {
     if (this.closed) {
-      await this.exitPromise;
+      await waitForExitWithTimeout(this.exitPromise);
       return;
     }
 
@@ -539,7 +570,7 @@ class BrokerAcpClient extends AcpClientBase {
     if (this.socket) {
       this.socket.end();
     }
-    await this.exitPromise;
+    await waitForExitWithTimeout(this.exitPromise);
   }
 
   sendMessage(message) {

@@ -78,7 +78,7 @@ const READ_ONLY_COMMANDS = new Set([
 
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   "diff", "show", "log", "status", "blame", "ls-files", "ls-tree", "rev-parse",
-  "describe", "cat-file", "shortlog", "branch", "tag", "remote", "config", "grep", "whatchanged"
+  "describe", "cat-file", "shortlog", "grep", "whatchanged"
 ]);
 
 /** ファイルへ書き出すリダイレクトと、その場編集を示す痕跡。 */
@@ -89,6 +89,8 @@ const WRITE_SIDE_EFFECT_PATTERN = /(^|\s)(>>?|\btee\b)(\s|$)|(^|\s)-i(\s|$)/;
  * 埋め込むだけで別のコマンドが先に走るため、中身を見ずに一律で拒否する。
  */
 const COMMAND_SUBSTITUTION_PATTERN = /\$\(|\$\{|`/;
+const UNSAFE_SHELL_SYNTAX_PATTERN = /[\r\n]|(?<!&)&(?!&)|[<>]|\^|%[^%]+%|![A-Za-z_][A-Za-z0-9_]*!/;
+const OUTSIDE_PATH_PATTERN = /(^|[\s"'])(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]:[\\/]|[\\/]{2}|\/(?!dev\/null\b))/;
 
 /**
  * 許可コマンドの中でも、引数次第でシェルへ抜けたり書き込んだりできるもの。
@@ -112,13 +114,14 @@ function cleanGrokStderr(stderr) {
 
 function shorten(text, limit = 72) {
   const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
+  const characters = Array.from(normalized);
   if (!normalized) {
     return "";
   }
-  if (normalized.length <= limit) {
+  if (characters.length <= limit) {
     return normalized;
   }
-  return `${normalized.slice(0, limit - 3)}...`;
+  return `${characters.slice(0, limit - 3).join("")}...`;
 }
 
 function looksLikeVerificationCommand(command) {
@@ -189,6 +192,10 @@ export function classifyShellCommand(command) {
     return { allowed: false, reason: "uses command substitution" };
   }
 
+  if (UNSAFE_SHELL_SYNTAX_PATTERN.test(text)) {
+    return { allowed: false, reason: "uses unsupported shell control or expansion syntax" };
+  }
+
   const segments = text.split(/\|\||&&|[;|]/).map((segment) => segment.trim()).filter(Boolean);
   for (const segment of segments) {
     // 環境変数の前置き（FOO=bar cmd）を読み飛ばす。
@@ -197,15 +204,14 @@ export function classifyShellCommand(command) {
     if (!head) {
       return { allowed: false, reason: `could not parse "${segment}"` };
     }
+    if (tokens.slice(1).some((token) => OUTSIDE_PATH_PATTERN.test(` ${token}`))) {
+      return { allowed: false, reason: "references a path outside the repository" };
+    }
 
     if (head === "git") {
       const sub = (tokens[1] ?? "").toLowerCase();
       if (!READ_ONLY_GIT_SUBCOMMANDS.has(sub)) {
         return { allowed: false, reason: `git ${sub || "(no subcommand)"} is not read-only` };
-      }
-      // `git config <key> <value>` は書き込みなので、読み取り形だけ通す。
-      if (sub === "config" && tokens.length > 3 && !tokens.includes("--get") && !tokens.includes("--list")) {
-        return { allowed: false, reason: "git config appears to set a value" };
       }
       continue;
     }
@@ -242,7 +248,7 @@ function classifyToolCall(params) {
     return { allowed: false, reason: "the tool modifies files" };
   }
 
-  return { allowed: true, reason: null };
+  return { allowed: false, reason: "the tool is not explicitly known to be read-only" };
 }
 
 /**
@@ -427,6 +433,13 @@ async function withGrok(cwd, handler, options = {}) {
   }
 
   try {
+    return await handler(client);
+  } catch (error) {
+    if (error?.rpcCode !== BROKER_BUSY_RPC_CODE || client.transport !== "broker") {
+      throw error;
+    }
+    await client.close().catch(() => {});
+    client = await GrokAcpClient.connect(cwd, { ...options, disableBroker: true });
     return await handler(client);
   } finally {
     await client.close();
@@ -716,10 +729,19 @@ export function getGrokAvailability(cwd) {
 }
 
 export function getSessionRuntimeStatus(env = process.env, cwd = process.cwd()) {
-  const endpoint = env[BROKER_ENDPOINT_ENV] ?? loadBrokerSession(cwd)?.endpoint ?? null;
+  const storedSession = loadBrokerSession(cwd);
+  const endpoint = env[BROKER_ENDPOINT_ENV] ?? storedSession?.endpoint ?? null;
+  let brokerActive = Boolean(endpoint);
+  if (storedSession?.pid) {
+    try {
+      process.kill(storedSession.pid, 0);
+    } catch {
+      brokerActive = false;
+    }
+  }
   return {
     brokerEndpoint: endpoint,
-    brokerActive: Boolean(endpoint)
+    brokerActive
   };
 }
 
@@ -1130,9 +1152,15 @@ export function parseStructuredOutput(rawOutput, fallback = {}) {
 function stripJsonFence(text) {
   const trimmed = String(text).trim();
 
-  const fenced = trimmed.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
-  if (fenced) {
-    return fenced[1].trim();
+  const opening = trimmed.indexOf("```");
+  if (opening !== -1) {
+    const contentStart = trimmed.indexOf("\n", opening + 3);
+    if (contentStart !== -1) {
+      const closing = trimmed.indexOf("\n```", contentStart + 1);
+      if (closing !== -1) {
+        return trimmed.slice(contentStart + 1, closing).trim();
+      }
+    }
   }
 
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
