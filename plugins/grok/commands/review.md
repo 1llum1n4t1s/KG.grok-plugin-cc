@@ -2,7 +2,7 @@
 description: Run a Grok code review against local git state
 argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--language <bcp47>] [focus ...]'
 disable-model-invocation: true
-allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
+allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
 ---
 
 Run a Grok code review against the local git state.
@@ -16,20 +16,9 @@ Core constraint:
 - Your only job is to run the review and return Grok's output verbatim to the user.
 
 Execution mode rules:
-- If the raw arguments include `--wait`, do not ask. Run the review in the foreground.
-- If the raw arguments include `--background`, do not ask. Run the review in a Claude background task.
-- Otherwise, estimate the review size before asking:
-  - For working-tree review, start with `git status --short --untracked-files=all`.
-  - For working-tree review, also inspect both `git diff --shortstat --cached` and `git diff --shortstat`.
-  - For base-branch review, use `git diff --shortstat <base>...HEAD`.
-  - Treat untracked files or directories as reviewable work even when `git diff --shortstat` is empty.
-  - Only conclude there is nothing to review when the relevant working-tree status is empty or the explicit branch diff is empty.
-  - Recommend waiting only when the review is clearly tiny, roughly 1-2 files total and no sign of a broader directory-sized change.
-  - In every other case, including unclear size, recommend background.
-  - When in doubt, run the review instead of declaring that there is nothing to review.
-- Then use `AskUserQuestion` exactly once with two options, putting the recommended option first and suffixing its label with `(Recommended)`:
-  - `Wait for results`
-  - `Run in background`
+- If the raw arguments include `--wait`, run the review in the foreground.
+- Otherwise, including when `--background` is explicit or neither execution flag is present, start
+  the review immediately in a Claude background task without asking for an execution mode.
 
 Argument handling:
 - Preserve the user's arguments exactly.
@@ -55,13 +44,14 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" review "$ARGUMENTS"
   stdout and stderr merged into a single result, so it opens with the companion's progress lines
   (`[grok] Tool: ...`, dozens of them) and any Node warnings, and where the report actually begins is
   ambiguous.
+- Capture the exact job id from the `[grok] Job ID: <job-id>` progress line. Never infer it from
+  whichever job happened to finish most recently.
 - Read the stored report instead, exactly as the background flow does:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result "<job-id>"
 ```
-- With no job id it resolves the most recent finished job for this session — foreground runs are
-  recorded the same way background ones are, so this is the review you just ran. That output is the
-  rendered report only, with no progress lines mixed in.
+- Substitute the exact id captured from this review. That output is the rendered report only, with
+  no progress lines mixed in.
 - Then follow "Returning the report" below.
 
 Background flow:
@@ -83,10 +73,10 @@ When the background run finishes (a later turn):
   the report itself. Pasting it hands the user a wall of noise instead of the review.
 - Read the stored report instead:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result "<job-id>"
 ```
-- With no job id it resolves the most recent finished job for this session, which is the run you
-  launched. That output is the rendered report only, with no progress lines mixed in.
+- Substitute the exact id from the completed background task's `[grok] Job ID: <job-id>` line.
+  Never use a bare `result`; concurrent jobs can finish in a different order.
 - Then follow "Returning the report" below.
 - If the command reports that the job is still running, do not re-run the review. Tell the user to
   check `/grok:status`.

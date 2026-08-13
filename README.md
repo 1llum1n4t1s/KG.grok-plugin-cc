@@ -29,7 +29,7 @@ hosts route through the same companion runtime and job store.
 
 - **Grok Build**, signed in with a SuperGrok or X Premium+ account, or an `XAI_API_KEY`.
   Usage counts against whichever one you use.
-- **Node.js 18.18 or later**
+- **Node.js 22 or later**
 
 Install Grok Build from [x.ai/cli](https://x.ai/cli):
 
@@ -152,13 +152,11 @@ The review is read-only: Grok may read files and run read-only commands such as 
 `git log`, but the plugin denies anything that would write to disk. Grok reports what it thinks
 should change; it does not change it.
 
-Without `--wait` or `--background`, Claude estimates the size of the change and asks which mode
-you want.
-
-In Codex, the review, adversarial-review, and audit skills also ask before choosing an execution
-mode. Rescue and X search remain foreground by default unless `--background` is explicit. Every
-Codex background run stays attached as a Codex-managed process and returns the Codex process ID,
-Grok job ID, and initial progress instead of detaching inside the companion.
+Without `--wait` or `--background`, review, adversarial-review, and audit start immediately in the
+host's background mode in both Claude Code and Codex; pass `--wait` to run them in the foreground.
+Rescue and X search remain foreground by default unless `--background` is explicit. Every Codex
+background run stays attached as a Codex-managed process and returns the Codex process ID, Grok job
+ID, and initial progress instead of detaching inside the companion.
 
 ### `/grok:adversarial-review`
 
@@ -185,9 +183,11 @@ source as it stands, independent of whatever you are currently changing.
 ```
 
 The audit context deliberately contains no diff and no file contents, only a file inventory; Grok
-reads the files it decides to inspect with read-only commands. That makes an audit noticeably more
-token-hungry than a diff review, and a focus is strongly recommended on large repositories so the
-audit stays deep instead of broad.
+reads the files it decides to inspect with read-only commands. With no focus text, it performs a
+risk-directed deep audit by mapping the architecture, selecting the highest-risk execution paths,
+and tracing their callers, state transitions, boundaries, failure paths, concurrency behavior, and
+tests. An explicit focus is still useful on large repositories when you want that deep pass confined
+to a particular subsystem or concern.
 
 The same read-only guarantees as `/grok:review` apply.
 
@@ -256,6 +256,9 @@ Cancels a running background job and stops the Grok turn behind it.
 /grok:cancel
 /grok:cancel <job-id>
 ```
+
+Without a job ID, cancel selects the only active job in the current session. If multiple jobs are
+active, it stops without guessing and asks for a job ID; use `/grok:status` to choose one.
 
 ### `/grok:setup`
 

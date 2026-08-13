@@ -2,7 +2,7 @@
 description: Run a Grok audit of the entire existing codebase, ignoring the current diff
 argument-hint: '[--wait|--background] [--language <bcp47>] [focus ...]'
 disable-model-invocation: true
-allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
+allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
 ---
 
 Run a Grok audit of the entire existing codebase. Unlike `/grok:review`, this ignores the current git diff and reviews the source as it exists on disk.
@@ -16,11 +16,9 @@ Core constraint:
 - Your only job is to run the audit and return Grok's output verbatim to the user.
 
 Execution mode rules:
-- If the raw arguments include `--wait`, do not ask. Run the audit in the foreground.
-- If the raw arguments include `--background`, do not ask. Run the audit in a Claude background task.
-- Otherwise ask, and recommend background: a full-repository audit reads many files and usually takes longer than a diff review. Use `AskUserQuestion` exactly once with two options, putting the recommended option first and suffixing its label with `(Recommended)`:
-  - `Run in background`
-  - `Wait for results`
+- If the raw arguments include `--wait`, run the audit in the foreground.
+- Otherwise, including when `--background` is explicit or neither execution flag is present, start
+  the audit immediately in a Claude background task without asking for an execution mode.
 
 Argument handling:
 - Preserve the user's arguments exactly.
@@ -29,7 +27,9 @@ Argument handling:
 - Do not add extra audit instructions or rewrite the user's intent.
 - The companion script parses `--wait` and `--background`, but Claude Code's `Bash(..., run_in_background: true)` is what actually detaches the run.
 - Any text left after the flags is passed through as audit focus (for example a module or concern to concentrate on). Preserve it verbatim.
-- A focus is optional but strongly recommended on large repositories: it keeps the audit deep instead of broad.
+- A focus is optional. When omitted, the companion applies its built-in risk-directed deep-audit
+  focus. On a large repository, an explicit focus can still narrow the deep audit to a particular
+  subsystem or concern.
 - If the user actually wants the current changes reviewed, point them at `/grok:review`.
 
 Foreground flow:
@@ -47,13 +47,14 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" audit "$ARGUMENTS"
   stdout and stderr merged into a single result, so it opens with the companion's progress lines
   (`[grok] Tool: ...`, dozens of them) and any Node warnings, and where the report actually begins is
   ambiguous.
+- Capture the exact job id from the `[grok] Job ID: <job-id>` progress line. Never infer it from
+  whichever job happened to finish most recently.
 - Read the stored report instead, exactly as the background flow does:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result "<job-id>"
 ```
-- With no job id it resolves the most recent finished job for this session — foreground runs are
-  recorded the same way background ones are, so this is the audit you just ran. That output is the
-  rendered report only, with no progress lines mixed in.
+- Substitute the exact id captured from this audit. That output is the rendered report only, with
+  no progress lines mixed in.
 - Then follow "Returning the report" below.
 
 Background flow:
@@ -75,10 +76,10 @@ When the background run finishes (a later turn):
   the report itself. Pasting it hands the user a wall of noise instead of the audit.
 - Read the stored report instead:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result "<job-id>"
 ```
-- With no job id it resolves the most recent finished job for this session, which is the run you
-  launched. That output is the rendered report only, with no progress lines mixed in.
+- Substitute the exact id from the completed background task's `[grok] Job ID: <job-id>` line.
+  Never use a bare `result`; concurrent jobs can finish in a different order.
 - Then follow "Returning the report" below.
 - If the command reports that the job is still running, do not re-run the audit. Tell the user to
   check `/grok:status`.

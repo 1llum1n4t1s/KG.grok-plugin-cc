@@ -45,12 +45,12 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" task --fresh [--model <m
 - Do not treat that call's own output as the answer, and do not quote it. `Bash` hands you the run's
   stdout and stderr merged into a single result, so it opens with the companion's progress lines
   (`[grok] Tool: ...`) and any Node warnings, and where the answer actually begins is ambiguous.
+- Capture the exact job id from the `[grok] Job ID: <job-id>` progress line.
 - Read the stored result instead, exactly as the background flow does:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result "<job-id>"
 ```
-- With no job id it resolves the most recent finished job for this session — foreground runs are
-  recorded the same way background ones are, so this is the search you just ran.
+- Substitute the exact id captured from this search.
 - Then follow "Returning the answer" below.
 
 Background flow (whenever the arguments include `--background`):
@@ -71,10 +71,9 @@ When the background run finishes (a later turn):
   the companion's progress lines (`[grok] Tool: ...`) and any Node warnings ahead of the answer.
 - Read the stored result instead:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result
+node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result "<job-id>"
 ```
-- With no job id it resolves the most recent finished job for this session, which is the run you
-  launched.
+- Substitute the exact id from the completed background task's `[grok] Job ID: <job-id>` line.
 - Then follow "Returning the answer" below.
 
 Returning the answer (both flows):

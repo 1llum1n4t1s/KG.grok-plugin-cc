@@ -5,7 +5,8 @@ disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
 
-Show the stored result for the job the user named, or the most recent finished one if they named none.
+Show the stored result for the job the user named. An exact job id is required whenever more than
+one finished job exists, and whenever the current Claude session cannot be identified.
 
 - Run:
 ```bash

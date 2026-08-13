@@ -75,11 +75,33 @@ test("Codex keeps every supported background workflow visible and managed", () =
   }
 
   for (const name of ["review", "adversarial-review", "audit"]) {
-    assert.match(read(`skills/source-command-${name}/SKILL.md`), /ask the user once to choose/i);
+    const source = read(`skills/source-command-${name}/SKILL.md`);
+    assert.match(source, /neither[\s\S]*Codex-managed background mode/i, `${name} does not default to managed background mode`);
+    assert.match(source, /start\s+immediately/i, `${name} does not start immediately by default`);
+    assert.match(source, /explicit `--wait`[\s\S]*foreground/i, `${name} does not preserve explicit foreground mode`);
+    assert.doesNotMatch(source, /ask the user once to choose/i, `${name} still asks for an unavailable Codex mode choice`);
   }
 
   for (const name of ["rescue", "x"]) {
     assert.match(read(`skills/source-command-${name}/SKILL.md`), /foreground is the default/i);
+  }
+});
+
+test("cancel without a job id never guesses when multiple jobs are active", () => {
+  for (const relativePath of ["commands/cancel.md", "skills/source-command-cancel/SKILL.md"]) {
+    const source = read(relativePath);
+    assert.match(source, /only active job[\s\S]*current session/i, `${relativePath} does not document the safe default`);
+    assert.match(source, /multiple[\s\S]*job id/i, `${relativePath} does not require disambiguation`);
+    assert.doesNotMatch(source, /most recent active|latest active/i, `${relativePath} still promises arbitrary latest-job selection`);
+  }
+});
+
+test("Claude workflows retrieve the exact job they launched", () => {
+  for (const name of ["review", "adversarial-review", "audit", "x"]) {
+    const source = read(`commands/${name}.md`);
+    assert.match(source, /result "<job-id>"/i, `${name} does not pass the captured job id`);
+    assert.doesNotMatch(source, /grok-companion\.mjs" result\s*\n```/, `${name} still documents bare result`);
+    assert.match(source, /exact job id|exact id/i, `${name} does not explain job identity`);
   }
 });
 
@@ -106,17 +128,21 @@ test("review and adversarial-review wire to their own companion subcommands", ()
   const review = read("commands/review.md");
   assert.match(review, /grok-companion\.mjs" review "\$ARGUMENTS"/);
   assert.match(review, /run_in_background: true/);
-  assert.match(review, /AskUserQuestion/);
+  assert.match(review, /neither execution flag[\s\S]*immediately in a Claude background task/i);
+  assert.doesNotMatch(review, /AskUserQuestion/);
 
   const adversarial = read("commands/adversarial-review.md");
   assert.match(adversarial, /grok-companion\.mjs" adversarial-review "\$ARGUMENTS"/);
+  assert.match(adversarial, /neither execution flag[\s\S]*immediately in a Claude background task/i);
+  assert.doesNotMatch(adversarial, /AskUserQuestion/);
 });
 
 test("audit wires to its own subcommand, template, and repo scope", () => {
   const audit = read("commands/audit.md");
   assert.match(audit, /grok-companion\.mjs" audit "\$ARGUMENTS"/);
   assert.match(audit, /run_in_background: true/);
-  assert.match(audit, /AskUserQuestion/);
+  assert.match(audit, /neither execution flag[\s\S]*immediately in a Claude background task/i);
+  assert.doesNotMatch(audit, /AskUserQuestion/);
   // 監査は差分レビューではないことを利用者向けに明言していること。
   assert.match(audit, /ignores the current git diff/i);
 

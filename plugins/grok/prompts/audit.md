@@ -11,12 +11,22 @@ User focus: {{USER_FOCUS}}
 </task>
 
 <audit_method>
-Start from the file inventory below, identify the load-bearing modules (entry points, core logic, security boundaries, persistence), and read them.
-Follow the data: trace how untrusted input, secrets, and persistent state flow through the code.
+Start from the file inventory below, map the architecture, identify the load-bearing modules (entry points, core logic, security boundaries, persistence), and read them.
+Use the inventory only to choose where to inspect; base the verdict on the source files and concrete execution paths you read.
+Follow the data end to end: trace how untrusted input, secrets, and persistent state enter, change, cross boundaries, and produce externally visible effects.
 Weight the user's focus area heavily when one is supplied, but still report any other material issue you can defend.
 Prefer depth on the riskiest paths over shallow coverage of every file.
 {{REVIEW_COLLECTION_GUIDANCE}}
 </audit_method>
+
+<depth_gate>
+Before finalizing:
+1. Select the highest-risk execution paths, proportional to the repository's size and architecture.
+2. Trace each selected path from its real entry point or input through the final state change, persistence write, external call, or user-visible result.
+3. Inspect the defining code and its concrete callers and consumers. Check state transitions and invariants, trust and persistence boundaries, failure and cleanup behavior, retries and timeouts, concurrency and ordering, and relevant tests or documented contracts.
+4. Validate every candidate finding against the exact code and adjacent contracts, then continue through the remaining selected paths after finding an issue.
+5. When repository access or available context limits a required trace, state that limitation in the summary and calibrate confidence to the evidence actually inspected.
+</depth_gate>
 
 <priorities>
 Rank by what would actually hurt:

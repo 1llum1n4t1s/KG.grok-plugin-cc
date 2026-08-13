@@ -10,13 +10,14 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
 
 - Accept `--wait`, `--background`, `--language <bcp47>`, and optional focus text.
 - Treat `--wait` and `--background` as Codex-side execution controls, not audit focus.
-- If neither execution flag is present, ask the user once to choose between `Run in background
-  (Recommended)` and `Wait for results`. Explain that a full-repository audit normally takes a
-  while. Do not start the audit until the user chooses.
+- If neither execution flag is present, select Codex-managed background mode and start immediately.
+  Honor explicit `--wait` as foreground mode and explicit `--background` as background mode.
 - Follow the shared Codex-managed background execution contract for the selected mode.
 - Unless supplied, add `--language` for the conversation language before the focus text.
 - Preserve every other flag and the focus text exactly. Do not add audit criteria the user did not
   request.
+- When no focus text is supplied, let the companion apply its built-in risk-directed deep-audit
+  focus. An explicit focus narrows that deep audit to the requested subsystem or concern.
 - Run `node <plugin-root>/scripts/grok-companion.mjs audit <arguments>`.
 - For foreground mode, allow at least 600 seconds and surface concise progress.
 - After any completed run, run the companion's `result <job-id>` command and reproduce the stored
