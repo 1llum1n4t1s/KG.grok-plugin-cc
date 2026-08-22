@@ -34,6 +34,7 @@ import {
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  filterJobsForCurrentSession,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -327,14 +328,6 @@ function renderStatusPayload(report, asJson) {
 
 function isActiveJobStatus(status) {
   return status === "queued" || status === "running";
-}
-
-function filterJobsForCurrentSession(jobs) {
-  const sessionId = resolveCurrentSessionId();
-  if (!sessionId) {
-    return jobs;
-  }
-  return jobs.filter((job) => job.sessionId === sessionId);
 }
 
 function findLatestResumableTaskJob(jobs) {

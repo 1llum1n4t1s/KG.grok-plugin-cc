@@ -2,7 +2,7 @@ import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./grok.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
-import { resolveCurrentSessionId } from "./tracked-jobs.mjs";
+import { resolveSessionIdWithFallback } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
@@ -13,10 +13,10 @@ export function sortJobsNewestFirst(jobs) {
 }
 
 function getCurrentSessionId(options = {}) {
-  return resolveCurrentSessionId(options.env ?? process.env);
+  return resolveSessionIdWithFallback(options.sessionId, options.env ?? process.env);
 }
 
-function filterJobsForCurrentSession(jobs, options = {}) {
+export function filterJobsForCurrentSession(jobs, options = {}) {
   const sessionId = getCurrentSessionId(options);
   if (!sessionId) {
     return jobs;

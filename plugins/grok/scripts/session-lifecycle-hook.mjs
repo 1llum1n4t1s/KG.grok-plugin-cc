@@ -14,7 +14,7 @@ import {
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
 import { listJobs, resolveStateFile, updateState } from "./lib/state.mjs";
-import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
+import { resolveSessionIdWithFallback, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 // 再エクスポート。定義は tracked-jobs.mjs 側が正で、ここで別に持つと
@@ -101,7 +101,7 @@ async function handleSessionEnd(input) {
   const sessionDir = brokerSession?.sessionDir ?? null;
   const pid = brokerSession?.pid ?? null;
 
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  cleanupSessionJobs(cwd, resolveSessionIdWithFallback(input.session_id, process.env));
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const otherActiveJobs = listJobs(workspaceRoot).some((job) => job.status === "queued" || job.status === "running");
   if (otherActiveJobs) {

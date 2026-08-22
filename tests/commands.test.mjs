@@ -217,6 +217,9 @@ test("hooks keep session lifecycle cleanup and stop gating wired", () => {
   assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /session-lifecycle-hook\.mjs" SessionStart/);
   assert.match(hooks.hooks.SessionEnd[0].hooks[0].command, /session-lifecycle-hook\.mjs" SessionEnd/);
   assert.match(hooks.hooks.Stop[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
+  assert.equal(hooks.hooks.SessionStart[0].hooks[0].timeout, 5);
+  assert.equal(hooks.hooks.SessionEnd[0].hooks[0].timeout, 3);
+  assert.equal(hooks.hooks.Stop[0].hooks[0].timeout, 900);
 });
 
 test("plugin and marketplace manifests agree on name and version", () => {

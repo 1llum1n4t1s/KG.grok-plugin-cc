@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveCancelableJob, resolveResultJob } from "../plugins/grok/scripts/lib/job-control.mjs";
+import {
+  filterJobsForCurrentSession,
+  resolveCancelableJob,
+  resolveResultJob
+} from "../plugins/grok/scripts/lib/job-control.mjs";
 import { saveState } from "../plugins/grok/scripts/lib/state.mjs";
 import { makeTempDir } from "./helpers.mjs";
 
@@ -16,6 +20,36 @@ function seedJobs(workspace, jobs) {
     }))
   });
 }
+
+test("session filtering accepts an explicit hook session id", () => {
+  const jobs = [
+    { id: "mine", sessionId: "hook-session" },
+    { id: "theirs", sessionId: "other-session" }
+  ];
+
+  assert.deepEqual(
+    filterJobsForCurrentSession(jobs, {
+      sessionId: "hook-session",
+      env: { GROK_COMPANION_SESSION_ID: "different-session" }
+    }).map((job) => job.id),
+    ["mine"]
+  );
+});
+
+test("session filtering falls back to the environment when the explicit hook session id is blank", () => {
+  const jobs = [
+    { id: "mine", sessionId: "environment-session" },
+    { id: "theirs", sessionId: "other-session" }
+  ];
+
+  assert.deepEqual(
+    filterJobsForCurrentSession(jobs, {
+      sessionId: "   ",
+      env: { GROK_COMPANION_SESSION_ID: "environment-session" }
+    }).map((job) => job.id),
+    ["mine"]
+  );
+});
 
 test("cancel without an id selects only the sole active job in the current session", () => {
   const workspace = makeTempDir();

@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 import { getGrokAvailability } from "./lib/grok.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { getConfig, listJobs } from "./lib/state.mjs";
-import { sortJobsNewestFirst } from "./lib/job-control.mjs";
-import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
+import { filterJobsForCurrentSession, sortJobsNewestFirst } from "./lib/job-control.mjs";
+import { resolveSessionIdWithFallback, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 const STOP_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
@@ -35,14 +35,6 @@ function logNote(message) {
     return;
   }
   process.stderr.write(`${message}\n`);
-}
-
-function filterJobsForCurrentSession(jobs, input = {}) {
-  const sessionId = input.session_id || process.env[SESSION_ID_ENV] || null;
-  if (!sessionId) {
-    return jobs;
-  }
-  return jobs.filter((job) => job.sessionId === sessionId);
 }
 
 function buildStopReviewPrompt(input = {}) {
@@ -98,9 +90,10 @@ function parseStopReviewOutput(rawOutput) {
 function runStopReview(cwd, input = {}) {
   const scriptPath = path.join(SCRIPT_DIR, "grok-companion.mjs");
   const prompt = buildStopReviewPrompt(input);
+  const sessionId = resolveSessionIdWithFallback(input.session_id, process.env);
   const childEnv = {
     ...process.env,
-    ...(input.session_id ? { [SESSION_ID_ENV]: input.session_id } : {})
+    ...(sessionId ? { [SESSION_ID_ENV]: sessionId } : {})
   };
   const result = spawnSync(process.execPath, [scriptPath, "task", "--json", prompt], {
     cwd,
@@ -145,7 +138,12 @@ function main() {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
 
-  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), input));
+  const jobs = sortJobsNewestFirst(
+    filterJobsForCurrentSession(listJobs(workspaceRoot), {
+      sessionId: input.session_id,
+      env: process.env
+    })
+  );
   const runningJob = jobs.find((job) => job.status === "queued" || job.status === "running");
   const runningTaskNote = runningJob
     ? `Grok task ${runningJob.id} is still running. Check /grok:status and use /grok:cancel ${runningJob.id} if you want to stop it before ending the session.`

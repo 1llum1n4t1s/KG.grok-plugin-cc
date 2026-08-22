@@ -18,6 +18,10 @@ export function resolveCurrentSessionId(env = process.env, preferredEnv = SESSIO
   );
 }
 
+export function resolveSessionIdWithFallback(sessionId, env = process.env) {
+  return normalizeSessionId(sessionId) ?? resolveCurrentSessionId(env);
+}
+
 export function nowIso() {
   return new Date().toISOString();
 }
