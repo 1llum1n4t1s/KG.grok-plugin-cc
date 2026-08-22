@@ -1,6 +1,6 @@
 {
   "name": "grok",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Use Grok Build from Claude Code or Codex to review code, audit repositories, search X, or delegate tasks.",
   "author": {
     "name": "Kagayoi",

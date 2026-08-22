@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.10
+
+- Aligned lifecycle hooks with Codex's three-second `SessionEnd` limit and made session scoping
+  consistent across Claude Code and Codex. Stop warnings, optional review-gate jobs, and cleanup
+  now preserve the active session when a hook payload supplies a blank session ID.
+
 ## 1.0.9
 
 - Unified Claude Code, Codex, and the companion runtime on foreground-only Grok execution. Legacy
