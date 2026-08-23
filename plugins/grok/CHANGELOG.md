@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.11
+
 - Made the optional stop-time review gate compose safely with other Stop hooks by using a bounded
   repository fingerprint, skipping unchanged continuations, retaining Grok's own blockers until a
   subsequent edit is re-reviewed, sending long prompts over stdin, and keeping gate sessions out of
