@@ -61,15 +61,18 @@ test("Codex runs every Grok workflow in the foreground", () => {
   assert.match(runtime, /Foreground execution/i);
   assert.match(runtime, /Always invoke the companion in the foreground/i);
   assert.match(runtime, /Reject `--background`/i);
-  assert.match(runtime, /\[grok\] Job ID: <job-id>/i);
-  assert.match(runtime, /Never infer it from status ordering/i);
+  assert.match(runtime, /completed JSON object's `jobId` field/i);
+  assert.match(runtime, /Never infer it from\s+status ordering/i);
   assert.match(runtime, /result <job-id>/i);
   assert.match(runtime, /source-command-status --wait[\s\S]*synchronous status-polling/i);
+  assert.match(runtime, /without repeated[\s\S]*commentary or status polling/i);
 
   for (const name of ["review", "adversarial-review", "audit", "rescue", "x"]) {
     const source = read(`skills/source-command-${name}/SKILL.md`);
     assert.match(source, /shared foreground execution contract/i, `${name} ignores the foreground contract`);
     assert.match(source, /Reject `--background`/i, `${name} does not reject background execution`);
+    assert.match(source, /grok-companion\.mjs[^\n]*--json/i, `${name} does not use quiet JSON execution`);
+    assert.doesNotMatch(source, /surface concise progress/i, `${name} still asks Codex to narrate progress`);
   }
 });
 
@@ -213,12 +216,14 @@ test("setup points at the x.ai installer rather than a package registry", () => 
 
 test("hooks keep session lifecycle cleanup and stop gating wired", () => {
   const hooks = JSON.parse(read("hooks/hooks.json"));
-  assert.deepEqual(Object.keys(hooks.hooks).sort(), ["SessionEnd", "SessionStart", "Stop"]);
+  assert.deepEqual(Object.keys(hooks.hooks).sort(), ["SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
   assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /session-lifecycle-hook\.mjs" SessionStart/);
   assert.match(hooks.hooks.SessionEnd[0].hooks[0].command, /session-lifecycle-hook\.mjs" SessionEnd/);
+  assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
   assert.match(hooks.hooks.Stop[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
   assert.equal(hooks.hooks.SessionStart[0].hooks[0].timeout, 5);
   assert.equal(hooks.hooks.SessionEnd[0].hooks[0].timeout, 3);
+  assert.equal(hooks.hooks.UserPromptSubmit[0].hooks[0].timeout, 10);
   assert.equal(hooks.hooks.Stop[0].hooks[0].timeout, 900);
 });
 

@@ -56,6 +56,7 @@ function cleanupSessionJobs(cwd, sessionId) {
   updateState(workspaceRoot, (state) => {
     removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
     state.jobs = state.jobs.filter((job) => job.sessionId !== sessionId);
+    state.reviewGateSessions = state.reviewGateSessions.filter((entry) => entry.sessionId !== sessionId);
   });
   if (removedJobs.length === 0) {
     return;

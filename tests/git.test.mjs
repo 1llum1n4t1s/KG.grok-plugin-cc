@@ -3,8 +3,59 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { collectReviewContext, resolveReviewTarget } from "../plugins/grok/scripts/lib/git.mjs";
+import {
+  collectReviewContext,
+  getWorkingTreeFingerprint,
+  resolveReviewTarget
+} from "../plugins/grok/scripts/lib/git.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+
+test("getWorkingTreeFingerprint tracks commits, tracked changes, and untracked content", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  const tracked = path.join(cwd, "app.js");
+  const untracked = path.join(cwd, "notes.txt");
+  fs.writeFileSync(tracked, "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+
+  const clean = getWorkingTreeFingerprint(cwd);
+  fs.writeFileSync(tracked, "console.log('v2');\n");
+  const trackedChange = getWorkingTreeFingerprint(cwd);
+  assert.notEqual(trackedChange, clean);
+
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "change"], { cwd });
+  const committedChange = getWorkingTreeFingerprint(cwd);
+  assert.notEqual(committedChange, clean);
+  assert.notEqual(committedChange, trackedChange);
+
+  fs.writeFileSync(untracked, "first\n");
+  const untrackedFirst = getWorkingTreeFingerprint(cwd);
+  fs.writeFileSync(untracked, "second\n");
+  const untrackedSecond = getWorkingTreeFingerprint(cwd);
+  assert.notEqual(untrackedSecond, untrackedFirst);
+});
+
+test("getWorkingTreeFingerprint stays bounded for large tracked and untracked files", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  const tracked = path.join(cwd, "large.bin");
+  const untracked = path.join(cwd, "untracked.bin");
+  fs.writeFileSync(tracked, Buffer.alloc(4 * 1024 * 1024, 0x41));
+  run("git", ["add", "large.bin"], { cwd });
+  run("git", ["commit", "-m", "large base"], { cwd });
+
+  const clean = getWorkingTreeFingerprint(cwd);
+  fs.writeFileSync(tracked, Buffer.alloc(4 * 1024 * 1024, 0x42));
+  fs.writeFileSync(untracked, Buffer.alloc(4 * 1024 * 1024, 0x43));
+  const changed = getWorkingTreeFingerprint(cwd);
+  assert.notEqual(changed, clean);
+
+  fs.writeFileSync(untracked, Buffer.alloc(4 * 1024 * 1024, 0x44));
+  const untrackedChanged = getWorkingTreeFingerprint(cwd);
+  assert.notEqual(untrackedChanged, changed);
+});
 
 test("resolveReviewTarget prefers working tree when repo is dirty", () => {
   const cwd = makeTempDir();
@@ -166,7 +217,7 @@ test("collectReviewContext skips untracked directories in working tree review", 
   assert.match(context.content, /### \.claude\/worktrees\/agent-test\/\n\(skipped: directory\)/);
 });
 
-test("collectReviewContext skips broken untracked symlinks instead of crashing", (t) => {
+test("collectReviewContext skips untracked symlinks instead of crashing", (t) => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
@@ -190,7 +241,7 @@ test("collectReviewContext skips broken untracked symlinks instead of crashing",
 
   assert.equal(target.mode, "working-tree");
   assert.match(context.content, /### broken-link/);
-  assert.match(context.content, /skipped: broken symlink or unreadable file/i);
+  assert.match(context.content, /skipped: symbolic link/i);
 });
 
 test("collectReviewContext falls back to lightweight context for larger adversarial reviews", () => {

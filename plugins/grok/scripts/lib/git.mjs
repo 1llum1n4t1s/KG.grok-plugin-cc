@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -9,6 +10,8 @@ const MAX_UNTRACKED_TOTAL_BYTES = 256 * 1024;
 const DEFAULT_INLINE_DIFF_MAX_FILES = 2;
 const DEFAULT_INLINE_DIFF_MAX_BYTES = 256 * 1024;
 const MAX_REPO_LISTING_ENTRIES = 2000;
+const MAX_FINGERPRINT_FILE_BYTES = 256 * 1024;
+const MAX_FINGERPRINT_TOTAL_BYTES = 8 * 1024 * 1024;
 
 // spawnSync の maxBuffer 既定は 1MiB しかなく、数万ファイルのリポジトリでは
 // `git ls-files` の出力がそれを超えて ENOBUFS で監査ごと落ちる。
@@ -142,6 +145,91 @@ export function getWorkingTreeState(cwd) {
     untracked,
     isDirty: staged.length > 0 || unstaged.length > 0 || untracked.length > 0
   };
+}
+
+function updateHashWithFile(hash, repoRoot, relativePath, remainingBytes) {
+  const absolutePath = path.join(repoRoot, relativePath);
+  hash.update(`\0worktree\0${relativePath}\0`);
+
+  try {
+    const stat = fs.lstatSync(absolutePath);
+    hash.update(`${stat.mode}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}\0`);
+    if (stat.isSymbolicLink()) {
+      hash.update(fs.readlinkSync(absolutePath));
+      return 0;
+    }
+    if (!stat.isFile()) {
+      return 0;
+    }
+
+    const readBudget = Math.min(stat.size, MAX_FINGERPRINT_FILE_BYTES, Math.max(0, remainingBytes));
+    if (readBudget === 0) {
+      hash.update("metadata-only");
+      return 0;
+    }
+
+    const descriptor = fs.openSync(absolutePath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, readBudget));
+      const ranges = stat.size <= readBudget
+        ? [{ position: 0, length: readBudget }]
+        : [
+            { position: 0, length: Math.ceil(readBudget / 2) },
+            { position: stat.size - Math.floor(readBudget / 2), length: Math.floor(readBudget / 2) }
+          ];
+      for (const range of ranges) {
+        hash.update(`\0range:${range.position}:${range.length}\0`);
+        let offset = 0;
+        while (offset < range.length) {
+          const length = Math.min(buffer.length, range.length - offset);
+          const bytesRead = fs.readSync(descriptor, buffer, 0, length, range.position + offset);
+          if (bytesRead === 0) {
+            break;
+          }
+          hash.update(buffer.subarray(0, bytesRead));
+          offset += bytesRead;
+        }
+      }
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    return readBudget;
+  } catch (error) {
+    hash.update(`unreadable:${error?.code ?? "unknown"}`);
+    return 0;
+  }
+}
+
+export function getWorkingTreeFingerprint(cwd) {
+  const repoRoot = ensureGitRepository(cwd);
+  const hash = createHash("sha256");
+  const listingOptions = { maxBuffer: MAX_FILE_LISTING_BYTES };
+  const head = git(repoRoot, ["rev-parse", "--verify", "HEAD"]);
+  const status = gitChecked(
+    repoRoot,
+    ["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+    listingOptions
+  );
+  const unstaged = gitChecked(repoRoot, ["diff", "--name-only", "-z", "--no-ext-diff", "--"], listingOptions);
+  const untracked = gitChecked(
+    repoRoot,
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    listingOptions
+  );
+
+  hash.update(head.status === 0 ? head.stdout.trim() : "unborn");
+  hash.update("\0status\0").update(status.stdout);
+
+  const worktreePaths = [
+    ...unstaged.stdout.split("\0").filter(Boolean),
+    ...untracked.stdout.split("\0").filter(Boolean)
+  ];
+  let remainingBytes = MAX_FINGERPRINT_TOTAL_BYTES;
+  for (const relativePath of [...new Set(worktreePaths)].sort()) {
+    remainingBytes -= updateHashWithFile(hash, repoRoot, relativePath, remainingBytes);
+  }
+
+  return hash.digest("hex");
 }
 
 export function resolveReviewTarget(cwd, options = {}) {

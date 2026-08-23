@@ -80,6 +80,7 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   "diff", "show", "log", "status", "blame", "ls-files", "ls-tree", "rev-parse",
   "describe", "cat-file", "shortlog", "grep", "whatchanged"
 ]);
+const UNSAFE_GIT_ARGUMENT_PATTERN = /^(?:--output(?:=|$)|-o.*|--ext-diff$|--textconv$|--open-files-in-pager(?:=|$))/;
 
 /** ファイルへ書き出すリダイレクトと、その場編集を示す痕跡。 */
 const WRITE_SIDE_EFFECT_PATTERN = /(^|\s)(>>?|\btee\b)(\s|$)|(^|\s)-i(\s|$)/;
@@ -212,6 +213,10 @@ export function classifyShellCommand(command) {
       const sub = (tokens[1] ?? "").toLowerCase();
       if (!READ_ONLY_GIT_SUBCOMMANDS.has(sub)) {
         return { allowed: false, reason: `git ${sub || "(no subcommand)"} is not read-only` };
+      }
+      const unsafeArgument = tokens.slice(2).find((token) => UNSAFE_GIT_ARGUMENT_PATTERN.test(token));
+      if (unsafeArgument) {
+        return { allowed: false, reason: `git ${sub} uses write-capable or external-execution option ${unsafeArgument}` };
       }
       continue;
     }

@@ -71,6 +71,22 @@ test("書き込み可能な git 照会風サブコマンドとリポジトリ外
   }
 });
 
+test("読み取り用 git サブコマンドの書き込み・外部実行オプションを拒否する", () => {
+  for (const command of [
+    "git diff --output=review.diff",
+    "git diff --output review.diff",
+    "git show HEAD:auth.js --output=../escape.txt",
+    "git log -o history.txt",
+    "git diff --ext-diff",
+    "git diff --textconv",
+    "git grep --open-files-in-pager=cat secret"
+  ]) {
+    assert.equal(classifyShellCommand(command).allowed, false, command);
+  }
+  assert.equal(classifyShellCommand("git diff --no-ext-diff auth.js").allowed, true);
+  assert.equal(classifyShellCommand("git diff -Oorder.txt auth.js").allowed, true);
+});
+
 test("環境変数の前置きを読み飛ばす", () => {
   assert.equal(classifyShellCommand("GIT_PAGER=cat git log -1").allowed, true);
 });

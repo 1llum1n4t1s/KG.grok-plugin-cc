@@ -283,6 +283,20 @@ test("audit applies a risk-directed deep investigation when focus is omitted", (
   assert.doesNotMatch(prompt, /No extra focus provided\./);
 });
 
+test("JSON audit keeps progress silent and returns the exact tracked job id", () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
+
+  const result = companion(["audit", "--json"], { repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const payload = JSON.parse(result.stdout);
+  assert.match(payload.jobId, /^review-[a-z0-9-]+$/);
+  assert.equal(payload.review, "Audit");
+  assert.equal(payload.result.verdict, "needs-attention");
+  assert.equal(fake.readState().prompts.length, 1);
+});
+
 test("review and task commands reject background execution", () => {
   const { fake, repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
 
@@ -557,4 +571,28 @@ ${resumed.stderr}`);
   assert.deepEqual(state.prompts, ["keep going"]);
   // 再開でも --effort が当たる（以前は startSession を通らず無視されていた）。
   assert.deepEqual(state.configs, [{ configId: "thought-level", value: "medium" }]);
+});
+
+test("stop-gate reviews never replace the latest resumable rescue task", () => {
+  const { repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+
+  const rescue = companion(["task", "--json", "start the rescue work"], { repo, env });
+  assert.equal(rescue.status, 0, rescue.stderr);
+  const rescuePayload = JSON.parse(rescue.stdout);
+
+  const stopGate = companion(["task", "--json", "--stop-gate", "review the previous turn"], { repo, env });
+  assert.equal(stopGate.status, 0, stopGate.stderr);
+  const stopGatePayload = JSON.parse(stopGate.stdout);
+
+  const candidate = companion(["task-resume-candidate", "--json"], { repo, env });
+  assert.equal(candidate.status, 0, candidate.stderr);
+  const candidatePayload = JSON.parse(candidate.stdout);
+  assert.equal(candidatePayload.candidate.id, rescuePayload.jobId);
+  assert.notEqual(candidatePayload.candidate.id, stopGatePayload.jobId);
+
+  const status = companion(["status", "--json", "--all"], { repo, env });
+  const stopGateJob = JSON.parse(status.stdout).latestFinished;
+  assert.equal(stopGateJob.id, stopGatePayload.jobId);
+  assert.equal(stopGateJob.jobClass, "review");
+  assert.equal(stopGateJob.kind, "stop-gate-review");
 });

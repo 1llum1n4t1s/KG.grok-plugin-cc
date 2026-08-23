@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Made the optional stop-time review gate compose safely with other Stop hooks by using a bounded
+  repository fingerprint, skipping unchanged continuations, retaining Grok's own blockers until a
+  subsequent edit is re-reviewed, sending long prompts over stdin, and keeping gate sessions out of
+  rescue-task continuation.
+- Kept Codex chats quiet during foreground Grok runs by buffering progress in JSON mode and
+  returning the exact job ID only after completion; Claude Code's foreground display is unchanged.
+- Rejected Git output and external-execution options from read-only Grok review sessions.
+
 ## 1.0.10
 
 - Aligned lifecycle hooks with Codex's three-second `SessionEnd` limit and made session scoping

@@ -100,8 +100,9 @@ Worth knowing before you install, because this plugin does more than add prompts
   the account Grok Build is signed in with. Nothing is sent anywhere else, and
   this plugin has no backend of its own.
 - The stop-time review gate is **off by default**. If you turn it on with
-  `/grok:setup --enable-review-gate`, ending a Claude session runs a fresh review
-  first and can block until it finishes. Turn it back off with
+  `/grok:setup --enable-review-gate`, each assistant turn that changes the repository runs a fresh
+  review before it stops and can block until the issue is fixed. Continuations from other Stop
+  hooks are skipped when they make no repository changes. Turn it back off with
   `/grok:setup --disable-review-gate`.
 
 Then run `/grok:setup` in Claude Code, or select `grok:source-command-setup` from `/skills` in Codex:
@@ -158,6 +159,11 @@ Every Grok command runs in the foreground in both Claude Code and Codex. This ke
 the exact Grok job ID, cancellation, and stored results under one consistent lifecycle. The old
 `--wait` flag is accepted as a no-op for compatibility; `--background` is rejected instead of
 silently changing execution behavior.
+
+Codex skills use the companion's buffered JSON mode, so long-running reviews, audits, delegated
+tasks, and X searches stay quiet in chat until Grok finishes. Detailed progress remains available
+in the stored job log and through the status command. Claude Code keeps its native foreground Bash
+display.
 
 ### `/grok:adversarial-review`
 
@@ -268,9 +274,10 @@ Checks the local install and optionally toggles the stop-time review gate.
 /grok:setup --disable-review-gate
 ```
 
-The gate is off unless you enable it. With it enabled, ending a Claude session triggers a fresh
-adversarial review and blocks until that review finishes, so session exit can take a while on a
-large change. Turn it back off with `/grok:setup --disable-review-gate`.
+The gate is off unless you enable it. With it enabled, an assistant turn that changes the repository
+triggers a fresh adversarial review and blocks until that review finishes. Unchanged turns, including
+continuations caused only by another Stop hook, do not start Grok. A large change can still take a
+while to review. Turn the gate back off with `/grok:setup --disable-review-gate`.
 
 ## Typical Flows
 
@@ -442,8 +449,9 @@ codex plugin add grok@kagayoi-grok
   サインイン先アカウントを通じて xAI へ送信されます。それ以外の場所へは送信されず、この
   プラグイン独自のバックエンドもありません。
 - 終了時のレビューゲートは**既定で無効**です。`/grok:setup --enable-review-gate` で有効にすると、
-  Claude セッションの終了前に新しいレビューが実行され、完了するまで終了がブロックされる場合が
-  あります。`/grok:setup --disable-review-gate` で再び無効にできます。
+  リポジトリを変更した各アシスタントターンの終了前に新しいレビューが実行され、問題が解消するまで
+  終了をブロックできます。別のStopフックが継続させても、リポジトリ変更がなければ再実行しません。
+  `/grok:setup --disable-review-gate` で再び無効にできます。
 
 続いて、Claude Code では `/grok:setup` を実行します。Codex では `/skills` から
 `grok:source-command-setup` を選択します。
@@ -502,6 +510,10 @@ Claude Code と Codex のどちらでも、すべての Grok コマンドをフ�
 コマンド出力、正確な Grok ジョブ ID、キャンセル、保存済み結果を一つの一貫したライフサイクルで
 扱えるためです。旧 `--wait` は互換性のため何もしないフラグとして受け付けますが、`--background` は
 実行方法を暗黙に変えず、明確なエラーとして拒否します。
+
+Codex向けスキルはコンパニオンのバッファ済みJSONモードを使用するため、長時間のレビュー、監査、
+委任タスク、X検索ではGrokの完了までチャットへ途中経過を流しません。詳細な進捗は保存済みジョブログと
+statusコマンドから確認できます。Claude Codeでは従来どおり、ネイティブの前景Bash表示を維持します。
 
 ### `/grok:adversarial-review`
 
@@ -613,9 +625,10 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 /grok:setup --disable-review-gate
 ```
 
-ゲートは有効にするまで無効です。有効にすると、Claude セッションの終了時に新しい adversarial
-review が実行され、その完了まで終了がブロックされます。そのため、大きな変更ではセッションの
-終了に時間がかかる場合があります。`/grok:setup --disable-review-gate` で再び無効にできます。
+ゲートは有効にするまで無効です。有効にすると、リポジトリを変更したアシスタントターンの終了時に
+新しい adversarial review が実行され、その完了まで終了がブロックされます。変更のないターンや、
+別のStopフックが継続させただけのターンではGrokを起動しません。大きな変更のレビューには時間が
+かかる場合があります。`/grok:setup --disable-review-gate` で再び無効にできます。
 
 ## よくある使い方
 

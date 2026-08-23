@@ -77,7 +77,6 @@ const MODEL_ALIASES = new Map([
   ["build", "grok-build-0.1"],
   ["latest", "grok-4.6"]
 ]);
-const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
 function printUsage() {
   console.log(
@@ -455,7 +454,8 @@ async function executeTaskRun(request) {
 
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
-    resumeLast: request.resumeLast
+    resumeLast: request.resumeLast,
+    stopGate: request.stopGate
   });
 
   let resumeSessionId = null;
@@ -483,7 +483,7 @@ async function executeTaskRun(request) {
     effort: request.effort,
     readOnly: !request.write,
     onProgress: request.onProgress,
-    persistThread: true,
+    persistThread: !request.stopGate,
     sessionTitle: resumeSessionId ? null : buildPersistentTaskSessionName(request.prompt || DEFAULT_CONTINUE_PROMPT)
   });
 
@@ -516,7 +516,7 @@ async function executeTaskRun(request) {
     rendered,
     summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
     jobTitle: taskMetadata.title,
-    jobClass: "task",
+    jobClass: request.stopGate ? "review" : "task",
     write: Boolean(request.write)
   };
 }
@@ -529,11 +529,13 @@ function buildReviewJobMetadata(reviewName, target) {
   };
 }
 
-function buildTaskRunMetadata({ prompt, resumeLast = false }) {
-  if (!resumeLast && String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)) {
+function buildTaskRunMetadata({ prompt, resumeLast = false, stopGate = false }) {
+  if (stopGate) {
     return {
       title: "Grok Stop Gate Review",
-      summary: "Stop-gate review of previous Claude turn"
+      summary: "Stop-gate review of previous assistant turn",
+      kind: "stop-gate-review",
+      jobClass: "review"
     };
   }
 
@@ -541,7 +543,9 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
   const fallbackSummary = resumeLast ? DEFAULT_CONTINUE_PROMPT : "Task";
   return {
     title,
-    summary: shorten(prompt || fallbackSummary)
+    summary: shorten(prompt || fallbackSummary),
+    kind: "task",
+    jobClass: "task"
   };
 }
 
@@ -580,10 +584,10 @@ function createTrackedProgress(job, options = {}) {
 function buildTaskJob(workspaceRoot, taskMetadata, write) {
   return createCompanionJob({
     prefix: "task",
-    kind: "task",
+    kind: taskMetadata.kind,
     title: taskMetadata.title,
     workspaceRoot,
-    jobClass: "task",
+    jobClass: taskMetadata.jobClass,
     summary: taskMetadata.summary,
     write
   });
@@ -620,9 +624,11 @@ async function runForegroundCommand(job, runner, options = {}) {
     logFile: options.logFile,
     stderr: !options.json
   });
-  process.stderr.write(`[grok] Job ID: ${job.id}\n`);
+  if (!options.json) {
+    process.stderr.write(`[grok] Job ID: ${job.id}\n`);
+  }
   const execution = await runTrackedJob(job, () => runner(progress), { logFile });
-  outputResult(options.json ? execution.payload : execution.rendered, options.json);
+  outputResult(options.json ? { ...execution.payload, jobId: job.id } : execution.rendered, options.json);
   process.exitCode = exitCodeForStatus(execution.exitStatus);
   return execution;
 }
@@ -697,7 +703,7 @@ async function handleTask(argv) {
   // ここを緩めると、読み取り専用のつもりの依頼が書き込み許可で走る。
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "wait"],
+    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "stop-gate", "background", "wait"],
     stopAtFirstPositional: true,
     aliasMap: {
       m: "model"
@@ -716,15 +722,20 @@ async function handleTask(argv) {
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
   const fresh = Boolean(options.fresh);
+  const stopGate = Boolean(options["stop-gate"]);
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
+  }
+  if (stopGate && (resumeLast || options.write)) {
+    throw new Error("`--stop-gate` is an internal read-only mode and cannot resume or write.");
   }
   requireTaskRequest(prompt, resumeLast);
 
   const write = Boolean(options.write);
   const taskMetadata = buildTaskRunMetadata({
     prompt,
-    resumeLast
+    resumeLast,
+    stopGate
   });
 
   const job = buildTaskJob(workspaceRoot, taskMetadata, write);
@@ -738,6 +749,7 @@ async function handleTask(argv) {
         prompt,
         write,
         resumeLast,
+        stopGate,
         jobId: job.id,
         onProgress: progress
       }),

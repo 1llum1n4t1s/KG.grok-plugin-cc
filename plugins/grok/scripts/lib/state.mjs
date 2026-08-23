@@ -12,6 +12,7 @@ const STATE_FILE_NAME = "state.json";
 const STATE_LOCK_FILE_NAME = "state.lock";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+const MAX_REVIEW_GATE_SESSIONS = 50;
 /** ロックを持ったまま落ちたプロセスの置き土産を無効にするまでの時間。 */
 const STATE_LOCK_STALE_MS = 10000;
 const STATE_LOCK_RETRY_LIMIT = 50;
@@ -29,7 +30,8 @@ function defaultState() {
     config: {
       stopReviewGate: false
     },
-    jobs: []
+    jobs: [],
+    reviewGateSessions: []
   };
 }
 
@@ -83,7 +85,8 @@ export function loadState(cwd) {
         ...defaultState().config,
         ...(parsed.config ?? {})
       },
-      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : []
+      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
+      reviewGateSessions: pruneReviewGateSessions(parsed.reviewGateSessions)
     };
   } catch (error) {
     throw new Error(`Grok state is corrupt and was left untouched: ${stateFile}`, { cause: error });
@@ -113,6 +116,13 @@ function pruneJobs(jobs) {
     .slice(0, MAX_JOBS);
 }
 
+function pruneReviewGateSessions(sessions) {
+  return (Array.isArray(sessions) ? sessions : [])
+    .filter((entry) => typeof entry?.sessionId === "string" && entry.sessionId.trim())
+    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
+    .slice(0, MAX_REVIEW_GATE_SESSIONS);
+}
+
 function removeFileIfExists(filePath) {
   if (filePath && fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
@@ -129,7 +139,8 @@ export function saveState(cwd, state) {
       ...defaultState().config,
       ...(state.config ?? {})
     },
-    jobs: nextJobs
+    jobs: nextJobs,
+    reviewGateSessions: pruneReviewGateSessions(state.reviewGateSessions)
   };
 
   const retainedIds = new Set(nextJobs.map((job) => job.id));
@@ -253,6 +264,38 @@ export function setConfig(cwd, key, value) {
 
 export function getConfig(cwd) {
   return loadState(cwd).config;
+}
+
+export function getReviewGateSession(cwd, sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+  return loadState(cwd).reviewGateSessions.find((entry) => entry.sessionId === sessionId) ?? null;
+}
+
+export function setReviewGateSession(cwd, sessionId, value) {
+  if (!sessionId) {
+    return null;
+  }
+  return updateState(cwd, (state) => {
+    const existing = state.reviewGateSessions.find((entry) => entry.sessionId === sessionId) ?? {};
+    state.reviewGateSessions = state.reviewGateSessions.filter((entry) => entry.sessionId !== sessionId);
+    state.reviewGateSessions.unshift({
+      ...existing,
+      ...value,
+      sessionId,
+      updatedAt: nowIso()
+    });
+  });
+}
+
+export function clearReviewGateSession(cwd, sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+  return updateState(cwd, (state) => {
+    state.reviewGateSessions = state.reviewGateSessions.filter((entry) => entry.sessionId !== sessionId);
+  });
 }
 
 export function writeJobFile(cwd, jobId, payload) {

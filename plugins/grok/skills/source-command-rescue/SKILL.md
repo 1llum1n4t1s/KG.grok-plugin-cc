@@ -17,6 +17,7 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
 - If neither resume nor fresh is explicit, use `task-resume-candidate --json`: resume only for a
   clear follow-up; otherwise start with `--fresh`.
 - Keep the task in the user's language and pass it as one prompt argument.
-- Run `node <plugin-root>/scripts/grok-companion.mjs task <flags> <prompt>`.
-- After any completed run, reproduce the companion's stored final output verbatim. Do not summarize
-  it or continue the implementation yourself.
+- Run `node <plugin-root>/scripts/grok-companion.mjs task --json <flags> <prompt>`.
+- After any completed run, run `result <job-id>` using the completed JSON object's exact `jobId`,
+  then reproduce the stored final output verbatim. Do not summarize it or continue the
+  implementation yourself.
