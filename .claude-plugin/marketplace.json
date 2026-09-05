@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "Grok plugins to use in Claude Code for delegation and code review.",
-    "version": "1.0.11"
+    "version": "1.0.12"
   },
   "plugins": [
     {
       "name": "grok",
       "displayName": "Grok Build Companion",
       "description": "Use Grok Build from Claude Code to review code or delegate tasks.",
-      "version": "1.0.11",
+      "version": "1.0.12",
       "author": {
         "name": "Kagayoi"
       },

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.12
+
+- Fixed standard hook startup on Windows by resolving plugin paths in Node.js instead of shell expansion.
+- Respected Codex plugin data directories and documented separate installations for concurrent Claude Code and Codex use.
+- Added the Codex marketplace definition alongside the Claude Code distribution metadata.
+
 ## 1.0.11
 
 - Made the optional stop-time review gate compose safely with other Stop hooks by using a bounded

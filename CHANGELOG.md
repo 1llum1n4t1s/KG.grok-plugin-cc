@@ -4,6 +4,12 @@ Git のバージョン記録・コミット差分と既存の変更履歴をも�
 
 ## 未リリース
 
+## [1.0.12] — 2026-09-06
+
+- Windows の標準フックをシェルの環境変数展開に依存せず起動できるように修正しました。
+- Codex のプラグイン保存先に対応し、Claude Code との個別インストール・同時使用の手順を明記しました。
+- Codex 用マーケットプレイス定義を追加し、Claude Code 用の配布定義と併存させました。
+
 ## [1.0.11] — Git 記録日: 2026-08-24
 
 - Made the optional stop-time review gate compose safely with other Stop hooks by using a bounded repository fingerprint, skipping unchanged continuations, retaining Grok's own blockers until a subsequent edit is re-reviewed, sending long prompts over stdin, and keeping gate sessions out of rescue-task continuation.
