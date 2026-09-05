@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { getReviewGateSession, listJobs, saveState } from "../plugins/grok/scripts/lib/state.mjs";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
-import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+import { copyTestDirectory, initGitRepo, makeTempDir, run } from "./helpers.mjs";
+
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "grok");
@@ -376,3 +377,25 @@ test("SessionEnd removes only jobs owned by the normalized fallback session", ()
     "theirs"
   );
 });
+
+// 登録されたコマンドそのものをシェルで実行し、空白を含むプラグインパスも検証する。
+for (const flavor of ['codex', 'claude']) {
+  test(`standard hook commands work through the shell (${flavor})`, () => {
+    const temp = makeTempDir('grok hooks 日本語 space-');
+    const root = path.join(temp, 'plugin with spaces');
+    copyTestDirectory(PLUGIN_ROOT, root);
+    const data = path.join(temp, 'data');
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, 'hooks/hooks.json'), 'utf8'));
+    const env = { ...process.env, CLAUDE_PLUGIN_ROOT: '', PLUGIN_ROOT: '', CLAUDE_PLUGIN_DATA: '', PLUGIN_DATA: '', CLAUDE_ENV_FILE: '' };
+    env[flavor === 'codex' ? 'PLUGIN_ROOT' : 'CLAUDE_PLUGIN_ROOT'] = root;
+    env[flavor === 'codex' ? 'PLUGIN_DATA' : 'CLAUDE_PLUGIN_DATA'] = data;
+    for (const [event, groups] of Object.entries(manifest.hooks)) {
+      const command = groups[0].hooks[0].command;
+      const executable = process.platform === 'win32' ? 'pwsh' : '/bin/sh';
+      const args = process.platform === 'win32' ? ['-NoProfile', '-Command', command] : ['-c', command];
+      const result = run(executable, args, { shell: false, env, cwd: temp, input: JSON.stringify({ cwd: temp, session_id: 'shell-test', hook_event_name: event }) });
+      assert.equal(result.status, 0, `${event}: ${result.stderr}`);
+      assert.equal(result.stderr, '', event);
+    }
+  });
+}

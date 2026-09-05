@@ -30,7 +30,7 @@ import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
 import { buildShellCommand, terminateProcessTree } from "./process.mjs";
 
-const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
+const PLUGIN_MANIFEST_URL = new URL("../../.codex-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
 
 export const BROKER_ENDPOINT_ENV = "GROK_COMPANION_ACP_ENDPOINT";

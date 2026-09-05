@@ -30,3 +30,14 @@ export function initGitRepo(cwd) {
   run("git", ["config", "commit.gpgsign", "false"], { cwd });
   run("git", ["config", "tag.gpgsign", "false"], { cwd });
 }
+
+// Windows の Node.js 22 でも日本語パスを含むテスト用インストールを作成する。
+export function copyTestDirectory(source, destination) {
+  fs.mkdirSync(destination, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(destination, entry.name);
+    if (entry.isDirectory()) copyTestDirectory(from, to);
+    else fs.copyFileSync(from, to);
+  }
+}

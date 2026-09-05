@@ -151,6 +151,3 @@ plugins/grok/.generated/
 
 # wrangler のローカルキャッシュ・state（アカウント情報を含む）
 .wrangler/
-
-# Serena project cache
-.serena/

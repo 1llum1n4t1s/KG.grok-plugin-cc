@@ -78,6 +78,12 @@ codex plugin add grok@kagayoi-grok
 Start a new Codex task after installation so its skill catalog includes the plugin. Open `/skills`
 and select `grok:source-command-setup` to verify Grok Build and authentication. Codex may also ask
 you to trust the plugin's lifecycle hooks the first time it loads them.
+Keep all four Grok plugin hooks enabled, including on Windows. The plugin resolves its paths
+through Node.js; a separate user-level hook bridge is not required.
+
+To use Claude Code and Codex together, install the plugin in each application.
+Keep the plugin data directories assigned by each application separate; job state and
+review-gate settings are stored independently, even when both use the same repository.
 
 Reload plugins:
 
@@ -427,6 +433,12 @@ codex plugin add grok@kagayoi-grok
 インストール後は、新しい Codex タスクを開始して、プラグインのスキルをスキルカタログへ反映させます。
 `/skills` を開いて `grok:source-command-setup` を選択し、Grok Build と認証を確認してください。
 ライフサイクルフックを初めて読み込むときは、Codex からプラグインを信頼するか確認される場合があります。
+Windows を含め、Grok プラグインの4個のフックをすべて ON にして使います。
+プラグイン自身が Node.js でパスを解決するため、ユーザー設定への別のフック登録は不要です。
+
+Claude Code と Codex を併用するときは、それぞれにプラグインをインストールします。
+各アプリが割り当てるプラグインのデータ保存先は別々に維持してください。
+同じリポジトリを使う場合も、ジョブ状態とレビューゲートの設定は個別に保存されます。
 
 プラグインを再読み込みするには、次を実行します。
 

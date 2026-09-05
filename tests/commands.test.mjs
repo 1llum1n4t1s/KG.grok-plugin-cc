@@ -217,8 +217,8 @@ test("setup points at the x.ai installer rather than a package registry", () => 
 test("hooks keep session lifecycle cleanup and stop gating wired", () => {
   const hooks = JSON.parse(read("hooks/hooks.json"));
   assert.deepEqual(Object.keys(hooks.hooks).sort(), ["SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
-  assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /session-lifecycle-hook\.mjs" SessionStart/);
-  assert.match(hooks.hooks.SessionEnd[0].hooks[0].command, /session-lifecycle-hook\.mjs" SessionEnd/);
+  assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /session-lifecycle-hook\.mjs.*SessionStart/);
+  assert.match(hooks.hooks.SessionEnd[0].hooks[0].command, /session-lifecycle-hook\.mjs.*SessionEnd/);
   assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
   assert.match(hooks.hooks.Stop[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
   assert.equal(hooks.hooks.SessionStart[0].hooks[0].timeout, 5);

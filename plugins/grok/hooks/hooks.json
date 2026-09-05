@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs\" SessionStart",
+            "command": "node -e \"const p=process.env;const r=p.CLAUDE_PLUGIN_ROOT||p.PLUGIN_ROOT;if(!r)throw new Error('Plugin root is missing');p.CLAUDE_PLUGIN_DATA=p.CLAUDE_PLUGIN_DATA||p.PLUGIN_DATA||'';const c=require('node:child_process').spawnSync(process.execPath,[require('node:path').join(r,'scripts/session-lifecycle-hook.mjs'),'SessionStart'],{stdio:'inherit',env:p});if(c.error)throw c.error;process.exit(c.status===null?1:c.status)\"",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs\" SessionEnd",
+            "command": "node -e \"const p=process.env;const r=p.CLAUDE_PLUGIN_ROOT||p.PLUGIN_ROOT;if(!r)throw new Error('Plugin root is missing');p.CLAUDE_PLUGIN_DATA=p.CLAUDE_PLUGIN_DATA||p.PLUGIN_DATA||'';const c=require('node:child_process').spawnSync(process.execPath,[require('node:path').join(r,'scripts/session-lifecycle-hook.mjs'),'SessionEnd'],{stdio:'inherit',env:p});if(c.error)throw c.error;process.exit(c.status===null?1:c.status)\"",
             "timeout": 3
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.mjs\"",
+            "command": "node -e \"const p=process.env;const r=p.CLAUDE_PLUGIN_ROOT||p.PLUGIN_ROOT;if(!r)throw new Error('Plugin root is missing');p.CLAUDE_PLUGIN_DATA=p.CLAUDE_PLUGIN_DATA||p.PLUGIN_DATA||'';const c=require('node:child_process').spawnSync(process.execPath,[require('node:path').join(r,'scripts/stop-review-gate-hook.mjs')],{stdio:'inherit',env:p});if(c.error)throw c.error;process.exit(c.status===null?1:c.status)\"",
             "timeout": 10
           }
         ]
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.mjs\"",
+            "command": "node -e \"const p=process.env;const r=p.CLAUDE_PLUGIN_ROOT||p.PLUGIN_ROOT;if(!r)throw new Error('Plugin root is missing');p.CLAUDE_PLUGIN_DATA=p.CLAUDE_PLUGIN_DATA||p.PLUGIN_DATA||'';const c=require('node:child_process').spawnSync(process.execPath,[require('node:path').join(r,'scripts/stop-review-gate-hook.mjs')],{stdio:'inherit',env:p});if(c.error)throw c.error;process.exit(c.status===null?1:c.status)\"",
             "timeout": 900
           }
         ]
