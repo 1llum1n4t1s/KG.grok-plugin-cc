@@ -4,7 +4,7 @@
 
 Claude Code と Codex から、ローカルにインストールされた Grok Build を使ってレビュー、全体監査、X 検索、タスク委任を実行する。利用者向けの入口と設定は [README.md](README.md)、開発時の検証手順は [AGENTS.md](AGENTS.md) を参照する。
 
-プラグインは Grok Build のインストールや認証サービスを提供せず、既存 CLI を子プロセスとして起動する。モデル実行と外部サービスへのアクセスは Grok Build が担う。`web/` は紹介ページの独立した配信 Worker であり、ジョブのバックエンドではない。`/` と `/index.html` に HTML を返し、その他のパスは 404 にする。
+プラグインは Grok Build のインストールや認証サービスを提供せず、既存 CLI を子プロセスとして起動する。モデル実行と外部サービスへのアクセスは Grok Build が担う。`../vps-web/lp/grok-plugin/` はVPSから配信する紹介ページであり、ジョブのバックエンドではない。`/` と `/index.html` に HTML を返し、その他のパスは 404 にする。
 
 ## 主要コンポーネント
 
@@ -39,3 +39,9 @@ Claude Code と Codex から、ローカルにインストールされた Grok B
 - フックは Node.js 内でホストの環境変数からパスを解決する。シェルごとの変数展開へ依存せず、同じ4イベントのフックを両ホストで使用する。
 - セッション終了やキャンセルは追跡された所有関係に従う。両ホストの保存先が独立する構成では、一方の終了が他方のジョブやブローカー状態を消さない。
 - ACP のクライアントバージョンは配布内の `.codex-plugin/plugin.json` から取得する。ホストごとの manifest を同じバージョンに保つことで共通ランタイムの識別情報をそろえる。
+
+## 製品ページの配信先
+
+製品ページの配信HTMLは `../vps-web/lp/grok-plugin/`（編集元は `../vps-web/tools/lp/templates/`）、公開実体はVPSの `/srv/www/lp/grok-plugin/`。
+直接配信の設定は `../vps-web/deploy/caddy-sites/lp-grok-plugin.caddy` に置く。
+公開URLを維持し、静的ファイルの配信は `vps-web/deploy/deploy-lp.ps1` へ統一する。
