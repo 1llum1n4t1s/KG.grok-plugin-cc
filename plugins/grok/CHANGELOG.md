@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.0.13
+
+- Preserved the latest reply and error when JSON re-emission fails during reviews and audits, instead of reporting the initial response.
+- Added Grok's stop reason to saved results to distinguish completion or cancellation from JSON parsing failures.
+
 ## 1.0.12
 
 - Fixed standard hook startup on Windows by resolving plugin paths in Node.js instead of shell expansion.
