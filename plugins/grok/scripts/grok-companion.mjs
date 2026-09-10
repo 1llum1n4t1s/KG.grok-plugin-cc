@@ -420,6 +420,7 @@ async function executeReviewRun(request) {
     },
     grok: {
       status: result.status,
+      stopReason: result.stopReason,
       stderr: result.stderr,
       stdout: result.reviewText,
       reasoning: result.reasoningSummary

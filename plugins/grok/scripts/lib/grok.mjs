@@ -894,11 +894,11 @@ export async function runGrokReview(cwd, options = {}) {
             buildJsonRepairPrompt(attempt.parseError, options.outputSchema),
             { onProgress: options.onProgress }
           );
-          if (!retry.error && retry.agentMessage && !parseStructuredOutput(retry.agentMessage).parseError) {
-            // 訂正が通ったときだけ差し替える。思考サマリは初回のものを残す。
-            turnState = { ...retry, reasoning: turnState.reasoning };
-            repaired = true;
-          }
+          // 訂正に失敗しても最新の本文・終了理由・エラーを返す。
+          // 監査自体の思考サマリは初回のものを残し、JSON訂正の成否とは分ける。
+          turnState = { ...retry, reasoning: turnState.reasoning };
+          repaired = !retry.error && Boolean(retry.agentMessage) &&
+            !parseStructuredOutput(retry.agentMessage).parseError;
         }
       }
 

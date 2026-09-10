@@ -171,6 +171,9 @@ tasks, and X searches stay quiet in chat until Grok finishes. Detailed progress 
 in the stored job log and through the status command. Claude Code keeps its native foreground Bash
 display.
 
+If a review's JSON re-emission also fails, the saved result contains the latest reply and error.
+The review job remains failed until a valid structured result is returned.
+
 ### `/grok:adversarial-review`
 
 Same targeting as `/grok:review`, but Grok is told to argue against shipping and to report the
@@ -526,6 +529,9 @@ Claude Code と Codex のどちらでも、すべての Grok コマンドをフ�
 Codex向けスキルはコンパニオンのバッファ済みJSONモードを使用するため、長時間のレビュー、監査、
 委任タスク、X検索ではGrokの完了までチャットへ途中経過を流しません。詳細な進捗は保存済みジョブログと
 statusコマンドから確認できます。Claude Codeでは従来どおり、ネイティブの前景Bash表示を維持します。
+
+レビューのJSON再出力にも失敗した場合、最新の応答とエラーを結果へ保存します。
+有効な構造化結果を取得できないレビューは、失敗として扱います。
 
 ### `/grok:adversarial-review`
 

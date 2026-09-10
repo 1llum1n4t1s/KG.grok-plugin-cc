@@ -167,6 +167,49 @@ test("review surfaces a parse failure when the repair round also fails", () => {
   assert.equal(result.status, 1);
   assert.match(result.stdout, /did not return valid structured JSON|unexpected review shape/i);
   assert.match(result.stdout, /Raw final message:/);
+  assert.match(result.stdout, /still not json/);
+  assert.doesNotMatch(result.stdout, /not json at all/);
+});
+
+for (const command of ["review", "audit", "adversarial-review"]) {
+  test(`${command} preserves the latest malformed repair and completion state`, () => {
+    const latestText = `${REVIEW_JSON}\n}`;
+    const workspace = setupWorkspace({
+      replies: [
+        { text: "Starting the audit.", stopReason: "cancelled" },
+        { text: latestText, stopReason: "end_turn" }
+      ]
+    });
+    const result = companion([command, "--json"], workspace);
+    assert.equal(result.status, 1);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.grok.status, "completed");
+    assert.equal(payload.grok.stopReason, "end_turn");
+    assert.equal(payload.rawOutput, latestText);
+    assert.equal(payload.grok.stdout, latestText);
+    assert.ok(payload.parseError);
+    assert.equal(payload.result, null);
+    assert.equal(workspace.fake.readState().prompts.length, 2);
+
+    const stored = companion(["result", payload.jobId], workspace);
+    assert.match(stored.stdout, /One real problem/);
+    assert.doesNotMatch(stored.stdout, /Starting the audit/);
+    const status = JSON.parse(companion(["status", "--json", "--all"], workspace).stdout);
+    assert.equal(status.latestFinished.status, "failed");
+  });
+}
+
+test("review preserves an empty cancelled repair instead of the initial reply", () => {
+  const workspace = setupWorkspace({
+    replies: [{ text: "Initial malformed reply" }, { text: "", stopReason: "cancelled" }]
+  });
+  const result = companion(["review", "--json"], workspace);
+  assert.equal(result.status, 1);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.grok.status, "cancelled");
+  assert.equal(payload.rawOutput, "");
+  assert.equal(payload.result, null);
+  assert.doesNotMatch(payload.parseError, /Initial malformed reply/);
 });
 
 test("review denies write-capable shell commands but allows read-only ones", () => {
