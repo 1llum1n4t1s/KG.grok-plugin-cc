@@ -172,7 +172,8 @@ in the stored job log and through the status command. Claude Code keeps its nati
 display.
 
 If a review's JSON re-emission also fails, the saved result contains the latest reply and error.
-The review job remains failed until a valid structured result is returned.
+The review job is marked failed if no valid structured result is obtained. Use `/grok:result <job-id>`
+to inspect the saved output.
 
 ### `/grok:adversarial-review`
 
@@ -531,7 +532,8 @@ Codex向けスキルはコンパニオンのバッファ済みJSONモードを�
 statusコマンドから確認できます。Claude Codeでは従来どおり、ネイティブの前景Bash表示を維持します。
 
 レビューのJSON再出力にも失敗した場合、最新の応答とエラーを結果へ保存します。
-有効な構造化結果を取得できないレビューは、失敗として扱います。
+有効な構造化結果を取得できないレビューは、失敗として扱います。保存済みの出力は
+`/grok:result <job-id>` で確認できます。
 
 ### `/grok:adversarial-review`
 
