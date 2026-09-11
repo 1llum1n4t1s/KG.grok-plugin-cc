@@ -21,6 +21,15 @@ function listCommands() {
     .sort();
 }
 
+function listSkills(relativePath) {
+  return fs
+    .readdirSync(path.join(PLUGIN_ROOT, relativePath), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .filter((entry) => fs.existsSync(path.join(PLUGIN_ROOT, relativePath, entry.name, "SKILL.md")))
+    .map((entry) => entry.name)
+    .sort();
+}
+
 const PUBLIC_WORKFLOWS = [
   "adversarial-review",
   "audit",
@@ -40,6 +49,8 @@ test("the plugin exposes exactly the supported commands", () => {
 test("Codex exposes the same workflows as native skills", () => {
   const nativeSkillNames = PUBLIC_WORKFLOWS.map((name) => `source-command-${name}`);
 
+  assert.deepEqual(listSkills("skills"), nativeSkillNames);
+
   for (const name of nativeSkillNames) {
     const source = read(`skills/${name}/SKILL.md`);
     assert.match(source, /^---\r?\n/, `${name} is missing skill frontmatter`);
@@ -54,6 +65,37 @@ test("Codex exposes the same workflows as native skills", () => {
   assert.match(audit, /subcommand.*`audit`|`audit`\s*subcommand/i);
   assert.match(audit, /--background/);
   assert.match(audit, /review-only/i);
+});
+
+test("Claude-only helpers stay outside Codex skill discovery", () => {
+  const helperNames = ["grok-cli-runtime", "grok-prompting", "grok-result-handling"];
+  const claudeManifest = JSON.parse(read(".claude-plugin/plugin.json"));
+
+  assert.equal(claudeManifest.skills, "./claude-skills/");
+  assert.deepEqual(listSkills("claude-skills"), helperNames);
+  assert.ok(helperNames.every((name) => !listSkills("skills").includes(name)));
+
+  for (const name of helperNames) {
+    const source = read(`claude-skills/${name}/SKILL.md`);
+    assert.match(source, new RegExp(`^name: ${name}$`, "m"), `${name} has the wrong skill name`);
+    assert.match(source, /^user-invocable: false$/m, `${name} is not marked as an internal helper`);
+  }
+
+  const rescueAgent = read("agents/grok-rescue.md");
+  for (const name of ["grok-cli-runtime", "grok-prompting"]) {
+    assert.match(rescueAgent, new RegExp(`^\\s+- ${name}$`, "m"), `${name} is not wired to the Claude rescue agent`);
+  }
+
+  const resultHandling = read("claude-skills/grok-result-handling/SKILL.md");
+  assert.match(resultHandling, /review-only `review`, `adversarial-review`, and `audit` workflows/);
+  assert.match(resultHandling, /explicit implementation request routed through `grok:grok-rescue`/);
+
+  for (const reference of ["prompt-blocks.md", "grok-prompt-recipes.md", "grok-prompt-antipatterns.md"]) {
+    assert.ok(
+      fs.existsSync(path.join(PLUGIN_ROOT, "claude-skills", "grok-prompting", "references", reference)),
+      `${reference} did not move with the Claude prompting helper`
+    );
+  }
 });
 
 test("Codex runs every Grok workflow in the foreground", () => {
@@ -184,7 +226,7 @@ test("responses follow the sender's language dynamically", () => {
 
   // rescue 経路: 依頼文を英訳せず元の言語のまま転送する指示があること。
   assert.match(read("agents/grok-rescue.md"), /original language/i);
-  assert.match(read("skills/grok-cli-runtime/SKILL.md"), /original language/i);
+  assert.match(read("claude-skills/grok-cli-runtime/SKILL.md"), /original language/i);
 });
 
 test("rescue delegates to the subagent without recursing into itself", () => {
@@ -199,7 +241,7 @@ test("model guidance only names aliases the companion actually resolves", () => 
     assert.match(companion, new RegExp(`\\["${alias}",`), `companion is missing the ${alias} alias`);
   }
 
-  for (const file of ["commands/rescue.md", "agents/grok-rescue.md", "skills/grok-cli-runtime/SKILL.md"]) {
+  for (const file of ["commands/rescue.md", "agents/grok-rescue.md", "claude-skills/grok-cli-runtime/SKILL.md"]) {
     const source = read(file);
     assert.doesNotMatch(source, /spark/i, `${file} still references the removed spark alias`);
     assert.doesNotMatch(source, /gpt-5/i, `${file} still references a GPT-5 model`);
@@ -236,6 +278,7 @@ test("plugin and marketplace manifests agree on name and version", () => {
   assert.equal(plugin.name, "grok");
   assert.equal(codexPlugin.name, plugin.name);
   assert.equal(codexPlugin.version, plugin.version);
+  assert.equal(plugin.skills, "./claude-skills/");
   assert.equal(codexPlugin.skills, "./skills/");
   assert.equal(marketplace.plugins[0].name, "grok");
   assert.equal(marketplace.plugins[0].source, "./plugins/grok");

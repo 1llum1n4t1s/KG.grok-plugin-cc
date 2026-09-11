@@ -3,7 +3,7 @@
 ## 正本と構造
 
 - 利用者向け手順は [README.md](README.md)、構造と不変条件は [DESIGN.md](DESIGN.md) を参照する。DESIGN.md は設計資料として扱う。
-- 配布実装は `plugins/grok/`。Claude Code の入口は `commands/` と `agents/`、Codex の入口は `skills/`、共通実装は `scripts/` に置く。
+- 配布実装は `plugins/grok/`。Claude Code の入口は `commands/` と `agents/`、Claude 専用 helper は `claude-skills/`、Codex の入口は `skills/`、共通実装は `scripts/` に置く。
 - コマンドの挙動を変えるときは両ホストの入口、共通ランタイム、関連テストを照合する。Codex の実行契約は `plugins/grok/references/codex-runtime.md` を参照する。
 - marketplace は `.claude-plugin/marketplace.json` と `.agents/plugins/marketplace.json`、配布 manifest は `plugins/grok/.claude-plugin/plugin.json` と `plugins/grok/.codex-plugin/plugin.json` を照合する。
 

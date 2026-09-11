@@ -15,5 +15,6 @@
     "delegation",
     "acp",
     "second-opinion"
-  ]
+  ],
+  "skills": "./claude-skills/"
 }

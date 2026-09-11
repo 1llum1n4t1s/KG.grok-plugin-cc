@@ -10,7 +10,7 @@ Claude Code と Codex から、ローカルにインストールされた Grok B
 
 | 場所 | 責務 |
 | --- | --- |
-| `plugins/grok/commands/`、`agents/`、`skills/` | ホストごとの呼び出し手順、プロンプトの組み立て方、結果の提示契約 |
+| `plugins/grok/commands/`、`agents/`、`claude-skills/`、`skills/` | Claude Code のコマンド・subagent・内部 helper と、Codex の公開 skill。ホストごとの呼び出し手順、プロンプトの組み立て方、結果の提示契約を分離する |
 | `scripts/grok-companion.mjs` | 引数解釈、レビュー・タスクの実行、ジョブ作成、status/result/cancel/setup の統一入口 |
 | `scripts/lib/git.mjs`、`prompts.mjs`、`render.mjs`、`prompts/`、`schemas/` | 対象とコンテキストの収集、プロンプト、構造化出力の検証・表示 |
 | `scripts/lib/grok.mjs`、`acp.mjs` | Grok CLI と ACP セッション、権限応答、モデル指定、進捗の受信 |

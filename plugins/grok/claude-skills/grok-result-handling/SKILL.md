@@ -16,6 +16,7 @@ When the helper returns Grok output:
 - If Grok made edits, say so explicitly and list the touched files when the helper provides them.
 - For `grok:grok-rescue`, do not turn a failed or incomplete Grok run into a Claude-side implementation attempt. Report the failure and stop.
 - For `grok:grok-rescue`, if Grok was never successfully invoked, do not generate a substitute answer at all.
-- CRITICAL: After presenting review findings, STOP. Do not make any code changes. Do not fix any issues. You MUST explicitly ask the user which issues, if any, they want fixed before touching a single file. Auto-applying fixes from a review is strictly forbidden, even if the fix is obvious.
+- For the review-only `review`, `adversarial-review`, and `audit` workflows, after presenting findings, STOP. Do not make any code changes. Ask which issues, if any, the user wants fixed before touching a file.
+- This review-only boundary does not cancel an explicit implementation request routed through `grok:grok-rescue`. The rescue subagent remains a forwarder and returns only Grok's output.
 - If the helper reports malformed output or a failed Grok run, include the most actionable stderr lines and stop there instead of guessing.
 - If the helper reports that setup or authentication is required, direct the user to `/grok:setup` and do not improvise alternate auth flows.
