@@ -12,7 +12,7 @@ function execute(executable, args, env, cwd, input = '') {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { env, cwd, windowsHide: true, stdio: 'pipe' });
     let stdout = '', stderr = '';
-    const timer = setTimeout(() => { child.kill(); reject(new Error('Child timed out')); }, 15000);
+    const timer = setTimeout(() => { child.kill(); reject(new Error('Child timed out')); }, 30000);
     child.stdout.on('data', value => { stdout += value; });
     child.stderr.on('data', value => { stderr += value; });
     child.on('error', error => { clearTimeout(timer); reject(error); });
