@@ -1,6 +1,6 @@
 {
   "name": "kg-grok-plugin-cc",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "private": true,
   "type": "module",
   "description": "Use Grok Build from Claude Code to review code or delegate tasks.",

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.0.14
+
+- Separated Claude Code-only internal helpers from Codex's public skills so each host loads only the capabilities intended for it.
+- Kept explicit implementation requests through `/grok:rescue` from being blocked by the review-only workflow boundary.
+
 ## 1.0.13
 
 - Preserved the latest reply and error when JSON re-emission fails during reviews and audits, instead of reporting the initial response.
