@@ -4,7 +4,7 @@
 
 ## 1.0.14
 
-- Separated Claude Code-only internal helpers from Codex's public skills so each host loads only the capabilities intended for it.
+- Separated Claude Code-only internal helpers from Codex's public skills so Codex no longer discovers them as public skills.
 - Kept explicit implementation requests through `/grok:rescue` from being blocked by the review-only workflow boundary.
 
 ## 1.0.13
