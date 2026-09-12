@@ -6,6 +6,7 @@
 - 配布実装は `plugins/grok/`。Claude Code の入口は `commands/` と `agents/`、Claude 専用 helper は `claude-skills/`、Codex の入口は `skills/`、共通実装は `scripts/` に置く。
 - コマンドの挙動を変えるときは両ホストの入口、共通ランタイム、関連テストを照合する。Codex の実行契約は `plugins/grok/references/codex-runtime.md` を参照する。
 - marketplace は `.claude-plugin/marketplace.json` と `.agents/plugins/marketplace.json`、配布 manifest は `plugins/grok/.claude-plugin/plugin.json` と `plugins/grok/.codex-plugin/plugin.json` を照合する。
+- skill の追加・移動時は、両 manifest の `skills` と `tests/commands.test.mjs` を照合し、Claude 専用 helper を Codex の公開 skill ディレクトリへ混在させない。分離の理由は [DESIGN.md](DESIGN.md#主要コンポーネント) を参照する。
 
 ## コマンドと検証
 

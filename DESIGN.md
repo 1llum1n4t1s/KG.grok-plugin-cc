@@ -21,6 +21,8 @@ Claude Code と Codex から、ローカルにインストールされた Grok B
 
 表内の `scripts/`、`prompts/`、`schemas/` は `plugins/grok/` 配下を指す。
 
+Claude の manifest は `skills` に `./claude-skills/`、Codex の manifest は `./skills/` を指定する。Claude 専用 helper の `user-invocable: false` だけに依存せず探索先も分けることで、内部 helper が Codex の公開スキル一覧へ露出するのを防ぐ。Claude の rescue subagent は helper 名で参照し、Codex には `source-command-*` の公開ワークフローだけを配置する。
+
 ## データフローと設計判断
 
 1. ホストのコマンドまたはスキルが、対象リポジトリを作業ディレクトリとして companion を前景実行する。Codex は `--json` で完了時にまとめて結果を受け取り、詳細進捗はジョブログへ保存する。これによりジョブ ID、完了、結果取得を一つの実行経路で扱う。

@@ -19,7 +19,8 @@ summary of what changed.
 The examples below use Claude Code's `/grok:<name>` slash commands. In Codex, open `/skills` and
 choose the matching `grok:source-command-<name>` skill, or ask Codex to use it by name. The explicit
 `source-command-` prefix prevents Claude's slash commands from colliding with Codex skills. Both
-hosts route through the same companion runtime and job store.
+hosts use the same companion runtime, with job state stored separately in each host's data directory.
+Codex's skill list contains only these public workflows; Claude's internal helpers are not shown there.
 
 - `/grok:review` for a read-only Grok review of your local git state
 - `/grok:adversarial-review` for a deliberately skeptical ship/no-ship review
@@ -377,8 +378,9 @@ CLI 向けの実装を xAI の Grok Build CLI 向けに変更したものです�
 以下の例では、Claude Code の `/grok:<name>` スラッシュコマンドを使用します。Codex では
 `/skills` を開き、対応する `grok:source-command-<name>` スキルを選択するか、スキル名を指定して
 Codex に実行を依頼してください。明示的な `source-command-` プレフィックスにより、Claude の
-スラッシュコマンドと Codex のスキルが衝突するのを防いでいます。どちらのホストも、同じ
-コンパニオンランタイムとジョブストアを使用します。
+スラッシュコマンドと Codex のスキルが衝突するのを防いでいます。どちらのホストも同じ
+コンパニオンランタイムを使用し、ジョブ状態は各ホストのデータディレクトリへ個別に保存します。
+Codex のスキル一覧には公開ワークフローだけが表示され、Claude の内部 helper は表示されません。
 
 - `/grok:review`: ローカルの Git 状態を Grok が読み取り専用でレビュー
 - `/grok:adversarial-review`: 出荷可否を意図的かつ懐疑的にレビュー
