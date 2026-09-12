@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.15
+
+- Marked reviews and audits as `incomplete` when permission is denied or required inspection is unfinished, preserving denial reasons across JSON re-emission.
+- Prevented the stop-time review gate from accepting `ALLOW` after a permission denial, and kept the incomplete status and reasons visible in saved results.
+- Directed read-only reviews and audits to inspect code in one Grok session instead of requesting unavailable subagent delegation.
+
 ## 1.0.14
 
 - Separated Claude Code-only internal helpers from Codex's public skills so Codex no longer discovers them as public skills.
