@@ -142,7 +142,7 @@ The API key takes precedence over browser credentials.
 
 ### `/grok:review`
 
-Runs a read-only review of your local git state and returns Grok's findings verbatim.
+Runs a read-only review of your local git state and displays Grok's verdict, findings, and next steps.
 
 ```bash
 /grok:review
@@ -166,6 +166,8 @@ Reviews and audits cover all review perspectives in one Grok session; subagent d
 not available in the read-only runtime. If a permission request is denied or Grok reports that
 required inspection is unfinished, the result is `incomplete` and the job fails instead of
 reporting approval. The stop-time review gate also fails when a permission request is denied.
+Use `/grok:result <job-id>` to inspect the saved result and any reported permission denials;
+an incomplete review remains marked as incomplete when displayed again.
 
 Every Grok command runs in the foreground in both Claude Code and Codex. This keeps command output,
 the exact Grok job ID, cancellation, and stored results under one consistent lifecycle. The old
@@ -508,7 +510,7 @@ API キーはブラウザの認証情報より優先されます。
 
 ### `/grok:review`
 
-ローカルの Git 状態を読み取り専用でレビューし、Grok の指摘をそのまま返します。
+ローカルの Git 状態を読み取り専用でレビューし、Grok の判定、指摘、次の対応を表示します。
 
 ```bash
 /grok:review
@@ -533,6 +535,8 @@ API キーはブラウザの認証情報より優先されます。
 サブエージェントへ委任できません。権限要求が拒否された場合、または Grok が必要な調査の未完了を
 報告した場合は、承認ではなく `incomplete` としてジョブを失敗にします。終了時レビューゲートも、
 権限要求が拒否された場合は失敗します。
+`/grok:result <job-id>` で保存済みの結果と記録された権限拒否の理由を確認できます。
+未完了のレビューは、再表示でも未完了として表示されます。
 
 Claude Code と Codex のどちらでも、すべての Grok コマンドをフォアグラウンドで実行します。
 コマンド出力、正確な Grok ジョブ ID、キャンセル、保存済み結果を一つの一貫したライフサイクルで
