@@ -405,6 +405,18 @@ async function executeReviewRun(request) {
   if (validationError) {
     parsed.parseError = validationError;
   }
+  const permissionDenials = Array.isArray(result.permissionDenials)
+    ? result.permissionDenials.filter((reason) => typeof reason === "string" && reason.trim())
+    : [];
+  const reviewIncomplete = !parsed.parseError &&
+    Boolean(parsed.parsed) &&
+    (parsed.parsed.verdict === "incomplete" || permissionDenials.length > 0);
+  if (reviewIncomplete && parsed.parsed.verdict !== "incomplete") {
+    // モデルが拒否後に approve を返しても、生の応答は証拠として残したまま
+    // 公開する構造化結果だけを incomplete へ正規化する。
+    parsed.parsed = { ...parsed.parsed, verdict: "incomplete" };
+  }
+  parsed.permissionDenials = permissionDenials;
   const payload = {
     review: reviewName,
     target,
@@ -428,13 +440,14 @@ async function executeReviewRun(request) {
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
     parseError: parsed.parseError,
+    permissionDenials,
     reasoningSummary: result.reasoningSummary
   };
 
   return {
     // 構造化出力を読めなかったレビューは、走り切っていても成果物として
     // 使えないので失敗扱いにする。呼び出し側のゲートがすり抜けないように。
-    exitStatus: parsed.parseError ? "failed" : result.status,
+    exitStatus: parsed.parseError || reviewIncomplete ? "failed" : result.status,
     grokSessionId: result.sessionId,
     payload,
     rendered: renderReviewResult(parsed, {
@@ -442,7 +455,10 @@ async function executeReviewRun(request) {
       targetLabel: context.target.label,
       reasoningSummary: result.reasoningSummary
     }),
-    summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
+    summary: parsed.parseError ??
+      (reviewIncomplete
+        ? `Review incomplete${permissionDenials[0] ? `: ${permissionDenials[0]}` : "."}`
+        : parsed.parsed?.summary ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`)),
     jobTitle: `Grok ${reviewName}`,
     jobClass: "review",
     targetLabel: context.target.label
@@ -490,16 +506,22 @@ async function executeTaskRun(request) {
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.error?.message ?? result.stderr ?? "";
+  const permissionDenials = Array.isArray(result.permissionDenials)
+    ? result.permissionDenials.filter((reason) => typeof reason === "string" && reason.trim())
+    : [];
+  const stopGateIncomplete = Boolean(request.stopGate && permissionDenials.length > 0);
   const rendered = renderTaskResult(
     {
       rawOutput,
       failureMessage,
-      reasoningSummary: result.reasoningSummary
+      reasoningSummary: result.reasoningSummary,
+      permissionDenials
     },
     {
       title: taskMetadata.title,
       jobId: request.jobId ?? null,
-      write: Boolean(request.write)
+      write: Boolean(request.write),
+      stopGate: Boolean(request.stopGate)
     }
   );
   const payload = {
@@ -507,15 +529,19 @@ async function executeTaskRun(request) {
     grokSessionId: result.sessionId,
     rawOutput,
     touchedFiles: result.touchedFiles,
-    reasoningSummary: result.reasoningSummary
+    reasoningSummary: result.reasoningSummary,
+    permissionDenials,
+    ...(request.stopGate ? { reviewStatus: stopGateIncomplete ? "incomplete" : result.status } : {})
   };
 
   return {
-    exitStatus: result.status,
+    exitStatus: stopGateIncomplete ? "failed" : result.status,
     grokSessionId: result.sessionId,
     payload,
     rendered,
-    summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
+    summary: stopGateIncomplete
+      ? `Review incomplete: ${permissionDenials[0]}`
+      : firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
     jobTitle: taskMetadata.title,
     jobClass: request.stopGate ? "review" : "task",
     write: Boolean(request.write)

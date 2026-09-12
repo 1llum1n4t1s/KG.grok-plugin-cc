@@ -52,6 +52,7 @@ A finding should answer:
 Return only valid JSON matching the provided schema.
 Use `needs-attention` when at least one finding deserves action.
 Use `approve` when the audited code is sound as it stands.
+Use `incomplete` when required code inspection could not be completed. Explain the blocker in the summary and the required follow-up in next_steps; do not invent findings to represent missing access.
 Every finding must include the affected file, `line_start`, `line_end`, a confidence score from 0 to 1, and a concrete recommendation.
 Write the summary as a direct assessment of the codebase's health, not a file-by-file recap.
 </structured_output_contract>

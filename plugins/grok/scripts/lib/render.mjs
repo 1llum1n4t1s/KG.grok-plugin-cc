@@ -46,7 +46,7 @@ export function validateReviewResultShape(data) {
   if (!Array.isArray(data.next_steps)) {
     return "Missing array `next_steps`.";
   }
-  if (!new Set(["approve", "needs-attention"]).has(data.verdict)) {
+  if (!new Set(["approve", "needs-attention", "incomplete"]).has(data.verdict)) {
     return "Invalid `verdict`.";
   }
   const severities = new Set(["critical", "high", "medium", "low"]);
@@ -105,6 +105,25 @@ function normalizeReviewResultData(data) {
       .filter((step) => typeof step === "string" && step.trim())
       .map((step) => step.trim())
   };
+}
+
+function normalizePermissionDenials(permissionDenials) {
+  if (!Array.isArray(permissionDenials)) {
+    return [];
+  }
+  return permissionDenials
+    .filter((reason) => typeof reason === "string" && reason.trim())
+    .map((reason) => reason.trim());
+}
+
+function appendPermissionDenials(lines, permissionDenials) {
+  if (permissionDenials.length === 0) {
+    return;
+  }
+  lines.push("", "Permission denials:");
+  for (const reason of permissionDenials) {
+    lines.push(`- ${reason}`);
+  }
 }
 
 function isStructuredReviewStoredResult(storedJob) {
@@ -318,6 +337,7 @@ export function renderReviewResult(parsedResult, meta) {
   }
 
   const data = normalizeReviewResultData(parsedResult.parsed);
+  const permissionDenials = normalizePermissionDenials(parsedResult.permissionDenials);
   const findings = [...data.findings].sort((left, right) => severityRank(left.severity) - severityRank(right.severity));
   const lines = [
     `# Grok ${meta.reviewLabel}`,
@@ -329,8 +349,12 @@ export function renderReviewResult(parsedResult, meta) {
     ""
   ];
 
+  if (data.verdict === "incomplete") {
+    lines.push("Review incomplete; this result must not be treated as approval.", "");
+  }
+
   if (findings.length === 0) {
-    lines.push("No material findings.");
+    lines.push(data.verdict === "incomplete" ? "No verified findings; inspection is incomplete." : "No material findings.");
   } else {
     lines.push("Findings:");
     for (const finding of findings) {
@@ -342,6 +366,8 @@ export function renderReviewResult(parsedResult, meta) {
       }
     }
   }
+
+  appendPermissionDenials(lines, permissionDenials);
 
   if (data.next_steps.length > 0) {
     lines.push("", "Next steps:");
@@ -386,6 +412,22 @@ export function renderNativeReviewResult(result, meta) {
 
 export function renderTaskResult(parsedResult, meta) {
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
+  const permissionDenials = normalizePermissionDenials(parsedResult?.permissionDenials);
+  if (meta?.stopGate && permissionDenials.length > 0) {
+    const lines = [
+      "# Grok Stop Gate Review",
+      "",
+      "Review incomplete; this result must not be treated as approval."
+    ];
+    appendPermissionDenials(lines, permissionDenials);
+    if (rawOutput) {
+      lines.push("", "Raw final message:", "", "```text", rawOutput, "```");
+    } else {
+      const message = String(parsedResult?.failureMessage ?? "").trim() || "Grok did not return a final message.";
+      lines.push("", message);
+    }
+    return `${lines.join("\n").trimEnd()}\n`;
+  }
   if (rawOutput) {
     return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
   }
@@ -475,7 +517,7 @@ export function renderJobStatusReport(job, options = {}) {
 export function renderStoredJobResult(job, storedJob) {
   const grokSessionId = storedJob?.grokSessionId ?? job.grokSessionId ?? null;
   const resumeCommand = grokSessionId ? `grok --resume ${grokSessionId}` : null;
-  if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
+  if ((isStructuredReviewStoredResult(storedJob) || job?.kind === "stop-gate-review") && storedJob?.rendered) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
     if (!grokSessionId) {
       return output;

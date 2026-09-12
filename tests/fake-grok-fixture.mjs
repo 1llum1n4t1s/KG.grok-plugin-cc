@@ -151,7 +151,7 @@ function handle(message) {
           params: {
             sessionId: params.sessionId,
             toolCall: { toolCallId: "call-1", title: reply.requestPermissionFor.title, rawInput: reply.requestPermissionFor.rawInput },
-            options: [
+            options: reply.requestPermissionFor.options ?? [
               { optionId: "allow", name: "Allow", kind: "allow_once" },
               { optionId: "reject", name: "Reject", kind: "reject_once" }
             ]

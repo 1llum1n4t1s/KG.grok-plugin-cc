@@ -171,6 +171,20 @@ test("review surfaces a parse failure when the repair round also fails", () => {
   assert.doesNotMatch(result.stdout, /not json at all/);
 });
 
+const APPROVE_JSON = JSON.stringify({
+  verdict: "approve",
+  summary: "No material findings.",
+  findings: [],
+  next_steps: []
+});
+
+const INCOMPLETE_JSON = JSON.stringify({
+  verdict: "incomplete",
+  summary: "A required repository read could not be completed.",
+  findings: [],
+  next_steps: ["Retry the review with repository read access."]
+});
+
 for (const command of ["review", "audit", "adversarial-review"]) {
   test(`${command} preserves the latest malformed repair and completion state`, () => {
     const latestText = `${REVIEW_JSON}\n}`;
@@ -223,7 +237,14 @@ test("review denies write-capable shell commands but allows read-only ones", () 
     ]
   });
   const deniedResult = companion(["review", "--wait"], denied);
-  assert.match(deniedResult.stdout, /blocked/);
+  assert.equal(deniedResult.status, 1);
+  assert.match(deniedResult.stdout, /Verdict: incomplete/);
+  assert.match(deniedResult.stdout, /rm -rf build/);
+  assert.match(deniedResult.stdout, /must not be treated as approval/i);
+
+  const deniedStatus = JSON.parse(companion(["status", "--json", "--all"], denied).stdout);
+  assert.equal(deniedStatus.latestFinished.status, "failed");
+  assert.match(deniedStatus.latestFinished.summary, /incomplete/i);
 
   const allowed = setupWorkspace({
     replies: [
@@ -235,7 +256,104 @@ test("review denies write-capable shell commands but allows read-only ones", () 
     ]
   });
   const allowedResult = companion(["review", "--wait"], allowed);
+  assert.equal(allowedResult.status, 0);
   assert.match(allowedResult.stdout, /Verdict: needs-attention/);
+});
+
+test("review marks a denied subagent request as incomplete even when Grok returns approve", () => {
+  const workspace = setupWorkspace({
+    replies: [
+      {
+        requestPermissionFor: { title: "Delegate to subagent", rawInput: { agent: "explorer" } },
+        text: REVIEW_JSON,
+        onDenied: { text: APPROVE_JSON }
+      }
+    ]
+  });
+
+  const result = companion(["audit", "--json"], workspace);
+  assert.equal(result.status, 1);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.result.verdict, "incomplete");
+  assert.equal(payload.rawOutput, APPROVE_JSON);
+  assert.equal(payload.grok.stdout, APPROVE_JSON);
+  assert.match(payload.permissionDenials.join("\n"), /Delegate to subagent/);
+
+  const stored = companion(["result", payload.jobId], workspace);
+  assert.match(stored.stdout, /Verdict: incomplete/);
+  assert.match(stored.stdout, /Delegate to subagent/);
+});
+
+test("review keeps permission denials across JSON repair and cannot repair into approve", () => {
+  const workspace = setupWorkspace({
+    replies: [
+      {
+        requestPermissionFor: { title: "Delegate to subagent", rawInput: { agent: "explorer" } },
+        text: REVIEW_JSON,
+        onDenied: { text: "not json" }
+      },
+      { text: APPROVE_JSON }
+    ]
+  });
+
+  const result = companion(["audit", "--json"], workspace);
+  assert.equal(result.status, 1);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.result.verdict, "incomplete");
+  assert.equal(payload.rawOutput, APPROVE_JSON);
+  assert.match(payload.permissionDenials.join("\n"), /Delegate to subagent/);
+  assert.equal(workspace.fake.readState().prompts.length, 2);
+});
+
+test("review rejects a read-only permission request when allow_once is unavailable", () => {
+  const workspace = setupWorkspace({
+    replies: [
+      {
+        requestPermissionFor: {
+          title: "Execute `git diff auth.js`",
+          rawInput: { command: "git diff auth.js" },
+          options: [{ optionId: "reject", name: "Reject", kind: "reject_once" }]
+        },
+        text: REVIEW_JSON,
+        onDenied: { text: APPROVE_JSON }
+      }
+    ]
+  });
+
+  const result = companion(["review", "--json"], workspace);
+  assert.equal(result.status, 1);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.result.verdict, "incomplete");
+  assert.match(payload.permissionDenials.join("\n"), /no one-time read-only permission option|git diff/i);
+});
+
+test("review treats an explicit incomplete verdict as a failed review result", () => {
+  const workspace = setupWorkspace({ replies: [{ text: INCOMPLETE_JSON }] });
+
+  const result = companion(["review", "--json"], workspace);
+  assert.equal(result.status, 1);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.result.verdict, "incomplete");
+  assert.deepEqual(payload.permissionDenials, []);
+  assert.equal(payload.grok.status, "completed");
+  assert.equal(payload.grok.stopReason, "end_turn");
+
+  const stored = companion(["result", payload.jobId], workspace);
+  assert.match(stored.stdout, /Verdict: incomplete/);
+  assert.match(stored.stdout, /must not be treated as approval/i);
+});
+
+test("review still completes for an approve verdict without permission denials", () => {
+  const workspace = setupWorkspace({ replies: [{ text: APPROVE_JSON }] });
+
+  const result = companion(["review", "--json"], workspace);
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.result.verdict, "approve");
+  assert.deepEqual(payload.permissionDenials, []);
+
+  const status = JSON.parse(companion(["status", "--json", "--all"], workspace).stdout);
+  assert.equal(status.latestFinished.status, "completed");
 });
 
 test("adversarial review uses its own prompt template", () => {
@@ -322,6 +440,8 @@ test("audit applies a risk-directed deep investigation when focus is omitted", (
   assert.match(prompt, /callers, callees, state transitions, trust boundaries/i);
   assert.match(prompt, /failure and cleanup paths, concurrency behavior/i);
   assert.match(prompt, /relevant tests or documented contracts/i);
+  assert.match(prompt, /Perform all review perspectives yourself in this session/i);
+  assert.match(prompt, /do not call spawn_subagent/i);
   assert.match(prompt, /<depth_gate>/);
   assert.doesNotMatch(prompt, /No extra focus provided\./);
 });
@@ -461,6 +581,37 @@ ${result.stdout}
 stderr:
 ${result.stderr}`);
   assert.match(result.stdout, /permission denied/);
+});
+
+test("stop-gate review fails when a denied operation is followed by ALLOW", () => {
+  const workspace = setupWorkspace({
+    replies: [
+      {
+        requestPermissionFor: { title: "Delegate to subagent", rawInput: { agent: "reviewer" } },
+        text: "BLOCK: should not be emitted",
+        onDenied: { text: "ALLOW: no blockers found in the partial review" }
+      }
+    ]
+  });
+
+  const result = companion(["task", "--stop-gate", "review the previous turn"], workspace);
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /Review incomplete/i);
+  assert.match(result.stdout, /must not be treated as approval/i);
+  assert.match(result.stdout, /Delegate to subagent/);
+  assert.match(result.stdout, /Raw final message:/);
+  assert.match(result.stdout, /ALLOW: no blockers found in the partial review/);
+
+  const jobIdMatch = result.stderr.match(/^\[grok\] Job ID: (task-[a-z0-9-]+)$/m);
+  assert.ok(jobIdMatch, result.stderr);
+  const stored = companion(["result", jobIdMatch[1]], workspace);
+  assert.match(stored.stdout, /Review incomplete/i);
+  assert.match(stored.stdout, /Delegate to subagent/);
+  assert.match(stored.stdout, /Raw final message:/);
+
+  const status = JSON.parse(companion(["status", "--json", "--all"], workspace).stdout);
+  assert.equal(status.latestFinished.status, "failed");
+  assert.match(status.latestFinished.summary, /incomplete/i);
 });
 
 test("task with --write allows write permission requests", () => {

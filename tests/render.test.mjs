@@ -33,6 +33,34 @@ test("renderReviewResult degrades gracefully when JSON is missing required revie
   assert.match(output, /Raw final message:/);
 });
 
+test("renderReviewResult explains an incomplete review and its permission denials", () => {
+  const output = renderReviewResult(
+    {
+      parsed: {
+        verdict: "incomplete",
+        summary: "The available evidence looked clean.",
+        findings: [],
+        next_steps: []
+      },
+      rawOutput: '{"verdict":"approve"}',
+      parseError: null,
+      permissionDenials: ["the tool is not explicitly known to be read-only: Delegate to subagent"]
+    },
+    {
+      reviewLabel: "Audit",
+      targetLabel: "tracked repository"
+    }
+  );
+
+  assert.match(output, /Verdict: incomplete/);
+  assert.match(output, /must not be treated as approval/i);
+  assert.match(output, /Permission denials:/);
+  assert.match(output, /Delegate to subagent/);
+  assert.match(output, /The available evidence looked clean\./);
+  assert.match(output, /No verified findings; inspection is incomplete\./);
+  assert.doesNotMatch(output, /No material findings\./);
+});
+
 test("renderJobStatusReport makes a wait timeout visible", () => {
   const output = renderJobStatusReport(
     { id: "job-1", status: "running", title: "Review", phase: "reviewing" },
@@ -70,6 +98,26 @@ test("renderStoredJobResult prefers rendered output for structured review jobs",
   assert.doesNotMatch(output, /^\{/);
   assert.match(output, /Grok session ID: 019fcc0b-4160-7952-b39c-6338256e2d52/);
   assert.match(output, /Resume in Grok: grok --resume 019fcc0b-4160-7952-b39c-6338256e2d52/);
+});
+
+test("renderStoredJobResult preserves the incomplete wrapper for stop-gate reviews", () => {
+  const output = renderStoredJobResult(
+    {
+      id: "task-123",
+      kind: "stop-gate-review",
+      status: "failed",
+      title: "Grok Stop Gate Review",
+      jobClass: "review"
+    },
+    {
+      rendered: "# Grok Stop Gate Review\n\nReview incomplete; this result must not be treated as approval.\n\nRaw final message:\n\nALLOW: partial review\n",
+      result: { rawOutput: "ALLOW: partial review", permissionDenials: ["subagent denied"] }
+    }
+  );
+
+  assert.match(output, /^# Grok Stop Gate Review/);
+  assert.match(output, /Review incomplete/);
+  assert.match(output, /Raw final message:/);
 });
 
 test("renderSetupReport summarizes availability, auth, and broker state", () => {

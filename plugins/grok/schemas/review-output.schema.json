@@ -11,9 +11,11 @@
   "properties": {
     "verdict": {
       "type": "string",
+      "description": "Use incomplete when a required inspection step could not be completed; an incomplete review is never approval.",
       "enum": [
         "approve",
-        "needs-attention"
+        "needs-attention",
+        "incomplete"
       ]
     },
     "summary": {

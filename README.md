@@ -162,6 +162,11 @@ The review is read-only: Grok may read files and run read-only commands such as 
 `git log`, but the plugin denies anything that would write to disk. Grok reports what it thinks
 should change; it does not change it.
 
+Reviews and audits cover all review perspectives in one Grok session; subagent delegation is
+not available in the read-only runtime. If a permission request is denied or Grok reports that
+required inspection is unfinished, the result is `incomplete` and the job fails instead of
+reporting approval. The stop-time review gate also fails when a permission request is denied.
+
 Every Grok command runs in the foreground in both Claude Code and Codex. This keeps command output,
 the exact Grok job ID, cancellation, and stored results under one consistent lifecycle. The old
 `--wait` flag is accepted as a no-op for compatibility; `--background` is rejected instead of
@@ -523,6 +528,11 @@ API キーはブラウザの認証情報より優先されます。
 レビューは読み取り専用です。Grok はファイルを読み、`git diff` や `git log` などの読み取り専用
 コマンドを実行できますが、ディスクへ書き込む操作はプラグインによって拒否されます。Grok は
 変更すべき内容を報告しますが、実際の変更は行いません。
+
+レビューと監査は、一つの Grok セッションで各観点を調査します。読み取り専用の実行環境では
+サブエージェントへ委任できません。権限要求が拒否された場合、または Grok が必要な調査の未完了を
+報告した場合は、承認ではなく `incomplete` としてジョブを失敗にします。終了時レビューゲートも、
+権限要求が拒否された場合は失敗します。
 
 Claude Code と Codex のどちらでも、すべての Grok コマンドをフォアグラウンドで実行します。
 コマンド出力、正確な Grok ジョブ ID、キャンセル、保存済み結果を一つの一貫したライフサイクルで

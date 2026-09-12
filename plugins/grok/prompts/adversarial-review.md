@@ -50,6 +50,7 @@ Return only valid JSON matching the provided schema.
 Keep the output compact and specific.
 Use `needs-attention` if there is any material risk worth blocking on.
 Use `approve` only if you cannot support any substantive adversarial finding from the provided context.
+Use `incomplete` when required code inspection could not be completed. Explain the blocker in the summary and the required follow-up in next_steps; do not invent findings to represent missing access.
 Every finding must include:
 - the affected file
 - `line_start` and `line_end`

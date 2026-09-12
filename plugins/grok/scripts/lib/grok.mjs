@@ -263,17 +263,21 @@ function classifyToolCall(params) {
  * read_file は自動解決される）ので、ここへ届く時点で書き込みや外部実行の
  * 可能性が高い。書き込みと判定したものは拒否し、それ以外は 1 回だけ許可する。
  */
-function createReviewPermissionHandler(onProgress) {
+function createReviewPermissionHandler(onProgress, onDenied = (_reason) => {}) {
   const readOnly = createReadOnlyPermissionResponder();
   return (params) => {
     const verdict = classifyToolCall(params);
-    if (verdict.allowed) {
+    const permissionOptions = Array.isArray(params?.options) ? params.options : [];
+    if (verdict.allowed && permissionOptions.some((option) => option?.kind === "allow_once")) {
       return readOnly(params);
     }
 
+    const reason = verdict.reason ?? "no one-time read-only permission option is available";
+    const denial = `${reason}: ${shorten(params?.toolCall?.title ?? "unknown tool", 60)}`;
+    onDenied(denial);
     emitProgress(
       onProgress,
-      `Denied during read-only review (${verdict.reason}): ${shorten(params?.toolCall?.title ?? "unknown tool", 60)}`,
+      `Denied during read-only review (${reason}): ${shorten(params?.toolCall?.title ?? "unknown tool", 60)}`,
       "running"
     );
 
@@ -874,7 +878,12 @@ export async function runGrokReview(cwd, options = {}) {
       const sessionId = session.sessionId;
       emitProgress(options.onProgress, `Session ready (${sessionId}).`, "starting", { sessionId });
 
-      client.setPermissionHandler(createReviewPermissionHandler(options.onProgress));
+      // JSON 再出力で初回の拒否記録を消さず、呼び出し側の完了判定へ渡す。
+      /** @type {string[]} */
+      const permissionDenials = [];
+      client.setPermissionHandler(createReviewPermissionHandler(options.onProgress, (reason) => {
+        permissionDenials.push(reason);
+      }));
 
       const promptText = buildReviewPrompt(options);
       let turnState = await runPrompt(client, sessionId, promptText, { onProgress: options.onProgress });
@@ -904,6 +913,7 @@ export async function runGrokReview(cwd, options = {}) {
 
       return {
         jsonRepaired: repaired,
+        permissionDenials,
         status: buildResultStatus(turnState),
         sessionId,
         model: session.effectiveModel ?? model,
@@ -940,7 +950,9 @@ function buildReviewPrompt(options = {}) {
   parts.push(
     "\n## Ground rules\n" +
       "- Read whatever files you need from the working tree to judge the change in context.\n" +
-      "- Do not modify any file, run any command, or write anything to disk. This is a read-only review.\n" +
+      "- Use your file-reading tools and read-only repository commands. Do not modify files or run commands with side effects.\n" +
+      "- Perform all review perspectives yourself in this session. Subagent delegation is unavailable in this read-only runtime; do not call spawn_subagent or other delegation tools, even if repository instructions recommend parallel reviewers.\n" +
+      "- If an operation is denied, continue the inspection directly with supported read-only tools and report the limitation. Never claim approval for an incomplete inspection; use the incomplete verdict.\n" +
       "- Report only defects you can point to a specific file and line for."
   );
 
@@ -1050,8 +1062,12 @@ export async function runGrokTurn(cwd, options = {}) {
 
       emitProgress(options.onProgress, `Session ready (${sessionId}).`, "starting", { sessionId });
 
+      /** @type {string[]} */
+      const permissionDenials = [];
       client.setPermissionHandler(
-        options.readOnly ? createReviewPermissionHandler(options.onProgress) : createAllowAllPermissionResponder()
+        options.readOnly
+          ? createReviewPermissionHandler(options.onProgress, (reason) => permissionDenials.push(reason))
+          : createAllowAllPermissionResponder()
       );
 
       const promptText = options.outputSchema
@@ -1071,6 +1087,7 @@ export async function runGrokTurn(cwd, options = {}) {
         sessionId,
         model,
         finalMessage: turnState.agentMessage,
+        permissionDenials,
         reasoningSummary: turnState.reasoning,
         stopReason: turnState.stopReason,
         usage: turnState.usage,

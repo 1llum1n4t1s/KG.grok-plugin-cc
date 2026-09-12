@@ -40,6 +40,7 @@ A finding should answer:
 Return only valid JSON matching the provided schema.
 Use `needs-attention` when at least one finding should block the change.
 Use `approve` when the change is safe to ship as written.
+Use `incomplete` when required code inspection could not be completed. Explain the blocker in the summary and the required follow-up in next_steps; do not invent findings to represent missing access.
 Every finding must include the affected file, `line_start`, `line_end`, a confidence score from 0 to 1, and a concrete recommendation.
 Write the summary as a direct assessment, not a neutral recap of the diff.
 </structured_output_contract>
