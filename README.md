@@ -98,9 +98,9 @@ Worth knowing before you install, because this plugin does more than add prompts
 
 - It starts `grok agent stdio` as a child process and talks to it over the Agent
   Client Protocol. Grok Build itself comes from x.ai, not from this repository.
-- Runs in the same repository share one Grok process through a small broker that
-  stays resident between commands. `/grok:status` shows what is running and
-  `/grok:cancel` stops it.
+- Within each app, runs in the same repository share one Grok process through a small broker that
+  stays resident between commands. If the broker is unreachable, the plugin starts its own
+  process. `/grok:status` shows running jobs, and `/grok:cancel` stops a running job.
 - Job records and Grok's output are written under the plugin's own data
   directory, scoped per repository.
 - Grok reads your repository to answer, so the code it opens goes to xAI under
@@ -319,17 +319,7 @@ Read the findings, fix what matters, then run it again.
 /grok:rescue port the settings screen to the new form API
 ```
 
-## How It Talks To Grok
-
-The plugin runs `grok agent stdio` and speaks the Agent Client Protocol to it. That means Grok
-reads your repository itself rather than being handed a pasted diff, and you see its tool calls as
-they happen.
-
-Runs in the same repository share one Grok process through a small broker, so a review and a
-delegated task do not each pay startup cost. If the broker is unreachable the plugin falls back to
-starting its own Grok process.
-
-### Choosing a model
+## Choosing a model
 
 The plugin asks for `grok-4.7` by default. Override it for a single run with `--model`, or for
 every run by setting `GROK_PLUGIN_MODEL`.
@@ -465,9 +455,9 @@ Claude Code と Codex を併用するときは、それぞれにプラグイン�
 
 - `grok agent stdio` を子プロセスとして起動し、Agent Client Protocol を介して通信します。
   Grok Build 自体はこのリポジトリではなく、x.ai から提供されます。
-- 同じリポジトリ内の実行は、小さなブローカーを介して 1 つの Grok プロセスを共有します。
-  このプロセスはコマンド間も常駐します。実行中の処理は `/grok:status` で確認でき、
-  `/grok:cancel` で停止できます。
+- 各アプリ内で同じリポジトリの実行は、小さなブローカーを介して 1 つの Grok プロセスを共有します。
+  このプロセスはコマンド間も常駐します。ブローカーへ接続できない場合は、独自のプロセスを起動します。
+  実行中の処理は `/grok:status` で確認でき、`/grok:cancel` で停止できます。
 - ジョブ記録と Grok の出力は、リポジトリごとに分けられたプラグイン専用のデータディレクトリへ
   書き込まれます。
 - Grok は回答のためにリポジトリを読み取ります。そのため、Grok が開いたコードは Grok Build の
@@ -688,17 +678,7 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 /grok:rescue port the settings screen to the new form API
 ```
 
-## Grok との通信方法
-
-このプラグインは `grok agent stdio` を実行し、Agent Client Protocol を介して通信します。
-貼り付けた差分を Grok に渡す方式ではなく、Grok 自身がリポジトリを読み取るため、実行中の
-ツール呼び出しも確認できます。
-
-同じリポジトリ内の実行は、小さなブローカーを介して 1 つの Grok プロセスを共有します。そのため、
-レビューと委任タスクのたびに起動コストが発生することはありません。ブローカーへ接続できない場合は、
-プラグインが独自の Grok プロセスを起動します。
-
-### モデルの選択
+## モデルの選択
 
 このプラグインは既定で `grok-4.7` を指定します。1 回の実行だけ変更するには `--model` を、
 すべての実行で変更するには `GROK_PLUGIN_MODEL` を設定してください。
