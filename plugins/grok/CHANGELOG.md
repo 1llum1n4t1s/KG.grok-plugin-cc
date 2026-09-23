@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.16
+
+- Selected Grok 4.7 by default and for the `latest` alias, while preserving explicit model overrides.
+- Rejected environment prefixes and search commands that can execute other programs or write files during read-only reviews.
+- Fixed cancellation and session-end cleanup to verify and stop the tracked Grok task process.
+
 ## 1.0.15
 
 - Marked reviews and audits as `incomplete` when permission is denied or required inspection is unfinished, preserving denial reasons across JSON re-emission.
