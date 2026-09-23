@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.17
+
+- Retried transient Windows process identity lookup failures so Grok rescue and other jobs can start reliably.
+
 ## 1.0.16
 
 - Selected Grok 4.7 by default and for the `latest` alias, while preserving explicit model overrides.
