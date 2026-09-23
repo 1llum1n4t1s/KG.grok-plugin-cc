@@ -162,7 +162,15 @@ function commitNonTerminalTransition(workspaceRoot, jobId, buildNext) {
 }
 
 export async function runTrackedJob(job, runner, options = {}) {
-  const processStartKey = getProcessSnapshot(process.pid)?.startKey;
+  // Windows のプロセス照会が一時的に失敗しても起動できるようにする。
+  // 停止対象の同一性を確認できるまで、ジョブを登録せず短時間だけ再試行する。
+  const readSnapshot = options.getProcessSnapshotImpl ?? getProcessSnapshot;
+  let processStartKey = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    processStartKey = readSnapshot(process.pid)?.startKey;
+    if (processStartKey) break;
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   if (!processStartKey) {
     throw new Error("Cannot verify the Grok job process identity for cancellation.");
   }

@@ -28,6 +28,56 @@ test("session identity prefers the shared id and falls back to the Codex thread 
   assert.equal(record.sessionId, "codex-task");
 });
 
+test("a transient process identity lookup failure does not prevent a task from starting", async () => {
+  const workspace = makeTempDir();
+  const job = baseJob(workspace, "transient-process-lookup");
+  saveState(workspace, { version: 1, config: {}, jobs: [job] });
+  writeJobFile(workspace, job.id, job);
+  let lookups = 0;
+
+  await runTrackedJob(job, async () => ({
+    exitStatus: "completed",
+    payload: { ok: true },
+    rendered: "done",
+    summary: "done"
+  }), {
+    getProcessSnapshotImpl() {
+      lookups += 1;
+      return lookups === 1 ? null : { startKey: "verified-start" };
+    }
+  });
+
+  assert.equal(lookups, 2);
+  const stored = readJobFile(resolveJobFile(workspace, job.id));
+  assert.equal(stored.status, "completed");
+  assert.equal(stored.processStartKey, "verified-start");
+});
+
+test("a task stays queued when process identity cannot be verified", async () => {
+  const workspace = makeTempDir();
+  const job = baseJob(workspace, "missing-process-identity");
+  saveState(workspace, { version: 1, config: {}, jobs: [job] });
+  writeJobFile(workspace, job.id, job);
+  let lookups = 0;
+  let ran = false;
+
+  await assert.rejects(
+    runTrackedJob(job, async () => {
+      ran = true;
+    }, {
+      getProcessSnapshotImpl() {
+        lookups += 1;
+        return null;
+      }
+    }),
+    /Cannot verify the Grok job process identity/i
+  );
+
+  assert.equal(lookups, 3);
+  assert.equal(ran, false);
+  assert.equal(readJobFile(resolveJobFile(workspace, job.id)).status, "queued");
+});
+
 test("a worker never starts a queued job that was already cancelled", async () => {
   const workspace = makeTempDir();
   const job = { ...baseJob(workspace, "cancel-before-start"), status: "cancelled" };
