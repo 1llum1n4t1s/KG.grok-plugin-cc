@@ -4,6 +4,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,7 @@ import { makeTempDir, initGitRepo, run } from "./helpers.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "grok", "scripts", "grok-companion.mjs");
+const SESSION_HOOK = path.join(ROOT, "plugins", "grok", "scripts", "session-lifecycle-hook.mjs");
 
 const REVIEW_JSON = JSON.stringify({
   verdict: "needs-attention",
@@ -51,6 +53,66 @@ function companion(args, { repo, env }) {
   return run(process.execPath, [SCRIPT, ...args], { cwd: repo, env });
 }
 
+async function waitForHeldTask(child, fake, repo, env) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error("Held Grok task exited before cancellation.");
+    }
+    const status = companion(["status", "--json"], { repo, env });
+    assert.equal(status.status, 0, status.stderr);
+    const job = JSON.parse(status.stdout).running?.[0];
+    if (job?.pid && job.processStartKey && fake.readState()?.prompts?.length) {
+      return job;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error("Held Grok task did not reach the prompt.");
+}
+
+async function waitForChildExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Grok task process stayed alive after cancellation.")), 6000);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+for (const mode of ["cancel", "session-end"]) {
+  test(`${mode} stops a held foreground Grok task`, async () => {
+    const { fake, repo, env } = setupWorkspace({ holdPrompt: true });
+    env.GROK_COMPANION_SESSION_ID = "held-session";
+    const child = spawn(process.execPath, [SCRIPT, "task", "--json", "hold this turn"], {
+      cwd: repo,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
+    child.stdout.resume();
+    child.stderr.resume();
+    try {
+      const job = await waitForHeldTask(child, fake, repo, env);
+      if (mode === "cancel") {
+        const result = companion(["cancel", "--json", job.id], { repo, env });
+        assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+        assert.equal(JSON.parse(result.stdout).status, "cancelled");
+      } else {
+        const result = run(process.execPath, [SESSION_HOOK, "SessionEnd"], {
+          cwd: repo,
+          env,
+          input: JSON.stringify({ cwd: repo, session_id: "held-session", hook_event_name: "SessionEnd" })
+        });
+        assert.equal(result.status, 0, result.stderr);
+      }
+      await waitForChildExit(child);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+    }
+  });
+}
+
 test("setup reports a ready runtime and the detected model", () => {
   const { repo, env } = setupWorkspace({ replies: [{ text: "ok" }] });
   const result = companion(["setup", "--json"], { repo, env });
@@ -84,7 +146,7 @@ ${result.stderr}`);
 
 test("review renders structured findings and asks for the reasoning model", () => {
   const { fake, repo, env } = setupWorkspace({
-    availableModels: ["grok-fake-nonreasoning", "grok-4.6"],
+    availableModels: ["grok-fake-nonreasoning", "grok-4.7"],
     replies: [{ text: REVIEW_JSON, tools: ["read_file"], thoughts: ["Looking", " at", " the", " diff."] }]
   });
 
@@ -109,7 +171,7 @@ ${result.stderr}`);
 
   // API キー認証時の既定は非推論モデルなので、明示的に差し替えていること。
   const state = fake.readState();
-  assert.deepEqual(state.models, ["grok-4.6"]);
+  assert.deepEqual(state.models, ["grok-4.7"]);
 });
 
 test("review joins streamed thought chunks into readable sentences", () => {
@@ -666,7 +728,7 @@ ${result.stderr}`);
   assert.deepEqual(fake.readState().models, ["grok-4.5"]);
 });
 
-test("task asks for grok-4.6 when the model is omitted", () => {
+test("task asks for grok-4.7 when the model is omitted", () => {
   const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
 
   const result = companion(["task", "do a thing"], { repo, env });
@@ -675,7 +737,16 @@ test("task asks for grok-4.6 when the model is omitted", () => {
 ${result.stdout}
 stderr:
 ${result.stderr}`);
-  assert.deepEqual(fake.readState().models, ["grok-4.6"]);
+  assert.deepEqual(fake.readState().models, ["grok-4.7"]);
+});
+
+test("task resolves the latest alias to grok-4.7", () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+
+  const result = companion(["task", "--model", "latest", "do a thing"], { repo, env });
+
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.deepEqual(fake.readState().models, ["grok-4.7"]);
 });
 
 const THOUGHT_LEVEL_OPTION = {

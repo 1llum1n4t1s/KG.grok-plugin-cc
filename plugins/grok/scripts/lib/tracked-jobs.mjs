@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
+import { getProcessSnapshot } from "./process.mjs";
 import { readJobFile, resolveJobFile, resolveJobLogFile, updateState, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "GROK_COMPANION_SESSION_ID";
@@ -161,12 +162,17 @@ function commitNonTerminalTransition(workspaceRoot, jobId, buildNext) {
 }
 
 export async function runTrackedJob(job, runner, options = {}) {
+  const processStartKey = getProcessSnapshot(process.pid)?.startKey;
+  if (!processStartKey) {
+    throw new Error("Cannot verify the Grok job process identity for cancellation.");
+  }
   const runningRecord = {
     ...job,
     status: "running",
     startedAt: nowIso(),
     phase: "starting",
     pid: process.pid,
+    processStartKey,
     logFile: options.logFile ?? job.logFile ?? null
   };
   const claim = commitNonTerminalTransition(job.workspaceRoot, job.id, () => runningRecord);

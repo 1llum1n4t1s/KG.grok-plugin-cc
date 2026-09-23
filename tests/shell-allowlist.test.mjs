@@ -87,8 +87,31 @@ test("読み取り用 git サブコマンドの書き込み・外部実行オプ
   assert.equal(classifyShellCommand("git diff -Oorder.txt auth.js").allowed, true);
 });
 
-test("環境変数の前置きを読み飛ばす", () => {
-  assert.equal(classifyShellCommand("GIT_PAGER=cat git log -1").allowed, true);
+test("環境変数で読み取りコマンドの挙動を変える前置きを拒否する", () => {
+  for (const command of [
+    "GIT_PAGER=cat git log -1",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=helper git status",
+    "RIPGREP_CONFIG_PATH=config rg TODO ."
+  ]) {
+    assert.equal(classifyShellCommand(command).allowed, false, command);
+  }
+});
+
+test("外部実行や書き込みができる検索・整形コマンドを拒否する", () => {
+  for (const command of [
+    "sed -i.bak s/a/b/ auth.js",
+    "sed --in-place s/a/b/ auth.js",
+    "sed 's/a/b/e' auth.js",
+    "sed 's/a/b/woutput.txt' auth.js",
+    "sort -o output.txt input.txt",
+    "uniq input.txt output.txt",
+    "rg --pre helper TODO .",
+    "rg --pre=helper --pre-glob '*.js' TODO .",
+    "awk '{cmd=\"helper\"; print | cmd}' auth.js",
+    "less auth.js"
+  ]) {
+    assert.equal(classifyShellCommand(command).allowed, false, command);
+  }
 });
 
 test("実行ファイルのパスや拡張子が付いていても解決する", () => {
@@ -133,8 +156,8 @@ test("許可コマンドでもシェルへ抜ける使い方は拒否する", ()
   }
 });
 
-test("素直な awk / sed / find は引き続き許可する", () => {
-  for (const command of ["awk '{print $1}' auth.js", "sed -n '1,20p' auth.js", "find . -name '*.js'"]) {
+test("行範囲の sed 表示と素直な find は引き続き許可する", () => {
+  for (const command of ["sed -n '1,20p' auth.js", "find . -name '*.js'"]) {
     assert.equal(classifyShellCommand(command).allowed, true, command);
   }
 });

@@ -175,6 +175,53 @@ export function processCommandContains(pid, marker, options = {}) {
   }
 }
 
+/** PID の再利用を見分けるため、OS が持つプロセス開始識別子を読む。 */
+export function getProcessSnapshot(pid, options = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const platform = options.platform ?? process.platform;
+  const readFile = options.readFileImpl ?? fs.readFileSync;
+  const run = options.runCommandImpl ?? runCommand;
+  try {
+    if (platform === "linux") {
+      const stat = readFile(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/);
+      const bootId = readFile("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      const commandLine = readFile(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim();
+      const startTick = fields[19]; // /proc/[pid]/stat の第 22 フィールド。
+      return bootId && startTick && commandLine
+        ? { startKey: `${bootId}:${startTick}`, commandLine }
+        : null;
+    }
+    if (platform === "win32") {
+      const script = `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if ($null -ne $p) { [pscustomobject]@{ startKey = $p.CreationDate.ToUniversalTime().ToString('o'); commandLine = $p.CommandLine } | ConvertTo-Json -Compress }`;
+      const result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { shell: false });
+      if (result.error || result.status !== 0 || !result.stdout.trim()) return null;
+      const snapshot = JSON.parse(result.stdout);
+      return typeof snapshot.startKey === "string" && typeof snapshot.commandLine === "string"
+        ? snapshot
+        : null;
+    }
+    const start = run("ps", ["-p", String(pid), "-o", "lstart="], { shell: false });
+    const command = run("ps", ["-p", String(pid), "-o", "command="], { shell: false });
+    return !start.error && !command.error && start.status === 0 && command.status === 0 &&
+      start.stdout.trim() && command.stdout.trim()
+      ? { startKey: start.stdout.trim(), commandLine: command.stdout.trim() }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 記録時と同じ companion プロセスだけを停止対象にする。 */
+export function processMatchesTrackedJob(pid, startKey, options = {}) {
+  if (typeof startKey !== "string" || !startKey) return false;
+  const snapshot = getProcessSnapshot(pid, options);
+  return Boolean(
+    snapshot && snapshot.startKey === startKey &&
+    /(?:^|[\s\\/])grok-companion\.mjs(?=$|[\s"'])/i.test(snapshot.commandLine)
+  );
+}
+
 export function formatCommandFailure(result) {
   const parts = [`${result.command} ${result.args.join(" ")}`.trim()];
   if (result.signal) {

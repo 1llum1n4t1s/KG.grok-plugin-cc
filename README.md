@@ -231,7 +231,7 @@ while it works. Say so in the request when you only want diagnosis — "read-onl
 investigate", "don't change anything" — and the run stays read-only.
 
 Model aliases: `fast`, `reasoning`, `multi`, `build`, `latest`. Anything else is passed through as
-a model ID, so `--model grok-4.6` works too. `--effort` accepts `low`, `medium`, or `high`.
+a model ID, so `--model grok-4.7` works too. `--effort` accepts `low`, `medium`, or `high`.
 
 ### `/grok:x`
 
@@ -331,7 +331,7 @@ starting its own Grok process.
 
 ### Choosing a model
 
-The plugin asks for `grok-4.6` by default. Override it for a single run with `--model`, or for
+The plugin asks for `grok-4.7` by default. Override it for a single run with `--model`, or for
 every run by setting `GROK_PLUGIN_MODEL`.
 
 This matters more than it looks: when you authenticate with `XAI_API_KEY`, Grok's own default for a
@@ -598,7 +598,7 @@ statusコマンドから確認できます。Claude Codeでは従来どおり、
 `don't change anything` などと明記すると、読み取り専用で実行されます。
 
 モデルの別名は `fast`、`reasoning`、`multi`、`build`、`latest` です。それ以外の値はモデル ID として
-そのまま渡されるため、`--model grok-4.6` のような指定もできます。`--effort` には `low`、`medium`、
+そのまま渡されるため、`--model grok-4.7` のような指定もできます。`--effort` には `low`、`medium`、
 `high` を指定できます。
 
 ### `/grok:x`
@@ -700,7 +700,7 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 
 ### モデルの選択
 
-このプラグインは既定で `grok-4.6` を指定します。1 回の実行だけ変更するには `--model` を、
+このプラグインは既定で `grok-4.7` を指定します。1 回の実行だけ変更するには `--model` を、
 すべての実行で変更するには `GROK_PLUGIN_MODEL` を設定してください。
 
 これは見た目以上に重要です。`XAI_API_KEY` で認証した場合、Grok の新しいセッションでは既定で

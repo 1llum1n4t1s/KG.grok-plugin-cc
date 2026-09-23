@@ -4,6 +4,8 @@ import process from "node:process";
 
 import {
   buildShellCommand,
+  getProcessSnapshot,
+  processMatchesTrackedJob,
   quoteShellArgument,
   processCommandContains,
   runCommand,
@@ -32,6 +34,42 @@ test("processCommandContains verifies a job marker before termination", () => {
       return { status: 0, stdout: "node grok-companion.mjs review-worker --job-id job-exact", stderr: "", error: null };
     }
   }), false);
+});
+
+test("tracked job termination requires the same process start and companion command", () => {
+  let snapshot = { startKey: "2026-09-23T01:00:00.000Z", commandLine: "node grok-companion.mjs task" };
+  const options = {
+    platform: "win32",
+    runCommandImpl() {
+      return { status: 0, stdout: JSON.stringify(snapshot), stderr: "", error: null };
+    }
+  };
+
+  assert.equal(processMatchesTrackedJob(1234, snapshot.startKey, options), true);
+  snapshot = { ...snapshot, startKey: "2026-09-23T01:00:01.000Z" };
+  assert.equal(processMatchesTrackedJob(1234, "2026-09-23T01:00:00.000Z", options), false);
+  snapshot = { ...snapshot, commandLine: "node unrelated.mjs task" };
+  assert.equal(processMatchesTrackedJob(1234, snapshot.startKey, options), false);
+  assert.equal(processMatchesTrackedJob(1234, null, options), false);
+});
+
+test("Linux process identity includes boot ID and process start ticks", () => {
+  const fields = Array(20).fill("0");
+  fields[19] = "987654";
+  const files = new Map([
+    ["/proc/1234/stat", `1234 (node) ${fields.join(" ")}`],
+    ["/proc/sys/kernel/random/boot_id", "boot-identifier\n"],
+    ["/proc/1234/cmdline", "node\0grok-companion.mjs\0task\0"]
+  ]);
+  const snapshot = getProcessSnapshot(1234, {
+    platform: "linux",
+    readFileImpl(path) { return files.get(path); }
+  });
+
+  assert.deepEqual(snapshot, {
+    startKey: "boot-identifier:987654",
+    commandLine: "node grok-companion.mjs task"
+  });
 });
 
 test("quoteShellArgument quotes spaces without mangling backslashes", () => {

@@ -75,7 +75,7 @@ function handle(message) {
           agentVersion: "9.9.9",
           modelState: {
             currentModelId: scenario.defaultModel ?? "grok-fake-nonreasoning",
-            availableModels: (scenario.availableModels ?? ["grok-fake-nonreasoning", "grok-4.6", "grok-4.5"]).map((m) => ({ modelId: m, name: m }))
+            availableModels: (scenario.availableModels ?? ["grok-fake-nonreasoning", "grok-4.7", "grok-4.6", "grok-4.5"]).map((m) => ({ modelId: m, name: m }))
           }
         }
       }});
@@ -92,7 +92,7 @@ function handle(message) {
         sessionId: "fake-session-" + state.sessions,
         models: {
           currentModelId: scenario.defaultModel ?? "grok-fake-nonreasoning",
-          availableModels: (scenario.availableModels ?? ["grok-fake-nonreasoning", "grok-4.6", "grok-4.5"]).map((m) => ({ modelId: m, name: m }))
+          availableModels: (scenario.availableModels ?? ["grok-fake-nonreasoning", "grok-4.7", "grok-4.6", "grok-4.5"]).map((m) => ({ modelId: m, name: m }))
         },
         configOptions: scenario.configOptions ?? []
       }});
@@ -136,6 +136,10 @@ function handle(message) {
     case "session/prompt": {
       state.prompts.push(params.prompt.map((block) => block.text).join(""));
       persist();
+
+      if (scenario.holdPrompt) {
+        return;
+      }
 
       const replies = scenario.replies ?? [];
       const reply = replies[promptIndex] ?? replies[replies.length - 1] ?? { text: "no scenario reply" };

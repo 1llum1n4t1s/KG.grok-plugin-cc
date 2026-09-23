@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { processCommandContains, terminateProcessTree } from "./lib/process.mjs";
+import { processMatchesTrackedJob, terminateProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/acp.mjs";
 import {
   clearBrokerSession,
@@ -68,7 +68,7 @@ function cleanupSessionJobs(cwd, sessionId) {
       continue;
     }
     try {
-      if (processCommandContains(job.pid, job.id)) {
+      if (processMatchesTrackedJob(job.pid, job.processStartKey)) {
         terminateProcessTree(job.pid);
       }
     } catch {

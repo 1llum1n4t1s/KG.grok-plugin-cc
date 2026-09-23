@@ -46,7 +46,7 @@ const DEFAULT_CONTINUE_PROMPT =
  * 推論なしモデルではレビュー品質が落ちる。明示的に推論可能な最上位を指す。
  * 環境変数 GROK_PLUGIN_MODEL で上書きできる。
  */
-const DEFAULT_REVIEW_MODEL = "grok-4.6";
+const DEFAULT_REVIEW_MODEL = "grok-4.7";
 
 /**
  * ツール名だけで書き込みと判定できるもの。
@@ -69,11 +69,11 @@ const MUTATING_TOOL_PATTERN = /(write|edit|create|delete|remove|rename|patch|app
  * 情報を取りたいときは Grok 自身のファイル読み取りツールを使わせる。
  */
 const READ_ONLY_COMMANDS = new Set([
-  "cat", "head", "tail", "less", "more", "type",
+  "cat", "head", "tail", "type",
   "ls", "dir", "pwd", "find", "tree", "stat", "file", "wc",
   "rg", "grep", "egrep", "fgrep", "ack", "ag",
   "echo", "which", "where", "basename", "dirname", "realpath",
-  "jq", "sort", "uniq", "cut", "awk", "sed", "tr", "diff"
+  "jq", "cut", "sed", "tr", "diff"
 ]);
 
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
@@ -98,12 +98,17 @@ const OUTSIDE_PATH_PATTERN = /(^|[\s"'])(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]
  * `git` と同じく、名前だけでなく引数まで見て判定する。
  */
 const ARGUMENT_SENSITIVE_COMMANDS = new Map([
-  // awk の system() / exec() / シェルへのパイプ、sed の e（実行）・w（書き出し）コマンド。
-  ["awk", /\b(system|exec)\s*\(|\|\s*["']/],
-  ["sed", /\b(system|exec)\s*\(|\|\s*["']|(^|[;{'"\s])[0-9,$~\/]*\s*[ewW](\s|$)/],
   // find は -exec / -delete で読み取り専用ではなくなる。
   ["find", /(^|\s)-(exec|execdir|ok|okdir|delete|fls|fprint|fprintf|fprint0)(\s|$)/]
 ]);
+
+/** sed は行番号を指定した表示だけ許可する。任意の sed スクリプトには実行・書き込み命令がある。 */
+function isSafeSedPrint(tokens) {
+  const args = tokens.slice(1);
+  return args[0] === "-n" &&
+    /^(?:\d+|\$)(?:,(?:\d+|\$))?p$/.test(args[1] ?? "") &&
+    args.slice(2).every((arg) => arg && !arg.startsWith("-"));
+}
 
 function cleanGrokStderr(stderr) {
   return String(stderr ?? "")
@@ -199,8 +204,11 @@ export function classifyShellCommand(command) {
 
   const segments = text.split(/\|\||&&|[;|]/).map((segment) => segment.trim()).filter(Boolean);
   for (const segment of segments) {
-    // 環境変数の前置き（FOO=bar cmd）を読み飛ばす。
-    const tokens = tokenizeCommand(segment).filter((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token));
+    const tokens = tokenizeCommand(segment);
+    // 環境変数で Git や検索ツールの実行内容を変えられるため、前置きは許可しない。
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? "")) {
+      return { allowed: false, reason: "sets an environment variable" };
+    }
     const head = (tokens[0] ?? "").replace(/^.*[\\/]/, "").replace(/\.(exe|cmd|bat)$/i, "").toLowerCase();
     if (!head) {
       return { allowed: false, reason: `could not parse "${segment}"` };
@@ -223,6 +231,13 @@ export function classifyShellCommand(command) {
 
     if (!READ_ONLY_COMMANDS.has(head)) {
       return { allowed: false, reason: `${head} is not on the read-only allowlist` };
+    }
+
+    if (head === "sed" && !isSafeSedPrint(tokens)) {
+      return { allowed: false, reason: "sed script is not a line-range print" };
+    }
+    if (head === "rg" && tokens.slice(1).some((token) => /^--pre(?:-glob)?(?:=|$)/.test(token))) {
+      return { allowed: false, reason: "rg uses an external preprocessor" };
     }
 
     const sensitivePattern = ARGUMENT_SENSITIVE_COMMANDS.get(head);

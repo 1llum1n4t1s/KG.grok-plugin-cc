@@ -21,7 +21,7 @@ import {
   } from "./lib/grok.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, processCommandContains, terminateProcessTree } from "./lib/process.mjs";
+import { binaryAvailable, processMatchesTrackedJob, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   generateJobId,
@@ -75,7 +75,7 @@ const MODEL_ALIASES = new Map([
   ["reasoning", "grok-4.20-0309-reasoning"],
   ["multi", "grok-4.20-multi-agent-0309"],
   ["build", "grok-build-0.1"],
-  ["latest", "grok-4.6"]
+  ["latest", "grok-4.7"]
 ]);
 
 function printUsage() {
@@ -929,10 +929,10 @@ async function handleCancel(argv) {
   );
 
   try {
-    if (processCommandContains(job.pid, job.id)) {
+    if (processMatchesTrackedJob(job.pid, job.processStartKey)) {
       terminateProcessTree(job.pid);
     } else if (Number.isFinite(job.pid)) {
-      appendLogLine(job.logFile, "Skipped process termination because the PID no longer identifies this job.");
+      appendLogLine(job.logFile, "Skipped process termination because the PID and start time do not identify this job.");
     }
   } catch (error) {
     appendLogLine(job.logFile, `Process termination failed: ${error?.message ?? String(error)}`);
