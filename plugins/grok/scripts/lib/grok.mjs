@@ -66,12 +66,13 @@ const MUTATING_TOOL_PATTERN = /(write|edit|create|delete|remove|rename|patch|app
  * 汎用インタプリタ（node / python など）は載せない。
  * `-e` や `-c` の引数一つで任意の書き込みができてしまい、
  * コマンド名だけでは読み取り専用を保証できないため。
+ * ack / ag の pager と tree の出力ファイル指定も同じ理由で載せない。
  * 情報を取りたいときは Grok 自身のファイル読み取りツールを使わせる。
  */
 const READ_ONLY_COMMANDS = new Set([
   "cat", "head", "tail", "type",
-  "ls", "dir", "pwd", "find", "tree", "stat", "file", "wc",
-  "rg", "grep", "egrep", "fgrep", "ack", "ag",
+  "ls", "dir", "pwd", "find", "stat", "file", "wc",
+  "rg", "grep", "egrep", "fgrep",
   "echo", "which", "where", "basename", "dirname", "realpath",
   "jq", "cut", "sed", "tr", "diff"
 ]);
@@ -80,7 +81,7 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   "diff", "show", "log", "status", "blame", "ls-files", "ls-tree", "rev-parse",
   "describe", "cat-file", "shortlog", "grep", "whatchanged"
 ]);
-const UNSAFE_GIT_ARGUMENT_PATTERN = /^(?:--output(?:=|$)|-o.*|--ext-diff$|--textconv$|--open-files-in-pager(?:=|$))/;
+const UNSAFE_GIT_ARGUMENT_PATTERN = /^(?:--output(?:=|$)|-o.*|--ext-diff$|--textconv$|--filters$|--open-files-in-pager(?:=|$))/;
 
 /** ファイルへ書き出すリダイレクトと、その場編集を示す痕跡。 */
 const WRITE_SIDE_EFFECT_PATTERN = /(^|\s)(>>?|\btee\b)(\s|$)|(^|\s)-i(\s|$)/;
@@ -90,17 +91,14 @@ const WRITE_SIDE_EFFECT_PATTERN = /(^|\s)(>>?|\btee\b)(\s|$)|(^|\s)-i(\s|$)/;
  * 埋め込むだけで別のコマンドが先に走るため、中身を見ずに一律で拒否する。
  */
 const COMMAND_SUBSTITUTION_PATTERN = /\$\(|\$\{|`/;
-const UNSAFE_SHELL_SYNTAX_PATTERN = /[\r\n]|(?<!&)&(?!&)|[<>]|\^|%[^%]+%|![A-Za-z_][A-Za-z0-9_]*!/;
-const OUTSIDE_PATH_PATTERN = /(^|[\s"'])(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]:[\\/]|[\\/]{2}|\/(?!dev\/null\b))/;
+const UNSAFE_SHELL_SYNTAX_PATTERN = /[\r\n{}]|(?<!&)&(?!&)|[<>]|\^|%[^%]+%|![A-Za-z_][A-Za-z0-9_]*!|\$[A-Za-z_]/;
+const OUTSIDE_PATH_PATTERN = /(^|[\s"'=\\/])(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]:|[\\/]{2}|\/(?!dev\/null\b))/;
 
 /**
  * 許可コマンドの中でも、引数次第でシェルへ抜けたり書き込んだりできるもの。
  * `git` と同じく、名前だけでなく引数まで見て判定する。
  */
-const ARGUMENT_SENSITIVE_COMMANDS = new Map([
-  // find は -exec / -delete で読み取り専用ではなくなる。
-  ["find", /(^|\s)-(exec|execdir|ok|okdir|delete|fls|fprint|fprintf|fprint0)(\s|$)/]
-]);
+const UNSAFE_FIND_ARGUMENTS = new Set(["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls", "-fprint", "-fprintf", "-fprint0"]);
 
 /** sed は行番号を指定した表示だけ許可する。任意の sed スクリプトには実行・書き込み命令がある。 */
 function isSafeSedPrint(tokens) {
@@ -176,9 +174,16 @@ function emitLogEvent(onProgress, options = {}) {
 function tokenizeCommand(segment) {
   const tokens = [];
   const pattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let previousEnd = 0;
   let match;
   while ((match = pattern.exec(segment)) !== null) {
+    // 引用部分と通常文字が隣接する語は shell では 1 語に連結される。
+    // この簡易 tokenizer で同じ解釈を保証できないため拒否する。
+    if ((tokens.length > 0 && match.index === previousEnd) || /["']/.test(match[3] ?? "")) {
+      return null;
+    }
     tokens.push(match[1] ?? match[2] ?? match[3]);
+    previousEnd = pattern.lastIndex;
   }
   return tokens;
 }
@@ -205,11 +210,18 @@ export function classifyShellCommand(command) {
   const segments = text.split(/\|\||&&|[;|]/).map((segment) => segment.trim()).filter(Boolean);
   for (const segment of segments) {
     const tokens = tokenizeCommand(segment);
+    if (!tokens) {
+      return { allowed: false, reason: "uses unsupported shell quoting" };
+    }
     // 環境変数で Git や検索ツールの実行内容を変えられるため、前置きは許可しない。
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? "")) {
       return { allowed: false, reason: "sets an environment variable" };
     }
-    const head = (tokens[0] ?? "").replace(/^.*[\\/]/, "").replace(/\.(exe|cmd|bat)$/i, "").toLowerCase();
+    // パス付き実行ファイルは任意の同名バイナリへ差し替えられる。
+    if (/[\\/]/.test(tokens[0] ?? "") || /^[A-Za-z]:/.test(tokens[0] ?? "")) {
+      return { allowed: false, reason: "uses an executable path outside the command allowlist" };
+    }
+    const head = (tokens[0] ?? "").replace(/\.(exe|cmd|bat)$/i, "").toLowerCase();
     if (!head) {
       return { allowed: false, reason: `could not parse "${segment}"` };
     }
@@ -226,6 +238,9 @@ export function classifyShellCommand(command) {
       if (unsafeArgument) {
         return { allowed: false, reason: `git ${sub} uses write-capable or external-execution option ${unsafeArgument}` };
       }
+      if (sub === "grep" && tokens.slice(2).some((token) => token.startsWith("-O"))) {
+        return { allowed: false, reason: "git grep uses an external pager" };
+      }
       continue;
     }
 
@@ -240,8 +255,7 @@ export function classifyShellCommand(command) {
       return { allowed: false, reason: "rg uses an external preprocessor" };
     }
 
-    const sensitivePattern = ARGUMENT_SENSITIVE_COMMANDS.get(head);
-    if (sensitivePattern && sensitivePattern.test(segment)) {
+    if (head === "find" && tokens.slice(1).some((token) => UNSAFE_FIND_ARGUMENTS.has(token))) {
       return { allowed: false, reason: `${head} is being used in a way that can write or run other commands` };
     }
   }
@@ -443,7 +457,7 @@ async function withGrok(cwd, handler, options = {}) {
   // ブローカー由来の不具合を切り分けるときと、プロセスの後始末を
   // 呼び出し側で完結させたいとき（統合テスト）に使う。
   const brokerDisabled =
-    options.disableBroker || ["1", "true", "yes"].includes(String(process.env.GROK_COMPANION_DISABLE_BROKER ?? "").toLowerCase());
+    options.disableBroker || ["1", "true", "yes"].includes(String((options.env ?? process.env).GROK_COMPANION_DISABLE_BROKER ?? "").toLowerCase());
 
   let client;
   try {
@@ -727,11 +741,11 @@ function resolveGrokBin(env = process.env) {
   return "grok";
 }
 
-export function getGrokAvailability(cwd) {
-  const bin = resolveGrokBin();
+export function getGrokAvailability(cwd, env = process.env) {
+  const bin = resolveGrokBin(env);
   // Windows では cmd.exe 経由で起動する。`process.env.SHELL`（Git Bash）だと
   // パスのバックスラッシュがエスケープとして食われ、`.cmd` ラッパーも起動できない。
-  const spawnOptions = { cwd, shell: process.platform === "win32" };
+  const spawnOptions = { cwd, env, shell: process.platform === "win32" };
   const command = quoteIfNeeded(bin);
 
   const versionStatus = binaryAvailable(command, ["--version"], spawnOptions);
@@ -778,12 +792,12 @@ export function getSessionRuntimeStatus(env = process.env, cwd = process.cwd()) 
  * セッションを 1 本張ってみるところまでを確認手段にしている。
  */
 export async function getGrokAuthStatus(cwd, options = {}) {
-  const availability = getGrokAvailability(cwd);
+  const env = options.env ?? process.env;
+  const availability = getGrokAvailability(cwd, env);
   if (!availability.available) {
     return { authenticated: false, reason: "grok-missing", availability };
   }
 
-  const env = options.env ?? process.env;
   const usingApiKey = Boolean(env.XAI_API_KEY);
 
   try {
@@ -872,12 +886,13 @@ function grokMissingMessage(availability) {
  * 書き込み系ツールは権限応答側で拒否して読み取り専用を担保する。
  */
 export async function runGrokReview(cwd, options = {}) {
-  const availability = getGrokAvailability(cwd);
+  const env = options.env ?? process.env;
+  const availability = getGrokAvailability(cwd, env);
   if (!availability.available) {
     throw new Error(grokMissingMessage(availability));
   }
 
-  const model = options.model ?? process.env.GROK_PLUGIN_MODEL ?? DEFAULT_REVIEW_MODEL;
+  const model = options.model ?? env.GROK_PLUGIN_MODEL ?? DEFAULT_REVIEW_MODEL;
 
   return withGrok(
     cwd,
@@ -896,6 +911,7 @@ export async function runGrokReview(cwd, options = {}) {
       // JSON 再出力で初回の拒否記録を消さず、呼び出し側の完了判定へ渡す。
       /** @type {string[]} */
       const permissionDenials = [];
+      client.setWriteDeniedHandler((reason) => permissionDenials.push(reason));
       client.setPermissionHandler(createReviewPermissionHandler(options.onProgress, (reason) => {
         permissionDenials.push(reason);
       }));
@@ -940,7 +956,7 @@ export async function runGrokReview(cwd, options = {}) {
         stderr: cleanGrokStderr(client.stderr)
       };
     },
-    { grokBin: availability.bin, env: options.env }
+    { grokBin: availability.bin, env, readOnly: true }
   );
 }
 
@@ -1019,7 +1035,8 @@ function buildJsonRepairPrompt(parseError, schema) {
  * 書き込みを許すかどうかは options.readOnly で切り替える。
  */
 export async function runGrokTurn(cwd, options = {}) {
-  const availability = getGrokAvailability(cwd);
+  const env = options.env ?? process.env;
+  const availability = getGrokAvailability(cwd, env);
   if (!availability.available) {
     throw new Error(grokMissingMessage(availability));
   }
@@ -1029,7 +1046,7 @@ export async function runGrokTurn(cwd, options = {}) {
     throw new Error("A prompt is required for this Grok run.");
   }
 
-  const model = options.model ?? process.env.GROK_PLUGIN_MODEL ?? DEFAULT_REVIEW_MODEL;
+  const model = options.model ?? env.GROK_PLUGIN_MODEL ?? DEFAULT_REVIEW_MODEL;
 
   return withGrok(
     cwd,
@@ -1079,6 +1096,7 @@ export async function runGrokTurn(cwd, options = {}) {
 
       /** @type {string[]} */
       const permissionDenials = [];
+      client.setWriteDeniedHandler((reason) => permissionDenials.push(reason));
       client.setPermissionHandler(
         options.readOnly
           ? createReviewPermissionHandler(options.onProgress, (reason) => permissionDenials.push(reason))
@@ -1112,7 +1130,7 @@ export async function runGrokTurn(cwd, options = {}) {
         commandExecutions: turnState.commandExecutions
       };
     },
-    { grokBin: availability.bin, env: options.env }
+    { grokBin: availability.bin, env, readOnly: Boolean(options.readOnly) }
   );
 }
 

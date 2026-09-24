@@ -48,7 +48,7 @@ if (!(argv[0] === "agent" && argv[1] === "stdio")) {
 }
 
 // 呼び出しの記録。テストから何が起きたか検証できるようにする。
-const state = { prompts: [], models: [], cancels: [], loads: [], configs: [], sessions: 0 };
+const state = { pid: process.pid, prompts: [], models: [], cancels: [], loads: [], configs: [], sessions: 0 };
 function persist() {
   if (STATE_PATH) {
     fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), "utf8");
@@ -67,6 +67,10 @@ function handle(message) {
 
   switch (method) {
     case "initialize":
+      if (scenario.initializeError) {
+        send({ jsonrpc: "2.0", id, error: { code: -32000, message: scenario.initializeError } });
+        return;
+      }
       send({ jsonrpc: "2.0", id, result: {
         protocolVersion: 1,
         agentCapabilities: { loadSession: true, sessionCapabilities: { list: {} } },
@@ -147,7 +151,7 @@ function handle(message) {
 
       // 権限確認を求めるシナリオ: クライアントの応答を待ってから続ける。
       if (reply.requestPermissionFor) {
-        pendingReply = { id, reply, sessionId: params.sessionId };
+        pendingReply = { id, reply, sessionId: params.sessionId, kind: "permission" };
         send({
           jsonrpc: "2.0",
           id: 9000 + promptIndex,
@@ -160,6 +164,17 @@ function handle(message) {
               { optionId: "reject", name: "Reject", kind: "reject_once" }
             ]
           }
+        });
+        return;
+      }
+
+      if (reply.requestClientFileWrite) {
+        pendingReply = { id, reply, sessionId: params.sessionId, kind: "file-write" };
+        send({
+          jsonrpc: "2.0",
+          id: 9000 + promptIndex,
+          method: "fs/write_text_file",
+          params: reply.requestClientFileWrite
         });
         return;
       }
@@ -199,8 +214,14 @@ rl.on("line", (line) => {
   if (pendingReply && message.id !== undefined && !message.method) {
     const outcome = message.result?.outcome?.outcome;
     const optionId = message.result?.outcome?.optionId;
-    const { id, reply, sessionId } = pendingReply;
+    const { id, reply, sessionId, kind } = pendingReply;
     pendingReply = null;
+    if (kind === "file-write") {
+      state.clientWriteResponse = message.error ?? message.result;
+      persist();
+      emitReply(id, sessionId, reply);
+      return;
+    }
     const denied = outcome !== "selected" || optionId !== "allow";
     emitReply(id, sessionId, denied ? (reply.onDenied ?? { text: "denied", stopReason: "cancelled" }) : reply);
     return;

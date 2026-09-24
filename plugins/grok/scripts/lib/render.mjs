@@ -162,13 +162,17 @@ function formatGrokResumeCommand(job) {
   return `grok --resume ${job.grokSessionId}`;
 }
 
+function isActiveJob(job) {
+  return job.status === "queued" || job.status === "running" || job.terminationPending === true;
+}
+
 function appendActiveJobsTable(lines, jobs) {
   lines.push("Active jobs:");
   lines.push("| Job | Kind | Status | Phase | Elapsed | Grok Session ID | Summary | Actions |");
   lines.push("| --- | --- | --- | --- | --- | --- | --- | --- |");
   for (const job of jobs) {
     const actions = [`/grok:status ${job.id}`];
-    if (job.status === "queued" || job.status === "running") {
+    if (isActiveJob(job)) {
       actions.push(`/grok:cancel ${job.id}`);
     }
     lines.push(
@@ -184,6 +188,9 @@ function pushJobDetails(lines, job, options = {}) {
   }
   if (job.phase) {
     lines.push(`  Phase: ${job.phase}`);
+  }
+  if (job.terminationPending) {
+    lines.push(`  Process termination is pending. Retry: /grok:cancel ${job.id}`);
   }
   if (options.showElapsed && job.elapsed) {
     lines.push(`  Elapsed: ${job.elapsed}`);
@@ -201,13 +208,13 @@ function pushJobDetails(lines, job, options = {}) {
   if (job.logFile && options.showLog) {
     lines.push(`  Log: ${job.logFile}`);
   }
-  if ((job.status === "queued" || job.status === "running") && options.showCancelHint) {
+  if (isActiveJob(job) && options.showCancelHint) {
     lines.push(`  Cancel: /grok:cancel ${job.id}`);
   }
-  if (job.status !== "queued" && job.status !== "running" && options.showResultHint) {
+  if (!isActiveJob(job) && options.showResultHint) {
     lines.push(`  Result: /grok:result ${job.id}`);
   }
-  if (job.status !== "queued" && job.status !== "running" && job.jobClass === "task" && job.write && options.showReviewHint) {
+  if (!isActiveJob(job) && job.jobClass === "task" && job.write && options.showReviewHint) {
     lines.push("  Review changes: /grok:review");
     lines.push("  Stricter review: /grok:adversarial-review");
   }
@@ -504,8 +511,8 @@ export function renderJobStatusReport(job, options = {}) {
     lines.push(`Wait timed out after ${options.timeoutMs}ms; the job is still ${job.status}.`, "");
   }
   pushJobDetails(lines, job, {
-    showElapsed: job.status === "queued" || job.status === "running",
-    showDuration: job.status !== "queued" && job.status !== "running",
+    showElapsed: isActiveJob(job),
+    showDuration: !isActiveJob(job),
     showLog: true,
     showCancelHint: true,
     showResultHint: true,

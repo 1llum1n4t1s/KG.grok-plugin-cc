@@ -70,6 +70,15 @@ test("renderJobStatusReport makes a wait timeout visible", () => {
   assert.match(output, /still running/i);
 });
 
+test("renderJobStatusReport keeps pending cancellation actionable", () => {
+  const output = renderJobStatusReport({
+    id: "job-2", status: "cancelled", phase: "termination-pending", terminationPending: true, title: "Review"
+  });
+  assert.match(output, /Process termination is pending/);
+  assert.match(output, /Cancel: \/grok:cancel job-2/);
+  assert.doesNotMatch(output, /Result: \/grok:result job-2/);
+});
+
 test("renderStoredJobResult prefers rendered output for structured review jobs", () => {
   const output = renderStoredJobResult(
     {

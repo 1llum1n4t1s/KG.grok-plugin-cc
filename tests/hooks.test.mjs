@@ -5,7 +5,7 @@ import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { getReviewGateSession, listJobs, saveState } from "../plugins/grok/scripts/lib/state.mjs";
+import { getReviewGateSession, listJobs, readJobFile, resolveJobFile, saveState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
 import { copyTestDirectory, initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
@@ -376,6 +376,67 @@ test("SessionEnd removes only jobs owned by the normalized fallback session", ()
     withPluginData(pluginData, () => getReviewGateSession(workspace, "session-b"))?.pendingReason,
     "theirs"
   );
+});
+
+test("Stop reports a cancellation that still needs process termination", () => {
+  const workspace = makeTempDir("grok-stop-hook-pending-workspace-");
+  const pluginData = makeTempDir("grok-stop-hook-pending-data-");
+  withPluginData(pluginData, () => saveState(workspace, {
+    version: 1,
+    config: { stopReviewGate: false },
+    jobs: [{ id: "pending", status: "cancelled", terminationPending: true, sessionId: "session-a" }]
+  }));
+  const result = runHook(STOP_HOOK, [], {
+    session_id: "session-a", cwd: workspace, hook_event_name: "Stop", last_assistant_message: "Done"
+  }, { CLAUDE_PLUGIN_DATA: pluginData });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Retry \/grok:cancel pending/);
+});
+
+test("SessionEnd cancels and retains a queued job until its worker observes the terminal state", () => {
+  const workspace = makeTempDir("grok-session-end-queued-workspace-");
+  const pluginData = makeTempDir("grok-session-end-queued-data-");
+  withPluginData(pluginData, () => {
+    const job = { id: "queued", status: "queued", sessionId: "ending-session", workspaceRoot: workspace };
+    saveState(workspace, { version: 1, config: {}, jobs: [job] });
+    writeJobFile(workspace, job.id, job);
+  });
+
+  const result = runHook(
+    SESSION_HOOK,
+    ["SessionEnd"],
+    { cwd: workspace, session_id: "ending-session", hook_event_name: "SessionEnd" },
+    { CLAUDE_PLUGIN_DATA: pluginData }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const remaining = withPluginData(pluginData, () => listJobs(workspace));
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].status, "cancelled");
+  assert.equal(withPluginData(pluginData, () => readJobFile(resolveJobFile(workspace, "queued"))).status, "cancelled");
+});
+
+test("SessionEnd retains a running job when process identity cannot be verified", () => {
+  const workspace = makeTempDir("grok-session-end-unverifiable-workspace-");
+  const pluginData = makeTempDir("grok-session-end-unverifiable-data-");
+  withPluginData(pluginData, () => {
+    saveState(workspace, {
+      version: 1,
+      config: {},
+      jobs: [{ id: "unverifiable", status: "running", sessionId: "ending-session", pid: process.pid }]
+    });
+  });
+
+  const result = runHook(
+    SESSION_HOOK,
+    ["SessionEnd"],
+    { cwd: workspace, session_id: "ending-session", hook_event_name: "SessionEnd" },
+    { CLAUDE_PLUGIN_DATA: pluginData }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const remaining = withPluginData(pluginData, () => listJobs(workspace));
+  assert.deepEqual(remaining.map((job) => job.id), ["unverifiable"]);
 });
 
 // 登録されたコマンドそのものをシェルで実行し、空白を含むプラグインパスも検証する。

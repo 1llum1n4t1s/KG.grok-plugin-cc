@@ -163,6 +163,7 @@ class AcpClientBase {
     this.notificationHandler = null;
     /** @type {((params: unknown) => unknown) | null} */
     this.permissionHandler = options.permissionHandler ?? null;
+    this.writeDeniedHandler = null;
     /**
      * agent → client リクエストを丸ごと横取りするハンドラ。
      * ブローカーが「自分では処理せず接続元のクライアントへ転送する」ために使う。
@@ -186,6 +187,10 @@ class AcpClientBase {
 
   setPermissionHandler(handler) {
     this.permissionHandler = handler;
+  }
+
+  setWriteDeniedHandler(handler) {
+    this.writeDeniedHandler = handler;
   }
 
   setAgentRequestHandler(handler) {
@@ -358,6 +363,11 @@ class AcpClientBase {
           return;
         }
         case "fs/write_text_file": {
+          if (this.options.readOnly || this.options.clientCapabilities?.fs?.writeTextFile !== true) {
+            this.writeDeniedHandler?.("ACP file write request was denied");
+            fail(-32601, "Client file writes are not enabled for this session.");
+            return;
+          }
           const resolved = this.resolveWorkspacePath(message.params?.path);
           if (!resolved) {
             fail(-32602, "Path escapes the session workspace.");
@@ -530,6 +540,17 @@ class SpawnedAcpClient extends AcpClientBase {
   }
 }
 
+async function connectDirectClient(cwd, options) {
+  const client = new SpawnedAcpClient(cwd, options);
+  try {
+    await client.initialize();
+    return client;
+  } catch (error) {
+    await client.close().catch(() => {});
+    throw error;
+  }
+}
+
 class BrokerAcpClient extends AcpClientBase {
   constructor(cwd, options = {}) {
     super(cwd, options);
@@ -597,9 +618,7 @@ export class GrokAcpClient {
       }
     }
     if (!brokerEndpoint) {
-      const client = new SpawnedAcpClient(cwd, options);
-      await client.initialize();
-      return client;
+      return connectDirectClient(cwd, options);
     }
 
     const client = new BrokerAcpClient(cwd, { ...options, brokerEndpoint });
@@ -613,9 +632,7 @@ export class GrokAcpClient {
       // タイムアウトに限らず、接続失敗（消えたソケット等）でも直接起動へ落とす。
       // 直接起動まで失敗したときだけ、元の失敗理由を添えて投げ直す。
       try {
-        const direct = new SpawnedAcpClient(cwd, options);
-        await direct.initialize();
-        return direct;
+        return await connectDirectClient(cwd, options);
       } catch (fallbackError) {
         fallbackError.cause = error;
         throw fallbackError;

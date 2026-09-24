@@ -205,9 +205,11 @@ function main() {
       env: process.env
     })
   );
-  const runningJob = jobs.find((job) => job.status === "queued" || job.status === "running");
+  const runningJob = jobs.find((job) => job.status === "queued" || job.status === "running" || job.terminationPending === true);
   const runningTaskNote = runningJob
-    ? `Grok task ${runningJob.id} is still running. Check /grok:status and use /grok:cancel ${runningJob.id} if you want to stop it before ending the session.`
+    ? runningJob.terminationPending
+      ? `Grok task ${runningJob.id} still needs process termination. Retry /grok:cancel ${runningJob.id} before ending the session.`
+      : `Grok task ${runningJob.id} is still running. Check /grok:status and use /grok:cancel ${runningJob.id} if you want to stop it before ending the session.`
     : null;
 
   if (!config.stopReviewGate) {

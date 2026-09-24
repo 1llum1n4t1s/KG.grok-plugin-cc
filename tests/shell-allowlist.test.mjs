@@ -79,7 +79,9 @@ test("読み取り用 git サブコマンドの書き込み・外部実行オプ
     "git log -o history.txt",
     "git diff --ext-diff",
     "git diff --textconv",
-    "git grep --open-files-in-pager=cat secret"
+    "git grep --open-files-in-pager=cat secret",
+    "git grep -Ohelper TODO",
+    "git cat-file --filters HEAD:auth.js"
   ]) {
     assert.equal(classifyShellCommand(command).allowed, false, command);
   }
@@ -107,6 +109,22 @@ test("外部実行や書き込みができる検索・整形コマンドを拒�
     "uniq input.txt output.txt",
     "rg --pre helper TODO .",
     "rg --pre=helper --pre-glob '*.js' TODO .",
+    "rg --\"pre\" helper TODO .",
+    "git diff --\"ext-diff\"",
+    "git diff --\"textconv\"",
+    "find . \"-delete\"",
+    "find . \"-exec\" helper {} +",
+    "find . '-fprint' output.txt",
+    "find . \"-\"delete",
+    "ack --pager=helper TODO",
+    "ag --pager helper TODO",
+    "tree -o output.txt",
+    "./cat secret.txt",
+    "C:\\temp\\git.exe status",
+    "../git status",
+    "find . {-delete,foo}",
+    "rg {--pre,TODO} helper .",
+    "cat {../outside,inside.txt}",
     "awk '{cmd=\"helper\"; print | cmd}' auth.js",
     "less auth.js"
   ]) {
@@ -114,9 +132,10 @@ test("外部実行や書き込みができる検索・整形コマンドを拒�
   }
 });
 
-test("実行ファイルのパスや拡張子が付いていても解決する", () => {
-  assert.equal(classifyShellCommand("/usr/bin/git status").allowed, true);
-  assert.equal(classifyShellCommand('"C:\\Program Files\\Git\\bin\\git.exe" diff').allowed, true);
+test("拡張子付きのコマンド名は許可し、パス指定の実行ファイルは拒否する", () => {
+  assert.equal(classifyShellCommand("git.exe status").allowed, true);
+  assert.equal(classifyShellCommand("/usr/bin/git status").allowed, false);
+  assert.equal(classifyShellCommand('"C:\\Program Files\\Git\\bin\\git.exe" diff').allowed, false);
 });
 
 test("空のコマンドと不明なコマンドは拒否側へ倒す", () => {
@@ -151,6 +170,20 @@ test("許可コマンドでもシェルへ抜ける使い方は拒否する", ()
     "awk 'BEGIN{system(\"touch pwned\")}'",
     "find . -name '*.js' -exec rm {} ;",
     "find . -delete"
+  ]) {
+    assert.equal(classifyShellCommand(command).allowed, false, command);
+  }
+});
+
+test("パス成分とシェル変数を使ったリポジトリ外参照を拒否する", () => {
+  for (const command of [
+    "cat ./../../outside.txt",
+    "cat subdir/../../outside.txt",
+    "cat foo\\..\\..\\outside.txt",
+    "cat C:..\\outside.txt",
+    "cat $HOME/.ssh/id_rsa",
+    "cat $PWD/../outside.txt",
+    "cat $env:USERPROFILE\\secret.txt"
   ]) {
     assert.equal(classifyShellCommand(command).allowed, false, command);
   }
