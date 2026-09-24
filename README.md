@@ -281,6 +281,8 @@ Cancels a running tracked job and stops the Grok turn behind it.
 
 Without a job ID, cancel selects the only active job in the current session. If multiple jobs are
 active, it stops without guessing and asks for a job ID; use `/grok:status` to choose one.
+If the plugin cannot confirm that the process stopped, the job stays pending in `/grok:status`.
+Retry `/grok:cancel <job-id>`; results and task resumption remain unavailable until cancellation completes.
 
 ### `/grok:setup`
 
@@ -640,6 +642,8 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 ジョブ ID を省略すると、現在のセッションで唯一実行中のジョブが選択されます。複数のジョブが
 実行中の場合は推測で選ばずに停止し、ジョブ ID の指定を求めます。`/grok:status` で対象を
 選んでください。
+プロセスの停止を確認できない場合、ジョブは `/grok:status` に保留中として残ります。
+`/grok:cancel <job-id>` を再実行してください。キャンセルが完了するまで、結果の取得とタスクの再開はできません。
 
 ### `/grok:setup`
 
