@@ -237,7 +237,6 @@ export function resolveReviewTarget(cwd, options = {}) {
 
   const requestedScope = options.scope ?? "auto";
   const baseRef = options.base ?? null;
-  const state = getWorkingTreeState(cwd);
   const supportedScopes = new Set(["auto", "working-tree", "branch", "repo"]);
 
   if (requestedScope === "repo") {
@@ -284,7 +283,7 @@ export function resolveReviewTarget(cwd, options = {}) {
     };
   }
 
-  if (state.isDirty) {
+  if (getWorkingTreeState(cwd).isDirty) {
     return {
       mode: "working-tree",
       label: "working tree diff",
