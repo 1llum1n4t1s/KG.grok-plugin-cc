@@ -35,7 +35,7 @@ export function buildShellCommand(command, args = []) {
 }
 
 export function runCommand(command, args = [], options = {}) {
-  const shell = options.shell ?? (process.platform === "win32" ? (process.env.SHELL || true) : false);
+  const shell = options.shell ?? (process.platform === "win32");
   const useShell = Boolean(shell);
   const result = spawnSync(useShell ? buildShellCommand(command, args) : command, useShell ? [] : args, {
     cwd: options.cwd,
@@ -193,7 +193,9 @@ export function getProcessSnapshot(pid, options = {}) {
         : null;
     }
     if (platform === "win32") {
-      const script = `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if ($null -ne $p) { [pscustomobject]@{ startKey = $p.CreationDate.ToUniversalTime().ToString('o'); commandLine = $p.CommandLine } | ConvertTo-Json -Compress }`;
+      // Windows PowerShell の既定出力は環境によって CP932 になる。
+      // 日本語の依頼文を含む CommandLine を JSON として読むため UTF-8 に固定する。
+      const script = `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if ($null -ne $p) { [pscustomobject]@{ startKey = $p.CreationDate.ToUniversalTime().ToString('o'); commandLine = $p.CommandLine } | ConvertTo-Json -Compress }`;
       const result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { shell: false });
       if (result.error || result.status !== 0 || !result.stdout.trim()) return null;
       const snapshot = JSON.parse(result.stdout);
@@ -212,14 +214,58 @@ export function getProcessSnapshot(pid, options = {}) {
   }
 }
 
-/** 記録時と同じ companion プロセスだけを停止対象にする。 */
-export function processMatchesTrackedJob(pid, startKey, options = {}) {
-  if (typeof startKey !== "string" || !startKey) return false;
-  const snapshot = getProcessSnapshot(pid, options);
-  return Boolean(
-    snapshot && snapshot.startKey === startKey &&
-    /(?:^|[\s\\/])grok-companion\.mjs(?=$|[\s"'])/i.test(snapshot.commandLine)
-  );
+/** 照会失敗を別プロセスとの不一致から区別して、停止判断を返す。 */
+export function inspectTrackedJobProcess(pid, startKey, options = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return "absent";
+  if (typeof startKey !== "string" || !startKey) return "unavailable";
+
+  const readSnapshot = options.getProcessSnapshotImpl ?? getProcessSnapshot;
+  const processExists = options.processExistsImpl ?? ((targetPid) => {
+    try {
+      process.kill(targetPid, 0);
+      return true;
+    } catch (error) {
+      return error?.code !== "ESRCH";
+    }
+  });
+  const sleep = options.sleepImpl ?? ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const snapshot = readSnapshot(pid, options);
+    if (snapshot) {
+      return snapshot.startKey === startKey &&
+        /(?:^|[\s\\/])grok-companion\.mjs(?=$|[\s"'])/i.test(snapshot.commandLine)
+        ? "match"
+        : "mismatch";
+    }
+    if (attempt < 2) sleep(100);
+  }
+  return processExists(pid) ? "unavailable" : "absent";
+}
+
+/** 停止要求後、追跡対象の PID が消えるまで短時間待つ。 */
+export function waitForTrackedJobExit(pid, startKey, options = {}) {
+  const inspect = options.inspectImpl ?? inspectTrackedJobProcess;
+  const sleep = options.sleepImpl ?? ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const identity = inspect(pid, startKey, options);
+    if (identity === "absent" || identity === "mismatch") return true;
+    if (attempt < 9) sleep(100);
+  }
+  return false;
+}
+
+/** taskkill が終了レースで失敗しても、追跡対象の消滅を確認してから判定する。 */
+export function stopTrackedJobProcess(pid, startKey, options = {}) {
+  const terminate = options.terminateImpl ?? terminateProcessTree;
+  const waitForExit = options.waitForExitImpl ?? waitForTrackedJobExit;
+  let terminationError;
+  try {
+    terminate(pid, options);
+  } catch (error) {
+    terminationError = error;
+  }
+  if (waitForExit(pid, startKey, options)) return;
+  throw terminationError ?? new Error("Process exit could not be confirmed.");
 }
 
 export function formatCommandFailure(result) {

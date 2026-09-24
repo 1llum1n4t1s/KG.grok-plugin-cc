@@ -5,11 +5,13 @@ import process from "node:process";
 import {
   buildShellCommand,
   getProcessSnapshot,
-  processMatchesTrackedJob,
+  inspectTrackedJobProcess,
   quoteShellArgument,
   processCommandContains,
   runCommand,
-  terminateProcessTree
+  stopTrackedJobProcess,
+  terminateProcessTree,
+  waitForTrackedJobExit
 } from "../plugins/grok/scripts/lib/process.mjs";
 
 /** 引数をそのまま JSON で吐くだけの子プロセス。二重引用符を含めない。 */
@@ -45,12 +47,101 @@ test("tracked job termination requires the same process start and companion comm
     }
   };
 
-  assert.equal(processMatchesTrackedJob(1234, snapshot.startKey, options), true);
+  assert.equal(inspectTrackedJobProcess(1234, snapshot.startKey, options), "match");
   snapshot = { ...snapshot, startKey: "2026-09-23T01:00:01.000Z" };
-  assert.equal(processMatchesTrackedJob(1234, "2026-09-23T01:00:00.000Z", options), false);
+  assert.equal(inspectTrackedJobProcess(1234, "2026-09-23T01:00:00.000Z", options), "mismatch");
   snapshot = { ...snapshot, commandLine: "node unrelated.mjs task" };
-  assert.equal(processMatchesTrackedJob(1234, snapshot.startKey, options), false);
-  assert.equal(processMatchesTrackedJob(1234, null, options), false);
+  assert.equal(inspectTrackedJobProcess(1234, snapshot.startKey, options), "mismatch");
+  assert.equal(inspectTrackedJobProcess(1234, null, options), "unavailable");
+});
+
+test("a failed process lookup is retried and never treated as a different process", () => {
+  let lookups = 0;
+  let waits = 0;
+  const options = {
+    getProcessSnapshotImpl() {
+      lookups += 1;
+      return lookups === 1 ? null : {
+        startKey: "start",
+        commandLine: "node grok-companion.mjs task"
+      };
+    },
+    sleepImpl(ms) {
+      assert.equal(ms, 100);
+      waits += 1;
+    }
+  };
+
+  assert.equal(inspectTrackedJobProcess(1234, "start", options), "match");
+  assert.equal(lookups, 2);
+  assert.equal(waits, 1);
+  assert.equal(inspectTrackedJobProcess(1234, "start", {
+    getProcessSnapshotImpl: () => null,
+    processExistsImpl: () => true,
+    sleepImpl: () => { waits += 1; }
+  }), "unavailable");
+  assert.equal(waits, 3);
+  assert.equal(inspectTrackedJobProcess(1234, "start", {
+    getProcessSnapshotImpl: () => null,
+    processExistsImpl: () => false,
+    sleepImpl: () => {}
+  }), "absent");
+});
+
+test("a termination signal is not treated as process exit", () => {
+  let checks = 0;
+  const sleepImpl = () => {};
+  assert.equal(waitForTrackedJobExit(1234, "start", {
+    inspectImpl: () => ++checks < 3 ? "match" : "absent",
+    sleepImpl
+  }), true);
+  assert.equal(checks, 3);
+  assert.equal(waitForTrackedJobExit(1234, "start", {
+    inspectImpl: () => "match",
+    sleepImpl
+  }), false);
+});
+
+test("a taskkill error after process exit does not leave cancellation pending", () => {
+  const taskkillError = new Error("taskkill exited nonzero after a child disappeared");
+  assert.doesNotThrow(() => stopTrackedJobProcess(1234, "start", {
+    terminateImpl: () => { throw taskkillError; },
+    inspectImpl: () => "absent"
+  }));
+  assert.throws(() => stopTrackedJobProcess(1234, "start", {
+    terminateImpl: () => { throw taskkillError; },
+    inspectImpl: () => "match",
+    sleepImpl: () => {}
+  }), (error) => error === taskkillError);
+  assert.throws(() => stopTrackedJobProcess(1234, "start", {
+    terminateImpl: () => { throw taskkillError; },
+    inspectImpl: () => "unavailable",
+    sleepImpl: () => {}
+  }), (error) => error === taskkillError);
+});
+
+test("Windows process snapshot requests UTF-8 for a Japanese command line", () => {
+  let commandScript = null;
+  const snapshot = getProcessSnapshot(1234, {
+    platform: "win32",
+    runCommandImpl(command, args, options) {
+      assert.equal(command, "powershell.exe");
+      assert.equal(options.shell, false);
+      commandScript = args.at(-1);
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          startKey: "2026-09-23T01:00:00.000Z",
+          commandLine: "node grok-companion.mjs task 日本語の依頼"
+        }),
+        stderr: "",
+        error: null
+      };
+    }
+  });
+
+  assert.match(commandScript, /\[Console\]::OutputEncoding = \[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
+  assert.equal(snapshot.commandLine, "node grok-companion.mjs task 日本語の依頼");
 });
 
 test("Linux process identity includes boot ID and process start ticks", () => {
@@ -100,6 +191,20 @@ test("runCommand runs through a shell without emitting deprecation warnings", ()
   // 失敗メッセージの組み立てに使うので、呼び出し時の command / args を保つ。
   assert.equal(result.command, process.execPath);
   assert.deepEqual(result.args, ["-e", ECHO_ARGV_SCRIPT, "a b", "c"]);
+});
+
+test("Windows runCommand uses cmd.exe even when SHELL points elsewhere", { skip: process.platform !== "win32" }, () => {
+  const previousShell = process.env.SHELL;
+  process.env.SHELL = "C:\\missing-shell\\bash.exe";
+  try {
+    const result = runCommand(process.execPath, ["-e", "process.stdout.write('ok')"]);
+    assert.equal(result.error, null);
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "ok");
+  } finally {
+    if (previousShell === undefined) delete process.env.SHELL;
+    else process.env.SHELL = previousShell;
+  }
 });
 
 test("terminateProcessTree uses taskkill on Windows", () => {

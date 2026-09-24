@@ -21,13 +21,14 @@ import {
   } from "./lib/grok.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, processMatchesTrackedJob, terminateProcessTree } from "./lib/process.mjs";
+import { binaryAvailable, inspectTrackedJobProcess, stopTrackedJobProcess } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   generateJobId,
   getConfig,
   listJobs,
   setConfig,
+  updateState,
   upsertJob,
   writeJobFile
 } from "./lib/state.mjs";
@@ -325,8 +326,8 @@ function renderStatusPayload(report, asJson) {
   return asJson ? report : renderStatusReport(report);
 }
 
-function isActiveJobStatus(status) {
-  return status === "queued" || status === "running";
+function isActiveJob(job) {
+  return job.status === "queued" || job.status === "running" || job.terminationPending === true;
 }
 
 function findLatestResumableTaskJob(jobs) {
@@ -335,8 +336,7 @@ function findLatestResumableTaskJob(jobs) {
       (job) =>
         job.jobClass === "task" &&
         job.grokSessionId &&
-        job.status !== "queued" &&
-        job.status !== "running"
+        !isActiveJob(job)
     ) ?? null
   );
 }
@@ -347,14 +347,14 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
   const deadline = Date.now() + timeoutMs;
   let snapshot = buildSingleJobSnapshot(cwd, reference);
 
-  while (isActiveJobStatus(snapshot.job.status) && Date.now() < deadline) {
+  while (isActiveJob(snapshot.job) && Date.now() < deadline) {
     await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
     snapshot = buildSingleJobSnapshot(cwd, reference);
   }
 
   return {
     ...snapshot,
-    waitTimedOut: isActiveJobStatus(snapshot.job.status),
+    waitTimedOut: isActiveJob(snapshot.job),
     timeoutMs
   };
 }
@@ -364,9 +364,12 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const sessionId = resolveCurrentSessionId();
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
   const visibleJobs = filterJobsForCurrentSession(jobs);
-  const activeTask = visibleJobs.find((job) => job.jobClass === "task" && (job.status === "queued" || job.status === "running"));
+  const activeTask = visibleJobs.find((job) => job.jobClass === "task" && isActiveJob(job));
   if (activeTask) {
-    throw new Error(`Task ${activeTask.id} is still running. Use /grok:status before continuing it.`);
+    const detail = activeTask.terminationPending
+      ? `still needs process termination. Retry /grok:cancel ${activeTask.id} before continuing it.`
+      : "is still running. Use /grok:status before continuing it.";
+    throw new Error(`Task ${activeTask.id} ${detail}`);
   }
 
   const trackedTask = findLatestResumableTaskJob(visibleJobs);
@@ -872,34 +875,40 @@ async function handleCancel(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
-  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
-  const existing = readStoredJob(workspaceRoot, job.id) ?? {};
-  const grokSessionId = existing.grokSessionId ?? job.grokSessionId ?? null;
-  const completedAt = nowIso();
-  const nextJob = {
-    ...job,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    completedAt,
-    errorMessage: "Cancelled by user."
-  };
-
-  // 最初に terminal state を確定する。割り込み待ちの間に worker が完了しても、
-  // runTrackedJob は cancelled を completed で上書きしない。
-  writeJobFile(workspaceRoot, job.id, {
-    ...existing,
-    ...nextJob,
-    cancelledAt: completedAt
+  const { workspaceRoot, job: selectedJob } = resolveCancelableJob(cwd, reference, { env: process.env });
+  let job;
+  let existing;
+  let nextJob;
+  let completedAt;
+  // worker の queued→running claim と同じ lock 内で、最新の PID を記録する。
+  updateState(workspaceRoot, (state) => {
+    const indexed = state.jobs.find((candidate) => candidate.id === selectedJob.id);
+    if (!indexed || (indexed.status !== "queued" && indexed.status !== "running" && indexed.terminationPending !== true)) {
+      throw new Error(`Job ${selectedJob.id} is no longer active. Run /grok:status to inspect it.`);
+    }
+    existing = readStoredJob(workspaceRoot, selectedJob.id) ?? indexed;
+    job = { ...indexed, ...existing };
+    completedAt = nowIso();
+    nextJob = {
+      ...job,
+      status: "cancelled",
+      phase: "termination-pending",
+      terminationPending: true,
+      cancelRequestedAt: completedAt,
+      errorMessage: "Cancelled by user."
+    };
+    writeJobFile(workspaceRoot, job.id, { ...nextJob, cancelledAt: completedAt });
+    Object.assign(indexed, {
+      status: "cancelled",
+      phase: "termination-pending",
+      terminationPending: true,
+      pid: job.pid,
+      processStartKey: job.processStartKey,
+      errorMessage: "Cancelled by user.",
+      cancelRequestedAt: completedAt
+    });
   });
-  upsertJob(workspaceRoot, {
-    id: job.id,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    errorMessage: "Cancelled by user.",
-    completedAt
-  });
+  const grokSessionId = job.grokSessionId ?? null;
 
   // キャンセルは安全弁なので、割り込みが何で失敗しても
   // この下のプロセス停止とジョブ状態の確定までは必ず通す。
@@ -928,15 +937,25 @@ async function handleCancel(argv) {
       : `Grok turn interrupt skipped${interrupt.detail ? `: ${interrupt.detail}` : "."}`
   );
 
-  try {
-    if (processMatchesTrackedJob(job.pid, job.processStartKey)) {
-      terminateProcessTree(job.pid);
-    } else if (Number.isFinite(job.pid)) {
-      appendLogLine(job.logFile, "Skipped process termination because the PID and start time do not identify this job.");
-    }
-  } catch (error) {
-    appendLogLine(job.logFile, `Process termination failed: ${error?.message ?? String(error)}`);
+  const identity = inspectTrackedJobProcess(job.pid, job.processStartKey);
+  if (identity === "unavailable") {
+    appendLogLine(job.logFile, "Process identity lookup failed; cancellation can be retried with the same job id.");
+    throw new Error(`Cannot verify the process for job ${job.id}; cancellation remains pending. Retry /grok:cancel ${job.id}.`);
   }
+  if (identity === "match") {
+    try {
+      stopTrackedJobProcess(job.pid, job.processStartKey);
+    } catch (error) {
+      appendLogLine(job.logFile, `Process termination failed: ${error?.message ?? String(error)}`);
+      throw new Error(`Could not stop process for job ${job.id}; cancellation remains pending. Retry /grok:cancel ${job.id}.`, { cause: error });
+    }
+  } else if (identity === "mismatch") {
+    appendLogLine(job.logFile, "Skipped process termination because the PID and start time do not identify this job.");
+  }
+
+  const stoppedJob = { ...nextJob, pid: null, phase: "cancelled", terminationPending: false, completedAt: nowIso() };
+  writeJobFile(workspaceRoot, job.id, { ...existing, ...stoppedJob, cancelledAt: completedAt });
+  upsertJob(workspaceRoot, { id: job.id, pid: null, phase: "cancelled", terminationPending: false, completedAt: stoppedJob.completedAt });
   appendLogLine(job.logFile, "Cancelled by user.");
 
   const payload = {
@@ -947,7 +966,7 @@ async function handleCancel(argv) {
     turnInterrupted: interrupt.interrupted
   };
 
-  outputCommandResult(payload, renderCancelReport(nextJob), options.json);
+  outputCommandResult(payload, renderCancelReport(stoppedJob), options.json);
 }
 
 async function main() {

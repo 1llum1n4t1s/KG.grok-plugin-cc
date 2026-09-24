@@ -8,6 +8,10 @@ import { resolveWorkspaceRoot } from "./workspace.mjs";
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
 
+function isActiveJob(job) {
+  return job.status === "queued" || job.status === "running" || job.terminationPending === true;
+}
+
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
 }
@@ -164,12 +168,12 @@ export function enrichJob(job, options = {}) {
     ...job,
     kindLabel: getJobTypeLabel(job),
     progressPreview:
-      job.status === "queued" || job.status === "running" || job.status === "failed"
+      isActiveJob(job) || job.status === "failed"
         ? readJobProgressPreview(job.logFile, maxProgressLines)
         : [],
     elapsed: formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? null),
     duration:
-      job.status === "completed" || job.status === "failed" || job.status === "cancelled"
+      !isActiveJob(job) && (job.status === "completed" || job.status === "failed" || job.status === "cancelled")
         ? formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? job.updatedAt)
         : null
   };
@@ -224,7 +228,7 @@ function reconcileOrphanedJobs(workspaceRoot) {
   }
 }
 
-function matchJobReference(jobs, reference, predicate = () => true) {
+function matchJobReference(jobs, reference, predicate = () => true, options = {}) {
   const filtered = jobs.filter(predicate);
   if (!reference) {
     return filtered[0] ?? null;
@@ -249,6 +253,7 @@ function matchJobReference(jobs, reference, predicate = () => true) {
     throw new Error(`Job reference "${reference}" is ambiguous. Use a longer job id.`);
   }
 
+  if (options.allowMissing) return null;
   throw new Error(`No job found for "${reference}". Run /grok:status to list known jobs.`);
 }
 
@@ -261,14 +266,14 @@ export function buildStatusSnapshot(cwd, options = {}) {
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
   const running = jobs
-    .filter((job) => job.status === "queued" || job.status === "running")
+    .filter(isActiveJob)
     .map((job) => enrichJob(job, { maxProgressLines }));
 
-  const latestFinishedRaw = jobs.find((job) => job.status !== "queued" && job.status !== "running") ?? null;
+  const latestFinishedRaw = jobs.find((job) => !isActiveJob(job)) ?? null;
   const latestFinished = latestFinishedRaw ? enrichJob(latestFinishedRaw, { maxProgressLines }) : null;
 
   const recent = (options.all ? jobs : jobs.slice(0, maxJobs))
-    .filter((job) => job.status !== "queued" && job.status !== "running" && job.id !== latestFinished?.id)
+    .filter((job) => !isActiveJob(job) && job.id !== latestFinished?.id)
     .map((job) => enrichJob(job, { maxProgressLines }));
 
   return {
@@ -304,7 +309,7 @@ export function resolveResultJob(cwd, reference) {
   }
   const jobs = sortJobsNewestFirst(reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot)));
   if (!reference) {
-    const finishedJobs = jobs.filter((job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled");
+    const finishedJobs = jobs.filter((job) => !isActiveJob(job) && (job.status === "completed" || job.status === "failed" || job.status === "cancelled"));
     if (finishedJobs.length > 1) {
       throw new Error("Multiple finished Grok jobs exist for this session. Pass the exact job id to /grok:result.");
     }
@@ -312,15 +317,19 @@ export function resolveResultJob(cwd, reference) {
   const selected = matchJobReference(
     jobs,
     reference,
-    (job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled"
+    (job) => !isActiveJob(job) && (job.status === "completed" || job.status === "failed" || job.status === "cancelled"),
+    { allowMissing: true }
   );
 
   if (selected) {
     return { workspaceRoot, job: selected };
   }
 
-  const active = matchJobReference(jobs, reference, (job) => job.status === "queued" || job.status === "running");
+  const active = matchJobReference(jobs, reference, isActiveJob, { allowMissing: true });
   if (active) {
+    if (active.terminationPending) {
+      throw new Error(`Job ${active.id} still needs process termination. Retry /grok:cancel ${active.id}.`);
+    }
     throw new Error(`Job ${active.id} is still ${active.status}. Check /grok:status and try again once it finishes.`);
   }
 
@@ -334,7 +343,7 @@ export function resolveResultJob(cwd, reference) {
 export function resolveCancelableJob(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const activeJobs = jobs.filter((job) => job.status === "queued" || job.status === "running");
+  const activeJobs = jobs.filter(isActiveJob);
 
   if (reference) {
     const selected = matchJobReference(activeJobs, reference);

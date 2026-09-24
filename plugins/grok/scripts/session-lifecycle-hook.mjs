@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { processMatchesTrackedJob, terminateProcessTree } from "./lib/process.mjs";
+import { inspectTrackedJobProcess, stopTrackedJobProcess, terminateProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/acp.mjs";
 import {
   clearBrokerSession,
@@ -13,8 +13,8 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { listJobs, resolveStateFile, updateState } from "./lib/state.mjs";
-import { resolveSessionIdWithFallback, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
+import { listJobs, readJobFile, resolveJobFile, resolveStateFile, updateState, writeJobFile } from "./lib/state.mjs";
+import { appendLogLine, nowIso, resolveSessionIdWithFallback, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 // 再エクスポート。定義は tracked-jobs.mjs 側が正で、ここで別に持つと
@@ -52,29 +52,63 @@ function cleanupSessionJobs(cwd, sessionId) {
     return;
   }
 
-  let removedJobs = [];
-  updateState(workspaceRoot, (state) => {
-    removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
-    state.jobs = state.jobs.filter((job) => job.sessionId !== sessionId);
-    state.reviewGateSessions = state.reviewGateSessions.filter((entry) => entry.sessionId !== sessionId);
-  });
-  if (removedJobs.length === 0) {
-    return;
-  }
-
-  for (const job of removedJobs) {
-    const stillRunning = job.status === "queued" || job.status === "running";
-    if (!stillRunning) {
+  const jobs = listJobs(workspaceRoot).filter((job) => job.sessionId === sessionId);
+  const removableIds = new Set();
+  for (const listedJob of jobs) {
+    let job = listedJob;
+    if (job.status === "queued") {
+      // worker の running claim と同じ state lock 内で判定・確定する。
+      // 先に claim された場合は最新の running record を停止対象へ回す。
+      let cancelledQueued = false;
+      updateState(workspaceRoot, (state) => {
+        const indexed = state.jobs.find((entry) => entry.id === job.id && entry.sessionId === sessionId);
+        if (!indexed) return;
+        if (indexed.status !== "queued") {
+          job = indexed;
+          return;
+        }
+        const completedAt = nowIso();
+        const jobFile = resolveJobFile(workspaceRoot, job.id);
+        const stored = fs.existsSync(jobFile) ? readJobFile(jobFile) : indexed;
+        const cancelled = {
+          ...stored,
+          status: "cancelled",
+          phase: "cancelled",
+          pid: null,
+          completedAt,
+          errorMessage: "Cancelled when the session ended."
+        };
+        writeJobFile(workspaceRoot, job.id, cancelled);
+        Object.assign(indexed, cancelled);
+        cancelledQueued = true;
+      });
+      if (cancelledQueued) continue;
+    }
+    if (job.status !== "running" && job.terminationPending !== true) {
+      removableIds.add(job.id);
       continue;
     }
-    try {
-      if (processMatchesTrackedJob(job.pid, job.processStartKey)) {
-        terminateProcessTree(job.pid);
-      }
-    } catch {
-      // Ignore teardown failures during session shutdown.
+
+    const identity = inspectTrackedJobProcess(job.pid, job.processStartKey);
+    if (identity === "unavailable") {
+      appendLogLine(job.logFile, "SessionEnd could not verify the process identity; job record was retained.");
+      continue;
     }
+    if (identity === "match") {
+      try {
+        stopTrackedJobProcess(job.pid, job.processStartKey);
+      } catch (error) {
+        appendLogLine(job.logFile, `SessionEnd process termination failed: ${error?.message ?? String(error)}`);
+        continue;
+      }
+    }
+    removableIds.add(job.id);
   }
+
+  updateState(workspaceRoot, (state) => {
+    state.jobs = state.jobs.filter((job) => !removableIds.has(job.id));
+    state.reviewGateSessions = state.reviewGateSessions.filter((entry) => entry.sessionId !== sessionId);
+  });
 }
 
 function handleSessionStart(input) {
@@ -104,7 +138,7 @@ async function handleSessionEnd(input) {
 
   cleanupSessionJobs(cwd, resolveSessionIdWithFallback(input.session_id, process.env));
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const otherActiveJobs = listJobs(workspaceRoot).some((job) => job.status === "queued" || job.status === "running");
+  const otherActiveJobs = listJobs(workspaceRoot).some((job) => job.status === "queued" || job.status === "running" || job.terminationPending === true);
   if (otherActiveJobs) {
     return;
   }

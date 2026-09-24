@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
 import { makeTempDir, initGitRepo, run } from "./helpers.mjs";
+import { listJobs, saveState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "grok", "scripts", "grok-companion.mjs");
@@ -112,6 +113,44 @@ for (const mode of ["cancel", "session-end"]) {
     }
   });
 }
+
+test("cancel retains an unverifiable process as a retryable pending cancellation", () => {
+  const { repo, env } = setupWorkspace({ replies: [] });
+  env.GROK_COMPANION_SESSION_ID = "test-session";
+  const job = {
+    id: "unverifiable-cancel",
+    status: "running",
+    jobClass: "task",
+    sessionId: "test-session",
+    grokSessionId: "fake-session-pending",
+    workspaceRoot: repo,
+    pid: process.pid
+  };
+  const previous = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = env.CLAUDE_PLUGIN_DATA;
+  try {
+    saveState(repo, { version: 1, config: {}, jobs: [job] });
+    writeJobFile(repo, job.id, job);
+    const result = companion(["cancel", "--json", job.id], { repo, env });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /cancellation remains pending/i);
+    const pending = listJobs(repo).find((candidate) => candidate.id === job.id);
+    assert.equal(pending.status, "cancelled");
+    assert.equal(pending.terminationPending, true);
+    assert.equal(pending.pid, process.pid);
+    const waited = companion(["status", "--json", "--wait", "--timeout-ms", "1", job.id], { repo, env });
+    assert.equal(waited.status, 0, waited.stderr);
+    assert.equal(JSON.parse(waited.stdout).waitTimedOut, true);
+    const candidate = companion(["task-resume-candidate", "--json"], { repo, env });
+    assert.equal(JSON.parse(candidate.stdout).available, false);
+    const resume = companion(["task", "--resume-last", "continue"], { repo, env });
+    assert.notEqual(resume.status, 0);
+    assert.match(resume.stderr, /needs process termination/i);
+  } finally {
+    if (previous == null) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = previous;
+  }
+});
 
 test("setup reports a ready runtime and the detected model", () => {
   const { repo, env } = setupWorkspace({ replies: [{ text: "ok" }] });
@@ -416,6 +455,19 @@ test("review still completes for an approve verdict without permission denials",
 
   const status = JSON.parse(companion(["status", "--json", "--all"], workspace).stdout);
   assert.equal(status.latestFinished.status, "completed");
+});
+
+test("review rejects an unsolicited ACP file write", () => {
+  const { fake, repo, env } = setupWorkspace({
+    replies: [{ text: REVIEW_JSON, requestClientFileWrite: { path: "unexpected.txt", content: "written" } }]
+  });
+  const result = companion(["review", "--json"], { repo, env });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(fs.existsSync(path.join(repo, "unexpected.txt")), false);
+  assert.equal(fake.readState().clientWriteResponse?.code, -32601);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.result.verdict, "incomplete");
+  assert.match(payload.permissionDenials.join(" "), /ACP file write request was denied/);
 });
 
 test("adversarial review uses its own prompt template", () => {

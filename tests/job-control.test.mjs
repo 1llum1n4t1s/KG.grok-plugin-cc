@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildStatusSnapshot,
   filterJobsForCurrentSession,
   resolveCancelableJob,
   resolveResultJob
@@ -69,6 +70,17 @@ test("cancel without an id accepts the Codex thread id as session identity", () 
   ]);
 
   assert.equal(resolveCancelableJob(workspace, "", { env: { CODEX_THREAD_ID: "codex-task" } }).job.id, "mine");
+});
+
+test("a cancellation with pending process termination can be retried by job id", () => {
+  const workspace = makeTempDir();
+  seedJobs(workspace, [{ id: "pending", status: "cancelled", terminationPending: true, sessionId: "session-a" }]);
+
+  assert.equal(resolveCancelableJob(workspace, "pending", { env: {} }).job.id, "pending");
+  const status = buildStatusSnapshot(workspace, { env: {} });
+  assert.deepEqual(status.running.map((job) => job.id), ["pending"]);
+  assert.equal(status.latestFinished, null);
+  assert.throws(() => resolveResultJob(workspace, "pending"), /needs process termination/i);
 });
 
 test("cancel without an id rejects multiple active jobs in the current session", () => {
