@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.0.18
+
+- Confirmed process exit after a Windows `taskkill` race so cancellation and session shutdown no longer leave an already stopped Grok job pending.
+- Rejected shell arguments and ACP file write requests that could bypass read-only review and audit permissions, and showed permission-denied results as incomplete.
+- Kept Grok checks working when Git Bash sets `SHELL` on Windows and closed spawned agents after a failed ACP connection.
+- Skipped unnecessary working-tree Git scans when the review or full-repository audit scope is explicit.
+
 ## 1.0.17
 
 - Retried transient Windows process identity lookup failures so Grok rescue and other jobs can start reliably.
