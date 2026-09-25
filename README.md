@@ -161,6 +161,9 @@ This applies to `/grok:adversarial-review` and `/grok:audit` as well.
 The review is read-only: Grok may read files and run read-only commands such as `git diff` and
 `git log`, but the plugin denies anything that would write to disk. Grok reports what it thinks
 should change; it does not change it.
+In read-only runs, `Test-Path -LiteralPath` is also allowed for one path inside the repository,
+including an absolute path. Paths outside the repository and paths through links that leave it
+are denied.
 
 Reviews and audits cover all review perspectives in one Grok session; subagent delegation is
 not available in the read-only runtime. If a permission request is denied or Grok reports that
@@ -522,6 +525,8 @@ API キーはブラウザの認証情報より優先されます。
 レビューは読み取り専用です。Grok はファイルを読み、`git diff` や `git log` などの読み取り専用
 コマンドを実行できますが、ディスクへ書き込む操作はプラグインによって拒否されます。Grok は
 変更すべき内容を報告しますが、実際の変更は行いません。
+読み取り専用の実行では、リポジトリ内の単一パスに対する `Test-Path -LiteralPath` も、
+絶対パスを含めて許可します。リポジトリ外のパスと、リンクを経由して外へ出るパスは拒否します。
 
 レビューと監査は、一つの Grok セッションで各観点を調査します。読み取り専用の実行環境では
 サブエージェントへ委任できません。権限要求が拒否された場合、または Grok が必要な調査の未完了を

@@ -697,6 +697,40 @@ ${result.stderr}`);
   assert.match(result.stdout, /permission denied/);
 });
 
+test("read-only task confines Test-Path to its repository", () => {
+  for (const scenario of ["inside", "outside", "linked-outside", "home-path", "ambiguous-segment", "alternate-stream", "command-suffix", "chained-command"]) {
+    const workspace = setupWorkspace({});
+    const outsideDir = workspace.fake.binDir;
+    const linkPath = path.join(workspace.repo, "linked-outside");
+    if (scenario === "linked-outside") {
+      fs.symlinkSync(outsideDir, linkPath, process.platform === "win32" ? "junction" : "dir");
+    }
+    const target = scenario === "outside"
+      ? path.join(outsideDir, "candidate")
+      : scenario === "linked-outside"
+        ? path.join(linkPath, "candidate")
+        : scenario === "ambiguous-segment"
+          ? path.join(workspace.repo, ".. ", "candidate")
+          : scenario === "alternate-stream"
+            ? `${path.join(workspace.repo, "auth.js")}:stream`
+        : path.join(workspace.repo, "build", "candidate");
+    const command = `${scenario === "command-suffix" ? "Test-Path.cmd" : "Test-Path"} -LiteralPath "${scenario === "home-path" ? "~/secret" : target}"${scenario === "chained-command" ? " && git checkout ." : ""}`;
+    fs.writeFileSync(workspace.env.FAKE_GROK_SCENARIO, JSON.stringify({
+      replies: [{
+        requestPermissionFor: { title: command, rawInput: { command } },
+        text: "permission allowed",
+        onDenied: { text: "permission denied" }
+      }]
+    }), "utf8");
+
+    const result = companion(["task", "--json", "check build directory"], workspace);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(payload.rawOutput, scenario === "inside" ? /permission allowed/ : /permission denied/);
+    assert.equal(payload.permissionDenials.length, scenario === "inside" ? 0 : 1);
+  }
+});
+
 test("stop-gate review fails when a denied operation is followed by ALLOW", () => {
   const workspace = setupWorkspace({
     replies: [

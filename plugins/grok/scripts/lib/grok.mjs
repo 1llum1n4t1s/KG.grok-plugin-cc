@@ -188,7 +188,47 @@ function tokenizeCommand(segment) {
   return tokens;
 }
 
-export function classifyShellCommand(command) {
+function isWithinPath(root, target) {
+  const relative = path.relative(root, target);
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+/** Test-Path の単一パスを作業領域内へ閉じ込める。存在しない末尾は既存の祖先まで検査する。 */
+function isSafeTestPath(target, cwd) {
+  const nativeDrivePath = process.platform === "win32" && /^[A-Za-z]:[\\/]/.test(target) &&
+    target.indexOf(":", 2) === -1;
+  if (!target || !cwd || target.startsWith("~") ||
+      (target.includes(":") && !nativeDrivePath) ||
+      target.split(/[\\/]/).some((part) => /[. ]$/.test(part))) {
+    return false;
+  }
+  const root = path.resolve(cwd);
+  const resolved = path.resolve(root, target);
+  if (!isWithinPath(root, resolved)) {
+    return false;
+  }
+
+  try {
+    const realRoot = fs.realpathSync.native(root);
+    let existing = resolved;
+    while (true) {
+      try {
+        fs.lstatSync(existing);
+        break;
+      } catch (error) {
+        if (error?.code !== "ENOENT") return false;
+        const parent = path.dirname(existing);
+        if (parent === existing) return false;
+        existing = parent;
+      }
+    }
+    return isWithinPath(realRoot, fs.realpathSync.native(existing));
+  } catch {
+    return false;
+  }
+}
+
+export function classifyShellCommand(command, cwd = null) {
   const text = String(command ?? "").trim();
   if (!text) {
     return { allowed: false, reason: "empty command" };
@@ -225,8 +265,15 @@ export function classifyShellCommand(command) {
     if (!head) {
       return { allowed: false, reason: `could not parse "${segment}"` };
     }
+    if (tokens[0].toLowerCase() === "test-path") {
+      if (tokens.length !== 3 || tokens[1].toLowerCase() !== "-literalpath" ||
+          !isSafeTestPath(tokens[2], cwd)) {
+        return { allowed: false, reason: "Test-Path requires one literal path within the repository" };
+      }
+      continue;
+    }
     if (tokens.slice(1).some((token) => OUTSIDE_PATH_PATTERN.test(` ${token}`))) {
-      return { allowed: false, reason: "references a path outside the repository" };
+      return { allowed: false, reason: "uses an absolute path or a path that may leave the repository" };
     }
 
     if (head === "git") {
@@ -268,13 +315,13 @@ export function classifyShellCommand(command) {
  *
  * @returns {{ allowed: boolean, reason: string | null }}
  */
-function classifyToolCall(params) {
+function classifyToolCall(params, cwd) {
   const call = params?.toolCall ?? {};
   const rawInput = call.rawInput ?? {};
 
   const command = typeof rawInput === "object" && rawInput ? rawInput.command ?? rawInput.cmd : null;
   if (typeof command === "string") {
-    return classifyShellCommand(command);
+    return classifyShellCommand(command, cwd);
   }
 
   const name = [call.title, call.kind].filter(Boolean).join(" ");
@@ -292,10 +339,10 @@ function classifyToolCall(params) {
  * read_file は自動解決される）ので、ここへ届く時点で書き込みや外部実行の
  * 可能性が高い。書き込みと判定したものは拒否し、それ以外は 1 回だけ許可する。
  */
-function createReviewPermissionHandler(onProgress, onDenied = (_reason) => {}) {
+function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => {}) {
   const readOnly = createReadOnlyPermissionResponder();
   return (params) => {
-    const verdict = classifyToolCall(params);
+    const verdict = classifyToolCall(params, cwd);
     const permissionOptions = Array.isArray(params?.options) ? params.options : [];
     if (verdict.allowed && permissionOptions.some((option) => option?.kind === "allow_once")) {
       return readOnly(params);
@@ -912,7 +959,7 @@ export async function runGrokReview(cwd, options = {}) {
       /** @type {string[]} */
       const permissionDenials = [];
       client.setWriteDeniedHandler((reason) => permissionDenials.push(reason));
-      client.setPermissionHandler(createReviewPermissionHandler(options.onProgress, (reason) => {
+      client.setPermissionHandler(createReviewPermissionHandler(cwd, options.onProgress, (reason) => {
         permissionDenials.push(reason);
       }));
 
@@ -1099,7 +1146,7 @@ export async function runGrokTurn(cwd, options = {}) {
       client.setWriteDeniedHandler((reason) => permissionDenials.push(reason));
       client.setPermissionHandler(
         options.readOnly
-          ? createReviewPermissionHandler(options.onProgress, (reason) => permissionDenials.push(reason))
+          ? createReviewPermissionHandler(cwd, options.onProgress, (reason) => permissionDenials.push(reason))
           : createAllowAllPermissionResponder()
       );
 
