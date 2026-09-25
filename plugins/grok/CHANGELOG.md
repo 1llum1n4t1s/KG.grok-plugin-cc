@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.0.19
+
+- Allowed read-only Grok reviews and audits to check one repository path with PowerShell `Test-Path -LiteralPath`, including absolute paths inside the repository, while rejecting paths outside it or through links that leave it.
+- Clarified permission-denial messages for absolute or potentially escaping paths.
+
 ## 1.0.18
 
 - Confirmed process exit after a Windows `taskkill` race so cancellation and session shutdown no longer leave an already stopped Grok job pending.
