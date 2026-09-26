@@ -319,6 +319,23 @@ function classifyToolCall(params, cwd) {
   const call = params?.toolCall ?? {};
   const rawInput = call.rawInput ?? {};
 
+  // Grok 組み込み WebFetch は URL の内容だけを返す。表示名や read_only フラグだけでは許可しない。
+  if (call.kind === "fetch" && rawInput?.variant === "WebFetch") {
+    if (Object.keys(rawInput).some((key) => !["variant", "url"].includes(key)) ||
+        typeof rawInput.url !== "string") {
+      return { allowed: false, reason: "WebFetch requires only a URL" };
+    }
+    try {
+      const url = new URL(rawInput.url);
+      if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) {
+        return { allowed: true, reason: null };
+      }
+    } catch {
+      // 不正な URL は許可しない。
+    }
+    return { allowed: false, reason: "WebFetch requires an HTTP(S) URL without credentials" };
+  }
+
   const command = typeof rawInput === "object" && rawInput ? rawInput.command ?? rawInput.cmd : null;
   if (typeof command === "string") {
     return classifyShellCommand(command, cwd);
@@ -336,8 +353,8 @@ function classifyToolCall(params, cwd) {
  * 読み取り専用セッション用の権限応答器。
  *
  * ACP では読み取り系ツールがそもそも問い合わせてこない（実測: list_dir /
- * read_file は自動解決される）ので、ここへ届く時点で書き込みや外部実行の
- * 可能性が高い。書き込みと判定したものは拒否し、それ以外は 1 回だけ許可する。
+ * read_file は自動解決される）が、WebFetch は問い合わせる。明示的に許可した
+ * 読み取り専用の要求だけを 1 回許可し、未知の要求は拒否する。
  */
 function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => {}) {
   const readOnly = createReadOnlyPermissionResponder();

@@ -697,6 +697,41 @@ ${result.stderr}`);
   assert.match(result.stdout, /permission denied/);
 });
 
+test("read-only rescue permits built-in WebFetch but denies ambiguous or write-capable requests", () => {
+  // 実障害と同じ ACP 要求を再生し、未知ツール・追加引数・非 HTTP URL の過剰許可も検出する。
+  const url = "https://raw.githubusercontent.com/ip7z/7zip/26.03/C/LzmaEnc.c";
+  const fetchCall = { title: `Fetch: ${url}`, kind: "fetch", rawInput: { variant: "WebFetch", url } };
+  const cases = [
+    { name: "builtin", call: fetchCall, allowed: true },
+    { name: "http", call: { ...fetchCall, rawInput: { variant: "WebFetch", url: "http://example.com/" } }, allowed: true },
+    { name: "title-only", call: { title: fetchCall.title, rawInput: fetchCall.rawInput } },
+    { name: "other-variant", call: { ...fetchCall, rawInput: { variant: "Upload", url } } },
+    { name: "post", call: { ...fetchCall, rawInput: { ...fetchCall.rawInput, method: "POST" } } },
+    { name: "output-file", call: { ...fetchCall, rawInput: { ...fetchCall.rawInput, output: "notes.txt" } } },
+    { name: "command", call: { ...fetchCall, rawInput: { ...fetchCall.rawInput, command: "echo hi > notes.txt" } } },
+    { name: "file-url", call: { ...fetchCall, rawInput: { variant: "WebFetch", url: "file:///secret" } } },
+    { name: "invalid-url", call: { ...fetchCall, rawInput: { variant: "WebFetch", url: "not a URL" } } },
+    { name: "credentials", call: { ...fetchCall, rawInput: { variant: "WebFetch", url: "https://user:password@example.com/" } } },
+    { name: "no-once-option", call: { ...fetchCall, options: [{ optionId: "always", kind: "allow_always" }] } }
+  ];
+  for (const scenario of cases) {
+    const workspace = setupWorkspace({ replies: [{
+      requestPermissionFor: scenario.call,
+      text: "FETCH_OK",
+      onDenied: { text: "FETCH_DENIED", stopReason: "cancelled" }
+    }] });
+    const result = companion(["task", "--json", "--fresh", "Read the public source without changing files."], workspace);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(result.status, scenario.allowed ? 0 : 1, `${scenario.name}: ${result.stderr}`);
+    assert.equal(payload.rawOutput, scenario.allowed ? "FETCH_OK" : "FETCH_DENIED", scenario.name);
+    assert.equal(payload.permissionDenials.length, scenario.allowed ? 0 : 1, scenario.name);
+    const stored = companion(["result", payload.jobId], workspace);
+    assert.equal(stored.status, 0, stored.stderr);
+    assert.match(stored.stdout, scenario.allowed ? /FETCH_OK/ : /FETCH_DENIED/);
+    assert.equal(fs.existsSync(path.join(workspace.repo, "notes.txt")), false);
+  }
+});
+
 test("read-only task confines Test-Path to its repository", () => {
   for (const scenario of ["inside", "outside", "linked-outside", "home-path", "ambiguous-segment", "alternate-stream", "command-suffix", "chained-command"]) {
     const workspace = setupWorkspace({});

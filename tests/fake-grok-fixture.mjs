@@ -158,7 +158,7 @@ function handle(message) {
           method: "session/request_permission",
           params: {
             sessionId: params.sessionId,
-            toolCall: { toolCallId: "call-1", title: reply.requestPermissionFor.title, rawInput: reply.requestPermissionFor.rawInput },
+            toolCall: { toolCallId: "call-1", ...reply.requestPermissionFor },
             options: reply.requestPermissionFor.options ?? [
               { optionId: "allow", name: "Allow", kind: "allow_once" },
               { optionId: "reject", name: "Reject", kind: "reject_once" }

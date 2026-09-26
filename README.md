@@ -164,6 +164,8 @@ should change; it does not change it.
 In read-only runs, `Test-Path -LiteralPath` is also allowed for one path inside the repository,
 including an absolute path. Paths outside the repository and paths through links that leave it
 are denied.
+The built-in `WebFetch` request is allowed once for an HTTP(S) URL without credentials, so
+read-only rescue and reviews can consult public sources. Extra input fields remain denied.
 
 Reviews and audits cover all review perspectives in one Grok session; subagent delegation is
 not available in the read-only runtime. If a permission request is denied or Grok reports that
@@ -527,6 +529,8 @@ API キーはブラウザの認証情報より優先されます。
 変更すべき内容を報告しますが、実際の変更は行いません。
 読み取り専用の実行では、リポジトリ内の単一パスに対する `Test-Path -LiteralPath` も、
 絶対パスを含めて許可します。リポジトリ外のパスと、リンクを経由して外へ出るパスは拒否します。
+組み込みの `WebFetch` は、認証情報を含まない HTTP(S) URL の取得に限って一度だけ許可し、
+読み取り専用のレスキューやレビューでも公開資料を参照できます。追加の入力項目は拒否します。
 
 レビューと監査は、一つの Grok セッションで各観点を調査します。読み取り専用の実行環境では
 サブエージェントへ委任できません。権限要求が拒否された場合、または Grok が必要な調査の未完了を
