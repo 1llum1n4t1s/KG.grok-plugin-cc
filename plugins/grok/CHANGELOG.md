@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.20
+
+- Allowed read-only Grok rescue and reviews to fetch public HTTP(S) sources with the built-in `WebFetch` tool. Requests with extra inputs or URL credentials remain denied.
+
 ## 1.0.19
 
 - Allowed read-only Grok reviews and audits to check one repository path with PowerShell `Test-Path -LiteralPath`, including absolute paths inside the repository, while rejecting paths outside it or through links that leave it.
