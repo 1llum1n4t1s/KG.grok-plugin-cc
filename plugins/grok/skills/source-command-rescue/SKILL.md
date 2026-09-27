@@ -6,7 +6,7 @@ description: Delegate investigation, implementation, or follow-up work to Grok B
 # Grok rescue
 
 Read [the shared runtime contract](../../references/codex-runtime.md), then invoke the companion's
-`task` subcommand exactly once. Do not inspect the repository or solve the delegated task yourself.
+`task` subcommand once per Grok job. Do not inspect the repository or solve the delegated task yourself.
 
 - Require a concrete task unless the user explicitly asks to resume the previous Grok task.
 - Preserve explicit `--model` and `--effort` values. Accepted effort values are `low`, `medium`, and
@@ -14,10 +14,15 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
 - Map `--resume` to `--resume-last` and preserve `--fresh`.
 - Follow the shared foreground execution contract. Reject `--background`; accept legacy `--wait` only as a no-op.
 - Default to `--write`, unless the user asks for review, diagnosis, research, or other read-only work.
+  For read-only work omit `--write`; there is no `--read-only` flag.
 - If neither resume nor fresh is explicit, use `task-resume-candidate --json`: resume only for a
   clear follow-up; otherwise start with `--fresh`.
-- Keep the task in the user's language and pass it as one prompt argument.
+- Keep the task in the user's language. For multiline or quote-heavy text, save it as UTF-8
+  with the file tool and use `--prompt-file <absolute-path>` instead of embedding it in shell code.
+  For short text, pass one prompt argument.
 - Run `node <plugin-root>/scripts/grok-companion.mjs task --json <flags> <prompt>`.
+  The file form is `node <plugin-root>/scripts/grok-companion.mjs task --json <flags> --prompt-file <absolute-path>`.
+  Follow the shared contract's pre-launch failure recovery if the shell fails before Node starts.
 - After any completed run, run `result <job-id>` using the completed JSON object's exact `jobId`,
   then reproduce the stored final output verbatim. Do not summarize it or continue the
   implementation yourself.

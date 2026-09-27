@@ -235,6 +235,10 @@ Unlike the review commands, `/grok:rescue` runs write-capable by default, so Gro
 while it works. Say so in the request when you only want diagnosis — "read-only", "just
 investigate", "don't change anything" — and the run stays read-only.
 
+For direct Companion calls, use `task --json --fresh --prompt-file <absolute-path>` for a
+multiline UTF-8 request. Omit `--write` for read-only work; `--read-only` is not a CLI flag.
+In PowerShell, prefer the prompt file to embedding a long request in a here-string.
+
 Model aliases: `fast`, `reasoning`, `multi`, `build`, `latest`. Anything else is passed through as
 a model ID, so `--model grok-4.7` works too. `--effort` accepts `low`, `medium`, or `high`.
 
@@ -597,6 +601,11 @@ statusコマンドから確認できます。Claude Codeでは従来どおり、
 レビューコマンドとは異なり、`/grok:rescue` は既定で書き込み可能な状態で実行されるため、Grok は
 作業中にファイルを編集できます。診断だけが必要な場合は、依頼文に `read-only`、`just investigate`、
 `don't change anything` などと明記すると、読み取り専用で実行されます。
+
+Companion を直接呼ぶ場合、複数行の UTF-8 依頼文には
+`task --json --fresh --prompt-file <絶対パス>` を使えます。読み取り専用では `--write` を省略します。
+`--read-only` という CLI フラグはありません。PowerShell では長い依頼文を here-string に埋め込むより、
+プロンプトファイルを使ってください。
 
 モデルの別名は `fast`、`reasoning`、`multi`、`build`、`latest` です。それ以外の値はモデル ID として
 そのまま渡されるため、`--model grok-4.7` のような指定もできます。`--effort` には `low`、`medium`、

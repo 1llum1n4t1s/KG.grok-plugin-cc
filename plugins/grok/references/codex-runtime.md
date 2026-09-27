@@ -8,6 +8,9 @@
   checks.
 - Pass arguments as distinct shell arguments. Never use `Invoke-Expression`, `eval`, or another
   second shell parser to interpolate user text.
+- For multiline task text, use the file tool to save UTF-8 text and pass `--prompt-file <absolute-path>`.
+  Remove the temporary prompt file after the foreground call finishes. If using a PowerShell
+  here-string, its closing `'@` must start a new line; never append it to the prompt's last line.
 - Do not expose environment variables, credentials, or the contents of Grok configuration files.
 - When the companion says setup or authentication is required, stop and direct the user to the
   `grok:source-command-setup` skill. Do not improvise another authentication flow.
@@ -37,3 +40,13 @@ These rules apply when `source-command-review`, `source-command-adversarial-revi
   `result`; if no ID was captured, explain that limitation and inspect status without guessing.
 - `source-command-status --wait` remains a synchronous status-polling option. It does not change a
   Grok run's execution mode.
+
+## Pre-launch failure recovery
+
+- An exit code alone does not prove that Companion ran. Inspect the shell error first. A confirmed
+  PowerShell parser error occurs before Node starts and may be corrected and retried; this does
+  not create a second Grok job. Do not report such a failure as a sent request.
+- If launch is uncertain, inspect `status --json` and the captured output before retrying. An empty
+  status alone is not proof of a pre-launch failure. If a job started, recover that job instead.
+- `task --json` is supported. Missing flags in abbreviated help are not evidence that a flag is
+  unsupported. Diagnose from the actual error and argument parser, not the help text alone.

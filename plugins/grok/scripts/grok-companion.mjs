@@ -87,7 +87,8 @@ function printUsage() {
       "  node scripts/grok-companion.mjs review [--base <ref>] [--scope <auto|working-tree|branch>] [--language <bcp47>] [focus text]",
       "  node scripts/grok-companion.mjs adversarial-review [--base <ref>] [--scope <auto|working-tree|branch>] [--language <bcp47>] [focus text]",
       "  node scripts/grok-companion.mjs audit [--language <bcp47>] [focus text]",
-      "  node scripts/grok-companion.mjs task [--write] [--resume-last|--resume|--fresh] [--model <model|fast|reasoning|multi|build|latest>] [--effort <low|medium|high>] [prompt]",
+      "  node scripts/grok-companion.mjs task [--json] [--write] [--resume-last|--resume|--fresh] [--model <model|fast|reasoning|multi|build|latest>] [--effort <low|medium|high>] [--prompt-file <path> | prompt]",
+      "    task is read-only unless --write is set; --prompt-file reads UTF-8 text.",
       "  node scripts/grok-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/grok-companion.mjs result [job-id] [--json]",
       "  node scripts/grok-companion.mjs cancel [job-id] [--json]"
