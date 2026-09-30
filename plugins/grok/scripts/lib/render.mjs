@@ -386,37 +386,6 @@ export function renderReviewResult(parsedResult, meta) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-export function renderNativeReviewResult(result, meta) {
-  const stdout = result.stdout.trim();
-  const stderr = result.stderr.trim();
-  const lines = [
-    `# Grok ${meta.reviewLabel}`,
-    "",
-    `Target: ${meta.targetLabel}`,
-    ""
-  ];
-
-  let hasUsableOutput = false;
-  if (stdout) {
-    lines.push(stdout);
-    hasUsableOutput = true;
-  } else if (result.status === 0) {
-    lines.push("Grok review completed without any stdout output.");
-  } else {
-    lines.push("Grok review failed.");
-  }
-
-  if (stderr) {
-    lines.push("", "stderr:", "", "```text", stderr, "```");
-  }
-
-  if (!hasUsableOutput) {
-    appendReasoningSection(lines, meta.reasoningSummary);
-  }
-
-  return `${lines.join("\n").trimEnd()}\n`;
-}
-
 export function renderTaskResult(parsedResult, meta) {
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
   const permissionDenials = normalizePermissionDenials(parsedResult?.permissionDenials);

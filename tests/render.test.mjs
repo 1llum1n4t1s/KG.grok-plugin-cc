@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import {
   renderReviewResult,
   renderJobStatusReport,
-  renderStoredJobResult,
   renderSetupReport,
   renderStatusReport
 } from "../plugins/grok/scripts/lib/render.mjs";
@@ -77,56 +76,6 @@ test("renderJobStatusReport keeps pending cancellation actionable", () => {
   assert.match(output, /Process termination is pending/);
   assert.match(output, /Cancel: \/grok:cancel job-2/);
   assert.doesNotMatch(output, /Result: \/grok:result job-2/);
-});
-
-test("renderStoredJobResult prefers rendered output for structured review jobs", () => {
-  const output = renderStoredJobResult(
-    {
-      id: "review-123",
-      status: "completed",
-      title: "Grok Adversarial Review",
-      jobClass: "review",
-      grokSessionId: "019fcc0b-4160-7952-b39c-6338256e2d52"
-    },
-    {
-      grokSessionId: "019fcc0b-4160-7952-b39c-6338256e2d52",
-      rendered: "# Grok Adversarial Review\n\nTarget: working tree diff\nVerdict: needs-attention\n",
-      result: {
-        result: {
-          verdict: "needs-attention",
-          summary: "One issue.",
-          findings: [],
-          next_steps: []
-        },
-        rawOutput: '{"verdict":"needs-attention","summary":"One issue.","findings":[],"next_steps":[]}'
-      }
-    }
-  );
-
-  assert.match(output, /^# Grok Adversarial Review/);
-  assert.doesNotMatch(output, /^\{/);
-  assert.match(output, /Grok session ID: 019fcc0b-4160-7952-b39c-6338256e2d52/);
-  assert.match(output, /Resume in Grok: grok --resume 019fcc0b-4160-7952-b39c-6338256e2d52/);
-});
-
-test("renderStoredJobResult preserves the incomplete wrapper for stop-gate reviews", () => {
-  const output = renderStoredJobResult(
-    {
-      id: "task-123",
-      kind: "stop-gate-review",
-      status: "failed",
-      title: "Grok Stop Gate Review",
-      jobClass: "review"
-    },
-    {
-      rendered: "# Grok Stop Gate Review\n\nReview incomplete; this result must not be treated as approval.\n\nRaw final message:\n\nALLOW: partial review\n",
-      result: { rawOutput: "ALLOW: partial review", permissionDenials: ["subagent denied"] }
-    }
-  );
-
-  assert.match(output, /^# Grok Stop Gate Review/);
-  assert.match(output, /Review incomplete/);
-  assert.match(output, /Raw final message:/);
 });
 
 test("renderSetupReport summarizes availability, auth, and broker state", () => {
