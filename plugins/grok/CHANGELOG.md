@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.0.22
+
+- Preserved equals signs in inline option values, including prompt-file paths and model IDs.
+- Kept running and pending-cancellation jobs available as finished history grows. Cancellation now continues when its log cannot be written.
+- Fixed cancellation blocked behind an active shared Grok turn and fragmented broker messages. Permission replies are checked against the requesting connection.
+- Honored `GROK_BIN` for shared connections and removed duplicate Grok availability checks during setup.
+
 ## 1.0.20
 
 - Allowed read-only Grok rescue and reviews to fetch public HTTP(S) sources with the built-in `WebFetch` tool. Requests with extra inputs or URL credentials remain denied.
