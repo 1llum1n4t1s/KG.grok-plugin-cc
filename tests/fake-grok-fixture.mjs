@@ -32,6 +32,11 @@ const scenario = SCENARIO_PATH && fs.existsSync(SCENARIO_PATH)
 
 const argv = process.argv.slice(2);
 
+// 可用性確認を含め、実プロセスの起動回数を E2E から観測する。
+if (process.env.FAKE_GROK_INVOCATIONS) {
+  fs.appendFileSync(process.env.FAKE_GROK_INVOCATIONS, JSON.stringify(argv) + "\\n", "utf8");
+}
+
 if (argv[0] === "--version" || argv[0] === "-v") {
   process.stdout.write("grok 9.9.9 (fake) [test]\\n");
   process.exit(0);

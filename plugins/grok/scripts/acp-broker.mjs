@@ -77,6 +77,7 @@ async function main() {
   let forwardAgentStderr = () => {};
   const agent = await GrokAcpClient.connect(cwd, {
     disableBroker: true,
+    grokBin: process.env.GROK_BIN,
     onStderr: (chunk) => forwardAgentStderr(chunk)
   });
 
@@ -146,18 +147,90 @@ async function main() {
     sockets.add(socket);
     socket.setEncoding("utf8");
     let buffer = "";
+    let pendingRequests = 0;
 
-    socket.on("data", async (chunk) => {
+    async function handleMessage(message) {
+      // 転送した逆リクエストへの応答。エージェントへ中継して終わり。
+      if (message.id !== undefined && !message.method) {
+        if (forwardedAgentRequests.get(message.id) !== socket) {
+          send(socket, { jsonrpc: "2.0", id: message.id, error: buildJsonRpcError(-32600, "Unexpected agent response from this client.") });
+          return;
+        }
+        forwardedAgentRequests.delete(message.id);
+        agent.respondToAgent(message.id, { result: message.result, error: message.error });
+        return;
+      }
+
+      if (message.id !== undefined && message.method === "broker/shutdown") {
+        send(socket, { jsonrpc: "2.0", id: message.id, result: {} });
+        await shutdown(server);
+        process.exit(0);
+        return;
+      }
+
+      // 通知は応答を返さないので、そのままエージェントへ素通しする。
+      // ACP の `session/cancel` は通知なので、ここで捨てると
+      // `/grok:cancel` が Grok 側のターンに一切届かなくなる。
+      // 占有ロックも取らない（実行中の別セッションを止めるのが本来の用途）。
+      if (message.id === undefined) {
+        if (message.method) {
+          agent.notify(message.method, message.params ?? {});
+        }
+        return;
+      }
+
+      // initialize はエージェントの実応答をそのまま返す。
+      // クライアントは agentCapabilities とモデル一覧をここから読む。
+      if (message.method === "initialize") {
+        send(socket, { jsonrpc: "2.0", id: message.id, result: agent.initializeResult ?? {} });
+        return;
+      }
+
+      // 実行中の別セッションを止めにいく場合だけ、占有中でも通す。
+      const allowCancelDuringActiveTurn = isCancelRequest(message) && activeSocket && activeSocket !== socket;
+
+      if (activeSocket && activeSocket !== socket && !allowCancelDuringActiveTurn) {
+        send(socket, {
+          jsonrpc: "2.0",
+          id: message.id,
+          error: buildJsonRpcError(BROKER_BUSY_RPC_CODE, "Shared Grok broker is busy.")
+        });
+        return;
+      }
+
+      // 同じ接続のキャンセルも、進行中 prompt の占有を解除してはいけない。
+      const claimed = !isCancelRequest(message);
+      if (claimed) {
+        activeSocket = socket;
+        pendingRequests += 1;
+      }
+
+      try {
+        const result = await agent.request(message.method, message.params ?? {});
+        send(socket, { jsonrpc: "2.0", id: message.id, result });
+      } catch (error) {
+        send(socket, {
+          jsonrpc: "2.0",
+          id: message.id,
+          error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
+        });
+      } finally {
+        if (claimed) {
+          pendingRequests -= 1;
+          if (pendingRequests === 0 && activeSocket === socket) activeSocket = null;
+        }
+      }
+    }
+
+    socket.on("data", (chunk) => {
+      const scanFrom = buffer.length;
       buffer += chunk;
-      let newlineIndex = buffer.indexOf("\n");
+      let newlineIndex = buffer.indexOf("\n", scanFrom);
       while (newlineIndex !== -1) {
         const line = buffer.slice(0, newlineIndex);
         buffer = buffer.slice(newlineIndex + 1);
         newlineIndex = buffer.indexOf("\n");
-
-        if (!line.trim()) {
-          continue;
-        }
+        if (!line.trim()) continue;
 
         let message;
         try {
@@ -166,69 +239,10 @@ async function main() {
           send(socket, { jsonrpc: "2.0", id: null, error: buildJsonRpcError(-32700, `Invalid JSON: ${error.message}`) });
           continue;
         }
-
-        // 転送した逆リクエストへの応答。エージェントへ中継して終わり。
-        if (message.id !== undefined && !message.method && forwardedAgentRequests.has(message.id)) {
-          forwardedAgentRequests.delete(message.id);
-          agent.respondToAgent(message.id, { result: message.result, error: message.error });
-          continue;
-        }
-
-        if (message.id !== undefined && message.method === "broker/shutdown") {
-          send(socket, { jsonrpc: "2.0", id: message.id, result: {} });
-          await shutdown(server);
-          process.exit(0);
-        }
-
-        // 通知は応答を返さないので、そのままエージェントへ素通しする。
-        // ACP の `session/cancel` は通知なので、ここで捨てると
-        // `/grok:cancel` が Grok 側のターンに一切届かなくなる。
-        // 占有ロックも取らない（実行中の別セッションを止めるのが本来の用途）。
-        if (message.id === undefined) {
-          if (message.method) {
-            agent.notify(message.method, message.params ?? {});
-          }
-          continue;
-        }
-
-        // initialize はエージェントの実応答をそのまま返す。
-        // クライアントは agentCapabilities とモデル一覧をここから読む。
-        if (message.method === "initialize") {
-          send(socket, { jsonrpc: "2.0", id: message.id, result: agent.initializeResult ?? {} });
-          continue;
-        }
-
-        // 実行中の別セッションを止めにいく場合だけ、占有中でも通す。
-        const allowCancelDuringActiveTurn = isCancelRequest(message) && activeSocket && activeSocket !== socket;
-
-        if (activeSocket && activeSocket !== socket && !allowCancelDuringActiveTurn) {
-          send(socket, {
-            jsonrpc: "2.0",
-            id: message.id,
-            error: buildJsonRpcError(BROKER_BUSY_RPC_CODE, "Shared Grok broker is busy.")
-          });
-          continue;
-        }
-
-        const claimed = !allowCancelDuringActiveTurn;
-        if (claimed) {
-          activeSocket = socket;
-        }
-
-        try {
-          const result = await agent.request(message.method, message.params ?? {});
-          send(socket, { jsonrpc: "2.0", id: message.id, result });
-        } catch (error) {
-          send(socket, {
-            jsonrpc: "2.0",
-            id: message.id,
-            error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
-          });
-        } finally {
-          if (claimed && activeSocket === socket) {
-            activeSocket = null;
-          }
-        }
+        // フレーム分離中に待たない。RPC 完了待ちの間も cancel と逆応答を転送する。
+        void handleMessage(message).catch((error) => {
+          send(socket, { jsonrpc: "2.0", id: message?.id ?? null, error: buildJsonRpcError(-32000, error.message) });
+        });
       }
     });
 

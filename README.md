@@ -292,6 +292,8 @@ Without a job ID, cancel selects the only active job in the current session. If 
 active, it stops without guessing and asks for a job ID; use `/grok:status` to choose one.
 If the plugin cannot confirm that the process stopped, the job stays pending in `/grok:status`.
 Retry `/grok:cancel <job-id>`; results and task resumption remain unavailable until cancellation completes.
+Active and pending jobs remain tracked even as finished history grows. A cancellation-log write failure
+is reported as a warning and does not prevent process termination.
 
 ### `/grok:setup`
 
@@ -662,6 +664,8 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 選んでください。
 プロセスの停止を確認できない場合、ジョブは `/grok:status` に保留中として残ります。
 `/grok:cancel <job-id>` を再実行してください。キャンセルが完了するまで、結果の取得とタスクの再開はできません。
+終了済みの履歴が増えても、実行中・保留中のジョブは追跡を維持します。キャンセル時のログ書き込みに
+失敗した場合は警告を表示し、プロセスの停止処理を続けます。
 
 ### `/grok:setup`
 

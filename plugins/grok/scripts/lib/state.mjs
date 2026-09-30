@@ -11,7 +11,7 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "grok-companion");
 const STATE_FILE_NAME = "state.json";
 const STATE_LOCK_FILE_NAME = "state.lock";
 const JOBS_DIR_NAME = "jobs";
-const MAX_JOBS = 50;
+const MAX_FINISHED_JOBS = 50;
 const MAX_REVIEW_GATE_SESSIONS = 50;
 /** ロックを持ったまま落ちたプロセスの置き土産を無効にするまでの時間。 */
 const STATE_LOCK_STALE_MS = 10000;
@@ -111,9 +111,15 @@ function writeJsonAtomic(filePath, payload) {
 }
 
 function pruneJobs(jobs) {
+  let finishedJobs = 0;
   return [...jobs]
     .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
-    .slice(0, MAX_JOBS);
+    .filter((job) => {
+      // 停止を確認できていないジョブは、履歴が増えても追跡と再試行を維持する。
+      if (job.status === "queued" || job.status === "running" || job.terminationPending === true) return true;
+      finishedJobs += 1;
+      return finishedJobs <= MAX_FINISHED_JOBS;
+    });
 }
 
 function pruneReviewGateSessions(sessions) {

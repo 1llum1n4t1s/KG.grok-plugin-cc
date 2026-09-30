@@ -11,7 +11,6 @@ import {
     DEFAULT_CONTINUE_PROMPT,
     findLatestTaskSession,
     getGrokAuthStatus,
-    getGrokAvailability,
     getSessionRuntimeStatus,
     interruptGrokTurn,
     parseStructuredOutput,
@@ -191,8 +190,8 @@ function firstMeaningfulLine(text, fallback) {
 async function buildSetupReport(cwd, actionsTaken = []) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
-  const grokStatus = getGrokAvailability(cwd);
   const authStatus = await getGrokAuthStatus(cwd);
+  const grokStatus = authStatus.availability;
   const config = getConfig(workspaceRoot);
 
   const nextSteps = [];
@@ -910,6 +909,16 @@ async function handleCancel(argv) {
     });
   });
   const grokSessionId = job.grokSessionId ?? null;
+  const logWarnings = [];
+  function appendCancellationLog(message) {
+    try {
+      appendLogLine(job.logFile, message);
+    } catch (error) {
+      const warning = `Could not write cancellation log: ${error?.message ?? String(error)}`;
+      logWarnings.push(warning);
+      process.stderr.write(`[grok] ${warning}\n`);
+    }
+  }
 
   // キャンセルは安全弁なので、割り込みが何で失敗しても
   // この下のプロセス停止とジョブ状態の確定までは必ず通す。
@@ -931,8 +940,7 @@ async function handleCancel(argv) {
     interrupt = { attempted: true, interrupted: false, detail: error?.message ?? String(error), sessionId: grokSessionId };
   }
 
-  appendLogLine(
-    job.logFile,
+  appendCancellationLog(
     interrupt.interrupted
       ? `Requested Grok turn interrupt on ${grokSessionId}.`
       : `Grok turn interrupt skipped${interrupt.detail ? `: ${interrupt.detail}` : "."}`
@@ -940,31 +948,33 @@ async function handleCancel(argv) {
 
   const identity = inspectTrackedJobProcess(job.pid, job.processStartKey);
   if (identity === "unavailable") {
-    appendLogLine(job.logFile, "Process identity lookup failed; cancellation can be retried with the same job id.");
+    appendCancellationLog("Process identity lookup failed; cancellation can be retried with the same job id.");
     throw new Error(`Cannot verify the process for job ${job.id}; cancellation remains pending. Retry /grok:cancel ${job.id}.`);
   }
   if (identity === "match") {
     try {
       stopTrackedJobProcess(job.pid, job.processStartKey);
     } catch (error) {
-      appendLogLine(job.logFile, `Process termination failed: ${error?.message ?? String(error)}`);
+      appendCancellationLog(`Process termination failed: ${error?.message ?? String(error)}`);
       throw new Error(`Could not stop process for job ${job.id}; cancellation remains pending. Retry /grok:cancel ${job.id}.`, { cause: error });
     }
   } else if (identity === "mismatch") {
-    appendLogLine(job.logFile, "Skipped process termination because the PID and start time do not identify this job.");
+    appendCancellationLog("Skipped process termination because the PID and start time do not identify this job.");
   }
 
-  const stoppedJob = { ...nextJob, pid: null, phase: "cancelled", terminationPending: false, completedAt: nowIso() };
+  appendCancellationLog("Cancelled by user.");
+  const stoppedJob = { ...nextJob, pid: null, phase: "cancelled", terminationPending: false, completedAt: nowIso(),
+    ...(logWarnings.length ? { logWarnings } : {}) };
   writeJobFile(workspaceRoot, job.id, { ...existing, ...stoppedJob, cancelledAt: completedAt });
   upsertJob(workspaceRoot, { id: job.id, pid: null, phase: "cancelled", terminationPending: false, completedAt: stoppedJob.completedAt });
-  appendLogLine(job.logFile, "Cancelled by user.");
 
   const payload = {
     jobId: job.id,
     status: "cancelled",
     title: job.title,
     turnInterruptAttempted: interrupt.attempted,
-    turnInterrupted: interrupt.interrupted
+    turnInterrupted: interrupt.interrupted,
+    ...(logWarnings.length ? { logWarnings } : {})
   };
 
   outputCommandResult(payload, renderCancelReport(stoppedJob), options.json);
