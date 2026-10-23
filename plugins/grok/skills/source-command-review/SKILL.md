@@ -1,6 +1,6 @@
 ---
 name: source-command-review
-description: Run a read-only Grok review of local git changes. Use when the user invokes grok:source-command-review or asks Grok to review the working tree or branch diff.
+description: Ask Grok to review working-tree changes or a branch diff, read-only.
 ---
 
 # Grok code review

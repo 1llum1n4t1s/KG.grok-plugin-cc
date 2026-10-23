@@ -32,7 +32,7 @@ Build the search prompt:
 - Write the prompt in the language the user has been conversing in. Grok answers in the language the prompt is written in.
 - Compose a single prompt that tells Grok to:
   - search X posts for the user's topic, using `x_keyword_search` and, when the topic is conceptual rather than keyword-shaped, `x_semantic_search`;
-  - restrict the window with `since:` / `until:`, defaulting to the last 30 days unless the user asked for a different period;
+  - leave the date range unrestricted unless the user explicitly requests a time period; only then apply date filters such as `since:` / `until:`;
   - report each finding with the author handle, the post date, and the post URL;
   - state plainly when nothing relevant was found instead of padding the answer with general knowledge.
 - Always add `--fresh` so the search starts a clean Grok thread instead of resuming unrelated rescue work.

@@ -1,6 +1,6 @@
 ---
 name: source-command-setup
-description: Check Grok Build installation and authentication or toggle the stop-time review gate. Use for grok:source-command-setup and Grok plugin environment diagnostics.
+description: Check Grok Build installation/authentication or toggle its stop-time review gate.
 ---
 
 # Grok setup

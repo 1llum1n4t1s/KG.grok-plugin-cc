@@ -248,6 +248,7 @@ Searches X (Twitter) posts through Grok Build and returns the findings with auth
 and post URLs. Grok Build reaches X with its own `x_keyword_search` and `x_semantic_search` tools,
 so this works with the same `grok login` credentials as every other command — no xAI API key needed.
 Ordinary web search cannot read X timelines, which is why this is a separate command.
+The date range is unrestricted unless you explicitly request a time period.
 
 ```bash
 /grok:x what are people saying about the latest Avalonia release
@@ -619,6 +620,7 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 返します。Grok Build 独自の `x_keyword_search` と `x_semantic_search` ツールを使って X へ
 アクセスするため、他のコマンドと同じ `grok login` の認証情報で利用でき、xAI API キーは不要です。
 通常の Web 検索では X のタイムラインを読み取れないため、独立したコマンドとして用意されています。
+明示的に期間を指定しない限り、検索対象の期間は絞りません。
 
 ```bash
 /grok:x what are people saying about the latest Avalonia release

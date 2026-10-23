@@ -1,6 +1,6 @@
 ---
 name: source-command-result
-description: Show the stored final output of a finished Grok job. Use when the user invokes grok:source-command-result or asks to read a completed Grok result.
+description: Read the saved final output of a completed Grok job.
 ---
 
 # Grok job result

@@ -1,6 +1,6 @@
 ---
 name: source-command-rescue
-description: Delegate investigation, implementation, or follow-up work to Grok Build. Use when the user invokes grok:source-command-rescue or explicitly asks Grok for a second opinion or fix.
+description: Explicitly delegate investigation, fixes, or a second opinion to Grok Build.
 ---
 
 # Grok rescue

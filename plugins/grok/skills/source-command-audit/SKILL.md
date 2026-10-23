@@ -1,6 +1,6 @@
 ---
 name: source-command-audit
-description: Run a read-only Grok audit of the entire existing repository, ignoring the current diff. Use when the user invokes grok:source-command-audit or asks Grok to audit the whole codebase.
+description: Ask Grok for a read-only audit of the entire repository, independent of the current diff.
 ---
 
 # Grok repository audit

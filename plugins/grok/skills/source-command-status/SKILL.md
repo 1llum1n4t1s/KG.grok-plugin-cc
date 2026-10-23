@@ -1,6 +1,6 @@
 ---
 name: source-command-status
-description: Show active and recent Grok jobs and review-gate status for the current repository. Use when the user invokes grok:source-command-status or asks about Grok job progress.
+description: Show active/recent Grok jobs and the current repository's review-gate status.
 ---
 
 # Grok job status

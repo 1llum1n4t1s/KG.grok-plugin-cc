@@ -1,6 +1,6 @@
 ---
 name: source-command-adversarial-review
-description: Run a read-only Grok review that challenges the implementation approach and design choices. Use for grok:source-command-adversarial-review or a skeptical ship-or-no-ship review.
+description: Read-only Grok review challenging the approach, design, and ship-or-no-ship decision.
 ---
 
 # Grok adversarial review
