@@ -223,6 +223,19 @@ export function inspectTrackedJobProcess(pid, startKey, options = {}) {
   const processExists = options.processExistsImpl ?? ((targetPid) => {
     try {
       process.kill(targetPid, 0);
+      if ((options.platform ?? process.platform) === "linux") {
+        try {
+          const stat = (options.readFileImpl ?? fs.readFileSync)(`/proc/${targetPid}/stat`, "utf8");
+          const separator = stat.lastIndexOf(") ");
+          const fields = separator >= 0 ? stat.slice(separator + 2).trim().split(/\s+/) : [];
+          // 親が未回収でも、ゾンビ・終了状態のプロセスは処理を続けられない。
+          if (stat.startsWith(`${targetPid} (`) && /^[ZX]$/.test(fields[0] ?? "") && /^\d+$/.test(fields[19] ?? "")) {
+            return false;
+          }
+        } catch {
+          // 終了状態を読めない場合は、生存・照会不能として慎重な判定を保つ。
+        }
+      }
       return true;
     } catch (error) {
       return error?.code !== "ESRCH";
