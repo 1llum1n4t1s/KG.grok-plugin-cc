@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.0.26
+
+- Added failure-only Windows process lookup diagnostics to stderr and existing job logs, separating PowerShell startup from CIM query progress.
+- Kept process checks working when diagnostic log writes fail or the stderr reader closes its pipe.
+
 ## 1.0.25
 
 - Reduced processing and memory use when extracting the latest progress lines from long job logs.
