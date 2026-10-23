@@ -23,4 +23,5 @@
 - 状態の読み書きは `scripts/lib/state.mjs` の API を使い、ホスト別の保存先とワークスペース境界を維持する。
 - 権限、ジョブ所有者、キャンセル、構造化レビュー出力を変更するときは [設計の不変条件](DESIGN.md#重要な不変条件) と対応するテストを照合する。レビュー結果の契約は `schemas/review-output.schema.json`、`prompts/`、共通ランタイムの判定・表示をそろえ、`tests/runtime.test.mjs` と `tests/render.test.mjs` で初回実行と保存結果の再表示を確認する。
 - 読み取り専用シェル許可リストの変更は `tests/shell-allowlist.test.mjs`、ジョブのプロセス識別・状態遷移・停止の変更は `tests/process.test.mjs`、`tests/tracked-jobs.test.mjs`、`tests/runtime.test.mjs`、`tests/hooks.test.mjs` の関連ケースで確認する。照会の期限や Windows の停止コマンドを変えるときは `tests/process-deadline-e2e.test.mjs` で外部照会の停止、再試行全体の時間予算、開始時の登録拒否を確認し、Windows では長い PATH と実際の CIM 照会のケースも確認する。
+- Windows のプロセス照会診断を変えるときは、[診断の設計契約](DESIGN.md#プロセス照会診断)と照合し、Windows 上で `tests/process-diagnostics-e2e.test.mjs` の実 PowerShell / CIM、段階別タイムアウト、機密値の除外、ジョブログ保存、callback 例外・stderr 切断のケースを確認する。このテストは非 Windows では skip されるため、CI の成功だけを Windows 実機検証の代わりにしない。
 - ランタイムは配布される `.mjs` を直接実行する。型検査だけに存在する生成物へ実行を依存させず、`plugins/grok/.generated/` は生成領域として扱う。

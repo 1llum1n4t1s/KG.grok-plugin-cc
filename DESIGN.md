@@ -36,6 +36,14 @@ Claude の manifest は `skills` に `./claude-skills/`、Codex の manifest は
 状態保存先は `CLAUDE_PLUGIN_DATA`、次に `PLUGIN_DATA` を採用し、未設定時だけ OS の一時領域を使う。保存先の下をワークスペースの実パス由来のハッシュで分ける。同じ実装を両ホストで利用しつつ、各ホストの data ディレクトリが異なればジョブとゲート設定も独立する。状態更新はロックと一時ファイルからの rename を用い、破損 JSON は黙って初期化せずエラーにする。
 履歴の上限50件は終了済みジョブに適用し、queued / running / terminationPending の記録と成果物は保持する。キャンセル時の補助ログ書き込み失敗は警告として返し、プロセス照合・停止・状態確定を続ける。
 
+### プロセス照会診断
+
+Windows のプロセス照会は `scripts/lib/process.mjs` が PowerShell / CIM を直接起動し、stdout の照会結果と stderr の段階記録を分離する。段階は `powershell-start`、`cim-start`、`cim-end`、`powershell-end` と、例外時の `error`。失敗した外部照会だけを `Process lookup diagnostic` 付きの JSON として stderr へ同期出力し、ジョブ開始・cancel・SessionEnd では `tracked-jobs.mjs` の callback を介して既存のジョブログにも追記する。成功した外部照会では出力しない。
+
+診断には照会種別、対象・親・観測した PowerShell の PID、時刻・経過時間・制限時間、終了状態・signal・エラーコード、観測段階と取得できた HRESULT だけを記録する。stdout、生の stderr、コマンドライン、marker 値、プロセス開始キー、プロンプトは保存しない。callback の例外や閉じた stderr への書き込み失敗を捕捉し、診断の保存失敗で同一性判定・キャンセル結果を変えない。既存の照会時間予算と停止確認の契約も維持する。
+
+`not-observed` は開始記録を観測できなかった意味であり、OS がプロセスを生成しなかった証拠にはしない。`cim-start` 以降にはモジュールの自動読込なども含まれるため、この段階だけで CIM provider の故障と断定しない。診断は停止箇所を絞る補助情報として扱い、照合不能を終了済みと判断する根拠には使わない。
+
 ## 重要な不変条件
 
 - 読み取り専用の外部資料取得は、ACP の `kind: fetch` と `rawInput.variant: WebFetch` が一致する組み込み要求に限定する。入力は `variant` と認証情報を含まない HTTP(S) の `url` だけを許可し、権限は `allow_once` に限定する。表示名や読み取り専用の自己申告だけでは許可せず、未知ツール、追加引数、ファイル URL は拒否する。
