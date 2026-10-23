@@ -15,7 +15,7 @@ import {
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
 import { listJobs, readJobFile, resolveJobFile, resolveStateFile, updateState, writeJobFile } from "./lib/state.mjs";
-import { appendLogLine, nowIso, resolveSessionIdWithFallback, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
+import { appendLogLine, createProcessLookupDiagnostics, nowIso, resolveSessionIdWithFallback, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { readHookInput } from "./lib/fs.mjs";
 
@@ -83,14 +83,15 @@ function cleanupSessionJobs(cwd, sessionId) {
       continue;
     }
 
-    const identity = inspectTrackedJobProcess(job.pid, job.processStartKey);
+    const processLookupOptions = createProcessLookupDiagnostics(job.logFile);
+    const identity = inspectTrackedJobProcess(job.pid, job.processStartKey, processLookupOptions);
     if (identity === "unavailable") {
       appendLogLine(job.logFile, "SessionEnd could not verify the process identity; job record was retained.");
       continue;
     }
     if (identity === "match") {
       try {
-        stopTrackedJobProcess(job.pid, job.processStartKey);
+        stopTrackedJobProcess(job.pid, job.processStartKey, processLookupOptions);
       } catch (error) {
         appendLogLine(job.logFile, `SessionEnd process termination failed: ${error?.message ?? String(error)}`);
         continue;

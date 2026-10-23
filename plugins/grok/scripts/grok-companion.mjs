@@ -46,6 +46,7 @@ import {
   createJobLogFile,
   createJobProgressUpdater,
   createJobRecord,
+  createProcessLookupDiagnostics,
   createProgressReporter,
   nowIso,
   resolveCurrentSessionId,
@@ -931,14 +932,15 @@ async function handleCancel(argv) {
       : `Grok turn interrupt skipped${interrupt.detail ? `: ${interrupt.detail}` : "."}`
   );
 
-  const identity = inspectTrackedJobProcess(job.pid, job.processStartKey);
+  const processLookupOptions = createProcessLookupDiagnostics(job.logFile);
+  const identity = inspectTrackedJobProcess(job.pid, job.processStartKey, processLookupOptions);
   if (identity === "unavailable") {
     appendCancellationLog("Process identity lookup failed; cancellation can be retried with the same job id.");
     throw new Error(`Cannot verify the process for job ${job.id}; cancellation remains pending. Retry /grok:cancel ${job.id}.`);
   }
   if (identity === "match") {
     try {
-      stopTrackedJobProcess(job.pid, job.processStartKey);
+      stopTrackedJobProcess(job.pid, job.processStartKey, processLookupOptions);
     } catch (error) {
       appendCancellationLog(`Process termination failed: ${error?.message ?? String(error)}`);
       throw new Error(`Could not stop process for job ${job.id}; cancellation remains pending. Retry /grok:cancel ${job.id}.`, { cause: error });

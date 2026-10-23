@@ -299,6 +299,15 @@ Retry `/grok:cancel <job-id>`; results and task resumption remain unavailable un
 Active and pending jobs remain tracked even as finished history grows. A cancellation-log write failure
 is reported as a warning and does not prevent process termination.
 
+On Windows, failed process lookups emit `Process lookup diagnostic` JSON records to stderr and,
+when available, the existing job log shown by `/grok:status`. Search for that string to find diagnostics.
+The observed phases are `powershell-start`, `cim-start`, `cim-end`, and `powershell-end`.
+`not-observed` means no start record was observed; it does not prove that the OS never created the process.
+The interval after `cim-start` includes module autoloading and other work, so it alone does not establish
+a CIM provider fault. Records contain lookup type, process IDs, timing, exit status, signal, error code,
+observed phases, and PowerShell HRESULT when available. They exclude stdout, raw stderr, command lines,
+marker values, process start keys, and prompts. Successful lookups emit no diagnostic records.
+
 ### `/grok:setup`
 
 Checks the local install and optionally toggles the stop-time review gate.
@@ -675,6 +684,15 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 `/grok:cancel <job-id>` を再実行してください。キャンセルが完了するまで、結果の取得とタスクの再開はできません。
 終了済みの履歴が増えても、実行中・保留中のジョブは追跡を維持します。キャンセル時のログ書き込みに
 失敗した場合は警告を表示し、プロセスの停止処理を続けます。
+
+Windows でプロセス照会に失敗すると、stderr と、利用可能な場合は `/grok:status` に表示される既存の
+ジョブログへ `Process lookup diagnostic` という文字列付きの JSON を出力します。この文字列で検索できます。
+観測する段階は `powershell-start`、`cim-start`、`cim-end`、`powershell-end` です。
+`not-observed` は開始記録を観測できなかった意味で、OS がプロセスを生成しなかったことを意味しません。
+`cim-start` 以降にはモジュールの自動読込なども含まれるため、この段階だけでは CIM provider の故障と断定できません。
+記録する項目は照会種別、プロセス ID、時刻・経過時間・制限時間、終了状態、signal、エラーコード、観測段階、
+取得できた PowerShell HRESULT です。stdout、生の stderr、コマンドライン、marker 値、プロセス開始キー、プロンプトは
+記録しません。照会成功時は診断記録を出力しません。
 
 ### `/grok:setup`
 

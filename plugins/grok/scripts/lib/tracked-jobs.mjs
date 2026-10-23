@@ -64,6 +64,15 @@ export function appendLogBlock(logFile, title, body) {
   fs.appendFileSync(logFile, `\n[${nowIso()}] ${title}\n${String(body).trimEnd()}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
+export function createProcessLookupDiagnostics(logFile) {
+  if (!logFile) return {};
+  return {
+    onProcessLookupDiagnostic(record) {
+      appendLogLine(logFile, `Process lookup diagnostic ${JSON.stringify(record)}`);
+    }
+  };
+}
+
 export function createJobLogFile(workspaceRoot, jobId, title) {
   const logFile = resolveJobLogFile(workspaceRoot, jobId);
   fs.writeFileSync(logFile, "", { encoding: "utf8", mode: 0o600 });
@@ -167,7 +176,7 @@ export async function runTrackedJob(job, runner, options = {}) {
   const readSnapshot = options.getProcessSnapshotImpl ?? getProcessSnapshot;
   let processStartKey = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    processStartKey = readSnapshot(process.pid)?.startKey;
+    processStartKey = readSnapshot(process.pid, createProcessLookupDiagnostics(options.logFile ?? job.logFile))?.startKey;
     if (processStartKey) break;
     if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 100));
   }
