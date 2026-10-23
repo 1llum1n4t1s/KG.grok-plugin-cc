@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { getGrokAvailability } from "./lib/grok.mjs";
+import { isActiveJob } from "./lib/job-status.mjs";
 import { getWorkingTreeFingerprint } from "./lib/git.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -205,7 +206,7 @@ function main() {
       env: process.env
     })
   );
-  const runningJob = jobs.find((job) => job.status === "queued" || job.status === "running" || job.terminationPending === true);
+  const runningJob = jobs.find(isActiveJob);
   const runningTaskNote = runningJob
     ? runningJob.terminationPending
       ? `Grok task ${runningJob.id} still needs process termination. Retry /grok:cancel ${runningJob.id} before ending the session.`

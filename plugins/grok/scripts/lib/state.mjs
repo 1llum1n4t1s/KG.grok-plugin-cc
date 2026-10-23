@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { isActiveJob } from "./job-status.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const STATE_VERSION = 1;
@@ -116,7 +117,7 @@ function pruneJobs(jobs) {
     .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
     .filter((job) => {
       // 停止を確認できていないジョブは、履歴が増えても追跡と再試行を維持する。
-      if (job.status === "queued" || job.status === "running" || job.terminationPending === true) return true;
+      if (isActiveJob(job)) return true;
       finishedJobs += 1;
       return finishedJobs <= MAX_FINISHED_JOBS;
     });
@@ -137,6 +138,10 @@ function removeFileIfExists(filePath) {
 
 export function saveState(cwd, state) {
   const previousJobs = loadState(cwd).jobs;
+  return saveStateWithPreviousJobs(cwd, state, previousJobs);
+}
+
+function saveStateWithPreviousJobs(cwd, state, previousJobs) {
   ensureStateDir(cwd);
   const nextJobs = pruneJobs(state.jobs ?? []);
   const nextState = {
@@ -225,8 +230,10 @@ function withStateLock(cwd, run) {
 export function updateState(cwd, mutate) {
   return withStateLock(cwd, () => {
     const state = loadState(cwd);
+    // callback が配列や要素を書き換えても、削除対象は更新前の値を維持する。
+    const previousJobs = state.jobs.map((job) => ({ id: job.id, logFile: job.logFile }));
     mutate(state);
-    return saveState(cwd, state);
+    return saveStateWithPreviousJobs(cwd, state, previousJobs);
   });
 }
 

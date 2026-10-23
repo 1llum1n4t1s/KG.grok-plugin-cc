@@ -4,6 +4,7 @@ import fs from "node:fs";
 import process from "node:process";
 
 import { inspectTrackedJobProcess, stopTrackedJobProcess, terminateProcessTree } from "./lib/process.mjs";
+import { isActiveJob } from "./lib/job-status.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/acp.mjs";
 import {
   clearBrokerSession,
@@ -138,7 +139,7 @@ async function handleSessionEnd(input) {
 
   cleanupSessionJobs(cwd, resolveSessionIdWithFallback(input.session_id, process.env));
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const otherActiveJobs = listJobs(workspaceRoot).some((job) => job.status === "queued" || job.status === "running" || job.terminationPending === true);
+  const otherActiveJobs = listJobs(workspaceRoot).some(isActiveJob);
   if (otherActiveJobs) {
     return;
   }

@@ -50,6 +50,7 @@ import {
   resolveCurrentSessionId,
   runTrackedJob,
 } from "./lib/tracked-jobs.mjs";
+import { isActiveJob } from "./lib/job-status.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
   renderReviewResult,
@@ -324,10 +325,6 @@ function buildReviewPromptFor(reviewName, context, focusText, language) {
 
 function renderStatusPayload(report, asJson) {
   return asJson ? report : renderStatusReport(report);
-}
-
-function isActiveJob(job) {
-  return job.status === "queued" || job.status === "running" || job.terminationPending === true;
 }
 
 function findLatestResumableTaskJob(jobs) {
@@ -883,7 +880,7 @@ async function handleCancel(argv) {
   // worker の queued→running claim と同じ lock 内で、最新の PID を記録する。
   updateState(workspaceRoot, (state) => {
     const indexed = state.jobs.find((candidate) => candidate.id === selectedJob.id);
-    if (!indexed || (indexed.status !== "queued" && indexed.status !== "running" && indexed.terminationPending !== true)) {
+    if (!indexed || !isActiveJob(indexed)) {
       throw new Error(`Job ${selectedJob.id} is no longer active. Run /grok:status to inspect it.`);
     }
     existing = readStoredJob(workspaceRoot, selectedJob.id) ?? indexed;

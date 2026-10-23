@@ -47,10 +47,11 @@ function normalizeMaxInlineDiffBytes(value) {
   return Math.floor(parsed);
 }
 
-function measureGitOutputBytes(cwd, args, maxBytes) {
+function collectBoundedGitOutput(cwd, args, maxBytes) {
   const result = git(cwd, args, { maxBuffer: maxBytes + 1 });
   if (result.error && /** @type {NodeJS.ErrnoException} */ (result.error).code === "ENOBUFS") {
-    return maxBytes + 1;
+    // 途中で切れた出力は再利用せず、強制インライン時だけ従来の取得へ戻す。
+    return { bytes: maxBytes + 1, stdout: null };
   }
   if (result.error) {
     throw result.error;
@@ -58,22 +59,25 @@ function measureGitOutputBytes(cwd, args, maxBytes) {
   if (result.status !== 0) {
     throw new Error(formatCommandFailure(result));
   }
-  return Buffer.byteLength(result.stdout, "utf8");
+  return { bytes: Buffer.byteLength(result.stdout, "utf8"), stdout: result.stdout };
 }
 
-function measureCombinedGitOutputBytes(cwd, argSets, maxBytes) {
+function collectCombinedBoundedGitOutput(cwd, argSets, maxBytes) {
   let totalBytes = 0;
+  const outputs = [];
   for (const args of argSets) {
     const remainingBytes = maxBytes - totalBytes;
     if (remainingBytes < 0) {
-      return maxBytes + 1;
+      return { bytes: maxBytes + 1, outputs };
     }
-    totalBytes += measureGitOutputBytes(cwd, args, remainingBytes);
+    const result = collectBoundedGitOutput(cwd, args, remainingBytes);
+    outputs.push(result.stdout);
+    totalBytes += result.bytes;
     if (totalBytes > maxBytes) {
-      return totalBytes;
+      return { bytes: totalBytes, outputs };
     }
   }
-  return totalBytes;
+  return { bytes: totalBytes, outputs };
 }
 
 function buildBranchComparison(cwd, baseRef) {
@@ -365,8 +369,8 @@ function collectWorkingTreeContext(cwd, state, options = {}) {
 
   let parts;
   if (includeDiff) {
-    const stagedDiff = gitChecked(cwd, ["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
-    const unstagedDiff = gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
+    const stagedDiff = options.diffOutputs?.[0] ?? gitChecked(cwd, ["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
+    const unstagedDiff = options.diffOutputs?.[1] ?? gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
     const untrackedBody = formatUntrackedFiles(cwd, state.untracked);
     parts = [
       formatSection("Git Status", status),
@@ -399,7 +403,7 @@ function collectBranchContext(cwd, baseRef, options = {}) {
   const includeDiff = options.includeDiff !== false;
   const comparison = options.comparison ?? buildBranchComparison(cwd, baseRef);
   const currentBranch = getCurrentBranch(cwd);
-  const changedFiles = gitChecked(cwd, ["diff", "--name-only", comparison.commitRange]).stdout.trim().split("\n").filter(Boolean);
+  const changedFiles = options.changedFiles ?? gitChecked(cwd, ["diff", "--name-only", comparison.commitRange]).stdout.trim().split("\n").filter(Boolean);
   const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", comparison.commitRange]).stdout.trim();
   const diffStat = gitChecked(cwd, ["diff", "--stat", comparison.commitRange]).stdout.trim();
 
@@ -412,7 +416,7 @@ function collectBranchContext(cwd, baseRef, options = {}) {
           formatSection("Diff Stat", diffStat),
           formatSection(
             "Branch Diff",
-            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", comparison.commitRange]).stdout
+            options.diffOutput ?? gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", comparison.commitRange]).stdout
           )
         ].join("\n")
       : [
@@ -491,7 +495,7 @@ export function collectReviewContext(cwd, target, options = {}) {
 
   if (target.mode === "working-tree") {
     const state = getWorkingTreeState(repoRoot);
-    diffBytes = measureCombinedGitOutputBytes(
+    const diffOutput = collectCombinedBoundedGitOutput(
       repoRoot,
       [
         ["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"],
@@ -499,21 +503,23 @@ export function collectReviewContext(cwd, target, options = {}) {
       ],
       maxInlineDiffBytes
     );
+    diffBytes = diffOutput.bytes;
     includeDiff =
       options.includeDiff ??
       (listUniqueFiles(state.staged, state.unstaged, state.untracked).length <= maxInlineFiles &&
         diffBytes <= maxInlineDiffBytes);
-    details = collectWorkingTreeContext(repoRoot, state, { includeDiff });
+    details = collectWorkingTreeContext(repoRoot, state, { includeDiff, diffOutputs: diffOutput.outputs });
   } else {
     const comparison = buildBranchComparison(repoRoot, target.baseRef);
-    const fileCount = gitChecked(repoRoot, ["diff", "--name-only", comparison.commitRange]).stdout.trim().split("\n").filter(Boolean).length;
-    diffBytes = measureGitOutputBytes(
+    const changedFiles = gitChecked(repoRoot, ["diff", "--name-only", comparison.commitRange]).stdout.trim().split("\n").filter(Boolean);
+    const diffOutput = collectBoundedGitOutput(
       repoRoot,
       ["diff", "--binary", "--no-ext-diff", "--submodule=diff", comparison.commitRange],
       maxInlineDiffBytes
     );
-    includeDiff = options.includeDiff ?? (fileCount <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
-    details = collectBranchContext(repoRoot, target.baseRef, { includeDiff, comparison });
+    diffBytes = diffOutput.bytes;
+    includeDiff = options.includeDiff ?? (changedFiles.length <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
+    details = collectBranchContext(repoRoot, target.baseRef, { includeDiff, comparison, changedFiles, diffOutput: diffOutput.stdout });
   }
 
   return {

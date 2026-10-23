@@ -1,16 +1,13 @@
 import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./grok.mjs";
+import { isActiveJob } from "./job-status.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
 import { resolveSessionIdWithFallback } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
-
-function isActiveJob(job) {
-  return job.status === "queued" || job.status === "running" || job.terminationPending === true;
-}
 
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));

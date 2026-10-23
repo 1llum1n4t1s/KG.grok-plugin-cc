@@ -1,3 +1,5 @@
+import { isActiveJob } from "./job-status.mjs";
+
 /**
  * severity の並び順。
  *
@@ -160,10 +162,6 @@ function formatGrokResumeCommand(job) {
     return null;
   }
   return `grok --resume ${job.grokSessionId}`;
-}
-
-function isActiveJob(job) {
-  return job.status === "queued" || job.status === "running" || job.terminationPending === true;
 }
 
 function appendActiveJobsTable(lines, jobs) {
