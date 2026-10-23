@@ -169,15 +169,18 @@ async function measureCase({ transport, mode, bytes, fragment }) {
       const u = m.params?.update;
       received += u?.content?.text ?? u?.content?.[0]?.content?.text ?? "";
     });
-    const samples = setInterval(() => {
+    const sample = () => {
       peakHeap = Math.max(peakHeap, process.memoryUsage().heapUsed);
       const now = performance.now();
       maxLoopDelayMs = Math.max(maxLoopDelayMs, now - previous - 2);
       previous = now;
-    }, 2);
+    };
+    const samples = setInterval(sample, 2);
     const start = performance.now();
     const response = await prompt(client, sessionId, { mode, bytes, fragment, ...(mode === "input" ? { text: content(bytes) } : {}) });
     const elapsedMs = performance.now() - start;
+    // 最終フレームで止まったタイマーが再実行される前でも、その遅延とheapを採取する。
+    sample();
     await tick();
     clearInterval(samples);
     assert.equal(response.stopReason, "end_turn");

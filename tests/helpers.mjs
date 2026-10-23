@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { buildShellCommand } from "../plugins/grok/scripts/lib/process.mjs";
 
 export function makeTempDir(prefix = "grok-plugin-test-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -13,12 +14,13 @@ export function writeExecutable(filePath, source) {
 }
 
 export function run(command, args, options = {}) {
-  return spawnSync(command, args, {
+  const shell = options.shell ?? (process.platform === "win32" && !path.isAbsolute(command));
+  return spawnSync(shell ? buildShellCommand(command, args) : command, shell ? [] : args, {
     cwd: options.cwd,
     env: options.env,
     encoding: "utf8",
     input: options.input,
-    shell: options.shell ?? (process.platform === "win32" && !path.isAbsolute(command)),
+    shell,
     windowsHide: true
   });
 }
