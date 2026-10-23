@@ -27,6 +27,7 @@ import process from "node:process";
 import { parseArgs } from "./lib/args.mjs";
 import { BROKER_AGENT_STDERR_METHOD, BROKER_BUSY_RPC_CODE, GrokAcpClient } from "./lib/acp.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
+import { JsonlFramer } from "./lib/jsonl.mjs";
 
 /** 実行中に別ソケットから割り込めるメソッド。 */
 function isCancelRequest(message) {
@@ -86,16 +87,42 @@ async function main() {
   const sockets = new Set();
   /** エージェントが出した逆リクエストの id -> 転送先ソケット。 */
   const forwardedAgentRequests = new Map();
+  const inFlight = new Set();
+  // 切断したturnと同一sessionの再開は、遅延フレームを区別できない。
+  // このbroker内では失効させ、別sessionの実行だけを受け付ける。
+  const disconnectedSessions = new Set();
+
+  function sessionIsActive(socket, sessionId) {
+    return typeof sessionId === "string" && !disconnectedSessions.has(sessionId) &&
+      [...inFlight].some((request) => request.socket === socket && request.sessionId === sessionId);
+  }
+
+  function rejectForwardedRequests(socket, message) {
+    for (const [id, target] of forwardedAgentRequests) {
+      if (target === socket) {
+        agent.respondToAgent(id, { error: buildJsonRpcError(-32000, message) });
+        forwardedAgentRequests.delete(id);
+      }
+    }
+  }
 
   function clearSocketOwnership(socket) {
     if (activeSocket === socket) {
       activeSocket = null;
     }
-    for (const [id, target] of forwardedAgentRequests) {
-      if (target === socket) {
-        // 転送先が消えたので、エージェントを待たせないよう打ち切る。
-        agent.respondToAgent(id, { error: buildJsonRpcError(-32000, "Client disconnected.") });
-        forwardedAgentRequests.delete(id);
+    for (const request of inFlight) {
+      if (request.socket === socket && typeof request.sessionId === "string") {
+        disconnectedSessions.add(request.sessionId);
+      }
+    }
+    rejectForwardedRequests(socket, "Client disconnected.");
+    const cancelledSessions = new Set();
+    for (const request of inFlight) {
+      if (request.socket !== socket) continue;
+      request.controller.abort(new Error("Client disconnected."));
+      if (request.method === "session/prompt" && !cancelledSessions.has(request.sessionId)) {
+        cancelledSessions.add(request.sessionId);
+        agent.notify("session/cancel", { sessionId: request.sessionId });
       }
     }
   }
@@ -112,14 +139,14 @@ async function main() {
 
   // 通知は占有中のソケットへ素通しする。
   agent.setNotificationHandler((message) => {
-    if (activeSocket) {
+    if (activeSocket && (message.params?.sessionId === undefined || sessionIsActive(activeSocket, message.params.sessionId))) {
       send(activeSocket, message);
     }
   });
 
   // 逆リクエストは占有中のソケットへ転送し、応答が返るのを待つ。
   agent.setAgentRequestHandler((message) => {
-    if (!activeSocket) {
+    if (!activeSocket || !sessionIsActive(activeSocket, message.params?.sessionId)) {
       agent.respondToAgent(message.id, {
         error: buildJsonRpcError(-32000, "No client is attached to answer this request.")
       });
@@ -146,10 +173,10 @@ async function main() {
   const server = net.createServer((socket) => {
     sockets.add(socket);
     socket.setEncoding("utf8");
-    let buffer = "";
     let pendingRequests = 0;
 
     async function handleMessage(message) {
+      if (socket.destroyed || !sockets.has(socket)) return;
       // 転送した逆リクエストへの応答。エージェントへ中継して終わり。
       if (message.id !== undefined && !message.method) {
         if (forwardedAgentRequests.get(message.id) !== socket) {
@@ -189,7 +216,8 @@ async function main() {
       // 実行中の別セッションを止めにいく場合だけ、占有中でも通す。
       const allowCancelDuringActiveTurn = isCancelRequest(message) && activeSocket && activeSocket !== socket;
 
-      if (activeSocket && activeSocket !== socket && !allowCancelDuringActiveTurn) {
+      if ((!isCancelRequest(message) && disconnectedSessions.has(message.params?.sessionId)) ||
+          (activeSocket && activeSocket !== socket && !allowCancelDuringActiveTurn)) {
         send(socket, {
           jsonrpc: "2.0",
           id: message.id,
@@ -200,13 +228,15 @@ async function main() {
 
       // 同じ接続のキャンセルも、進行中 prompt の占有を解除してはいけない。
       const claimed = !isCancelRequest(message);
+      const request = { socket, sessionId: message.params?.sessionId, method: message.method, controller: new AbortController() };
       if (claimed) {
         activeSocket = socket;
         pendingRequests += 1;
+        inFlight.add(request);
       }
 
       try {
-        const result = await agent.request(message.method, message.params ?? {});
+        const result = await agent.request(message.method, message.params ?? {}, { signal: request.controller.signal });
         send(socket, { jsonrpc: "2.0", id: message.id, result });
       } catch (error) {
         send(socket, {
@@ -216,42 +246,41 @@ async function main() {
         });
       } finally {
         if (claimed) {
+          inFlight.delete(request);
           pendingRequests -= 1;
-          if (pendingRequests === 0 && activeSocket === socket) activeSocket = null;
+          if (pendingRequests === 0) {
+            if (activeSocket === socket) activeSocket = null;
+            rejectForwardedRequests(socket, "Client request completed.");
+          }
         }
       }
     }
 
-    socket.on("data", (chunk) => {
-      const scanFrom = buffer.length;
-      buffer += chunk;
-      let newlineIndex = buffer.indexOf("\n", scanFrom);
-      while (newlineIndex !== -1) {
-        const line = buffer.slice(0, newlineIndex);
-        buffer = buffer.slice(newlineIndex + 1);
-        newlineIndex = buffer.indexOf("\n");
-        if (!line.trim()) continue;
+    const framer = new JsonlFramer((line) => {
+      if (!line.trim()) return;
 
-        let message;
-        try {
-          message = JSON.parse(line);
-        } catch (error) {
-          send(socket, { jsonrpc: "2.0", id: null, error: buildJsonRpcError(-32700, `Invalid JSON: ${error.message}`) });
-          continue;
-        }
-        // フレーム分離中に待たない。RPC 完了待ちの間も cancel と逆応答を転送する。
-        void handleMessage(message).catch((error) => {
-          send(socket, { jsonrpc: "2.0", id: message?.id ?? null, error: buildJsonRpcError(-32000, error.message) });
-        });
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch (error) {
+        send(socket, { jsonrpc: "2.0", id: null, error: buildJsonRpcError(-32700, `Invalid JSON: ${error.message}`) });
+        return;
       }
+      // フレーム分離中に待たない。RPC 完了待ちの間も cancel と逆応答を転送する。
+      void handleMessage(message).catch((error) => {
+        send(socket, { jsonrpc: "2.0", id: message?.id ?? null, error: buildJsonRpcError(-32000, error.message) });
+      });
     });
+    socket.on("data", (chunk) => framer.push(chunk));
 
     socket.on("close", () => {
+      framer.close();
       sockets.delete(socket);
       clearSocketOwnership(socket);
     });
 
     socket.on("error", () => {
+      framer.close();
       sockets.delete(socket);
       clearSocketOwnership(socket);
     });

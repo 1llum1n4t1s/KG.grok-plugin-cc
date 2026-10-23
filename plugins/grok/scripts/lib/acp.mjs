@@ -29,6 +29,7 @@ import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
 import { buildShellCommand, terminateProcessTree } from "./process.mjs";
+import { JsonlFramer } from "./jsonl.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.codex-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
@@ -171,7 +172,7 @@ class AcpClientBase {
      * @type {((message: unknown) => void) | null}
      */
     this.agentRequestHandler = options.agentRequestHandler ?? null;
-    this.lineBuffer = "";
+    this.framer = new JsonlFramer((line) => this.handleLine(line));
     this.transport = "unknown";
     /** initialize の応答。モデル一覧や capabilities の確認に使う。 */
     this.initializeResult = null;
@@ -204,6 +205,7 @@ class AcpClientBase {
    * @param {{ result?: unknown, error?: unknown }} [response]
    */
   respondToAgent(id, response = {}) {
+    if (this.closed) return;
     const { result, error } = response;
     this.sendMessage(error ? { jsonrpc: "2.0", id, error } : { jsonrpc: "2.0", id, result: result ?? {} });
   }
@@ -212,12 +214,15 @@ class AcpClientBase {
    * @template {AcpMethod} M
    * @param {M} method
    * @param {import("./acp-protocol").AcpRequestParams<M>} params
+   * @param {{ signal?: AbortSignal }} [options]
    * @returns {Promise<import("./acp-protocol").AcpResponse<M>>}
    */
-  request(method, params) {
+  request(method, params, options = {}) {
     if (this.closed) {
       throw new Error("grok agent stdio client is closed.");
     }
+    const signal = options.signal;
+    if (signal?.aborted) throw signal.reason ?? new Error("Grok ACP request was aborted.");
 
     const id = this.nextId;
     this.nextId += 1;
@@ -226,23 +231,37 @@ class AcpClientBase {
       const timeoutMs = method === "session/prompt" ? 0 : (this.options.rpcTimeoutMs ?? CONTROL_RPC_TIMEOUT_MS);
       const timer = timeoutMs > 0
         ? setTimeout(() => {
+            const pending = this.pending.get(id);
             this.pending.delete(id);
-            reject(new Error(`Grok ACP ${method} timed out after ${timeoutMs}ms.`));
+            pending?.reject(new Error(`Grok ACP ${method} timed out after ${timeoutMs}ms.`));
           }, timeoutMs)
         : null;
       timer?.unref?.();
-      this.pending.set(id, {
+      const abort = () => {
+        this.pending.delete(id);
+        pending.reject(signal.reason ?? new Error("Grok ACP request was aborted."));
+      };
+      const pending = {
         resolve: (value) => {
           if (timer) clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
           resolve(value);
         },
         reject: (error) => {
           if (timer) clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
           reject(error);
         },
         method
-      });
-      this.sendMessage({ jsonrpc: "2.0", id, method, params });
+      };
+      this.pending.set(id, pending);
+      signal?.addEventListener("abort", abort, { once: true });
+      try {
+        this.sendMessage({ jsonrpc: "2.0", id, method, params });
+      } catch (error) {
+        this.pending.delete(id);
+        pending.reject(error);
+      }
     });
   }
 
@@ -254,24 +273,12 @@ class AcpClientBase {
   }
 
   handleChunk(chunk) {
-    // 走査済みの位置から探す。先頭から探し直すと、改行を含まない巨大な
-    // 1 行（大きなツール出力）を組み立てる間、受信のたびに全体を
-    // 再走査して O(N^2) になる。
-    const scanFrom = this.lineBuffer.length;
-    this.lineBuffer += chunk;
-
-    let searchFrom = scanFrom;
-    let newlineIndex = this.lineBuffer.indexOf("\n", searchFrom);
-    while (newlineIndex !== -1) {
-      const line = this.lineBuffer.slice(0, newlineIndex);
-      this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
-      this.handleLine(line);
-      searchFrom = 0;
-      newlineIndex = this.lineBuffer.indexOf("\n", searchFrom);
-    }
+    if (this.closed) return;
+    this.framer.push(chunk);
   }
 
   handleLine(line) {
+    if (this.closed) return;
     if (!line.trim()) {
       return;
     }
@@ -324,6 +331,7 @@ class AcpClientBase {
    * 未対応メソッドにも必ずエラー応答を返して打ち切る。
    */
   handleServerRequest(message) {
+    if (this.closed) return;
     // 転送ハンドラが刺さっている場合は、判断ごと委ねて何も応答しない。
     if (this.agentRequestHandler) {
       this.agentRequestHandler(message);
@@ -440,6 +448,8 @@ class AcpClientBase {
     }
 
     this.exitResolved = true;
+    this.closed = true;
+    this.framer.close();
     this.exitError = error ?? null;
 
     for (const pending of this.pending.values()) {
@@ -447,6 +457,7 @@ class AcpClientBase {
     }
     this.pending.clear();
     this.resolveExit(undefined);
+    void this.close().catch(() => {});
   }
 
   /**
@@ -463,6 +474,10 @@ class AcpClientBase {
 
   sendMessage(_message) {
     throw new Error("sendMessage must be implemented by subclasses.");
+  }
+
+  async close() {
+    throw new Error("close must be implemented by subclasses.");
   }
 }
 
@@ -527,12 +542,14 @@ class SpawnedAcpClient extends AcpClientBase {
   }
 
   async close() {
-    if (this.closed) {
+    if (this.closeStarted) {
       await waitForExitWithTimeout(this.exitPromise);
       return;
     }
 
+    this.closeStarted = true;
     this.closed = true;
+    this.framer.close();
 
     if (this.readline) {
       this.readline.close();
@@ -613,12 +630,14 @@ class BrokerAcpClient extends AcpClientBase {
   }
 
   async close() {
-    if (this.closed) {
+    if (this.closeStarted) {
       await waitForExitWithTimeout(this.exitPromise);
       return;
     }
 
+    this.closeStarted = true;
     this.closed = true;
+    this.framer.close();
     if (this.socket) {
       this.socket.end();
     }
