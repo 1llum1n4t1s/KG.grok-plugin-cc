@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
 import process from "node:process";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -20,20 +19,13 @@ import {
 import { filterJobsForCurrentSession, sortJobsNewestFirst } from "./lib/job-control.mjs";
 import { resolveSessionIdWithFallback, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import { readHookInput } from "./lib/fs.mjs";
 
 const STOP_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 const STOP_REVIEW_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 const FALLBACK_TURN_KEY = "session-turn";
-
-function readHookInput() {
-  const raw = fs.readFileSync(0, "utf8").trim();
-  if (!raw) {
-    return {};
-  }
-  return JSON.parse(raw);
-}
 
 function emitDecision(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -124,7 +116,7 @@ function runStopReview(cwd, input = {}, pendingReason = null) {
     timeout: STOP_REVIEW_TIMEOUT_MS
   });
 
-  if (result.error?.code === "ETIMEDOUT") {
+  if (/** @type {Error & { code?: string }} */ (result.error)?.code === "ETIMEDOUT") {
     return {
       ok: false,
       retryWithoutChanges: true,

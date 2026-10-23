@@ -2,7 +2,7 @@ import fs from "node:fs";
 import process from "node:process";
 
 import { getProcessSnapshot } from "./process.mjs";
-import { readJobFile, resolveJobFile, resolveJobLogFile, updateState, upsertJob, writeJobFile } from "./state.mjs";
+import { readJobFile, resolveJobFile, resolveJobLogFile, updateState, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "GROK_COMPANION_SESSION_ID";
 export const CODEX_SESSION_ID_ENV = "CODEX_THREAD_ID";

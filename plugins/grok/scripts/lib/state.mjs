@@ -111,10 +111,14 @@ function writeJsonAtomic(filePath, payload) {
   }
 }
 
+export function compareUpdatedAtNewestFirst(left, right) {
+  return String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
+}
+
 function pruneJobs(jobs) {
   let finishedJobs = 0;
   return [...jobs]
-    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
+    .sort(compareUpdatedAtNewestFirst)
     .filter((job) => {
       // 停止を確認できていないジョブは、履歴が増えても追跡と再試行を維持する。
       if (isActiveJob(job)) return true;
@@ -126,7 +130,7 @@ function pruneJobs(jobs) {
 function pruneReviewGateSessions(sessions) {
   return (Array.isArray(sessions) ? sessions : [])
     .filter((entry) => typeof entry?.sessionId === "string" && entry.sessionId.trim())
-    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
+    .sort(compareUpdatedAtNewestFirst)
     .slice(0, MAX_REVIEW_GATE_SESSIONS);
 }
 

@@ -34,6 +34,8 @@ import {
 } from "./acp.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
+import { looksLikeVerificationCommand } from "./job-status.mjs";
+import { shortenText } from "./text.mjs";
 
 const TASK_SESSION_PREFIX = "Grok Companion Task";
 const DEFAULT_CONTINUE_PROMPT =
@@ -116,26 +118,8 @@ function cleanGrokStderr(stderr) {
     .join("\n");
 }
 
-function shorten(text, limit = 72) {
-  const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
-  const characters = Array.from(normalized);
-  if (!normalized) {
-    return "";
-  }
-  if (characters.length <= limit) {
-    return normalized;
-  }
-  return `${characters.slice(0, limit - 3).join("")}...`;
-}
-
-function looksLikeVerificationCommand(command) {
-  return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(
-    command
-  );
-}
-
 function buildTaskSessionName(prompt) {
-  const excerpt = shorten(prompt, 56);
+  const excerpt = shortenText(prompt, 56);
   return excerpt ? `${TASK_SESSION_PREFIX}: ${excerpt}` : TASK_SESSION_PREFIX;
 }
 
@@ -366,11 +350,11 @@ function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => 
     }
 
     const reason = verdict.reason ?? "no one-time read-only permission option is available";
-    const denial = `${reason}: ${shorten(params?.toolCall?.title ?? "unknown tool", 60)}`;
+    const denial = `${reason}: ${shortenText(params?.toolCall?.title ?? "unknown tool", 60)}`;
     onDenied(denial);
     emitProgress(
       onProgress,
-      `Denied during read-only review (${reason}): ${shorten(params?.toolCall?.title ?? "unknown tool", 60)}`,
+      `Denied during read-only review (${reason}): ${shortenText(params?.toolCall?.title ?? "unknown tool", 60)}`,
       "running"
     );
 
@@ -449,7 +433,7 @@ function createTurnCollector(sessionId, options = {}) {
       case "tool_call": {
         const title = update.title ?? update.toolCallId;
         state.toolCalls.set(update.toolCallId, { title, status: update.status ?? "pending" });
-        emitProgress(state.onProgress, `Tool: ${shorten(title, 60)}`, "running", { sessionId });
+        emitProgress(state.onProgress, `Tool: ${shortenText(title, 60)}`, "running", { sessionId });
         return;
       }
       case "tool_call_update": {

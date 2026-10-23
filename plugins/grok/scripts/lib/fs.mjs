@@ -4,6 +4,11 @@ export function readJsonFile(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
+export function readHookInput() {
+  const raw = fs.readFileSync(0, "utf8").trim();
+  return raw ? JSON.parse(raw) : {};
+}
+
 export function isProbablyText(buffer) {
   const sample = buffer.subarray(0, Math.min(buffer.length, 4096));
   for (const value of sample) {

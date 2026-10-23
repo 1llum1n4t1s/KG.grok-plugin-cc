@@ -75,6 +75,7 @@ async function main() {
 
   // エージェントの stderr は broker.log にしか残らず、クライアント側の
   // client.stderr が常に空になっていた。占有中のソケットへ中継する。
+  /** @type {(chunk: string) => void} */
   let forwardAgentStderr = () => {};
   const agent = await GrokAcpClient.connect(cwd, {
     disableBroker: true,

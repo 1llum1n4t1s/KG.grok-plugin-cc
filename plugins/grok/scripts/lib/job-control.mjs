@@ -1,8 +1,8 @@
 import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./grok.mjs";
-import { isActiveJob } from "./job-status.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
+import { isActiveJob, looksLikeVerificationCommand } from "./job-status.mjs";
+import { compareUpdatedAtNewestFirst, getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
 import { resolveSessionIdWithFallback } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -10,7 +10,7 @@ export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
 
 export function sortJobsNewestFirst(jobs) {
-  return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
+  return [...jobs].sort(compareUpdatedAtNewestFirst);
 }
 
 function getCurrentSessionId(options = {}) {
@@ -64,8 +64,24 @@ export function readJobProgressPreview(logFile, maxLines = DEFAULT_MAX_PROGRESS_
     return [];
   }
 
-  const lines = fs
-    .readFileSync(logFile, "utf8")
+  const raw = fs.readFileSync(logFile, "utf8");
+  if (Number.isSafeInteger(maxLines) && maxLines > 0) {
+    const lines = [];
+    let end = raw.length;
+    while (end > 0 && lines.length < maxLines) {
+      const start = raw.lastIndexOf("\n", end - 1);
+      const line = raw.slice(start + 1, end).trimEnd();
+      if (line.startsWith("[")) {
+        const message = stripLogPrefix(line);
+        if (message && !isProgressBlockTitle(message)) lines.push(message);
+      }
+      end = start;
+    }
+    return lines.reverse();
+  }
+
+  // 0・負数・小数などには既存の slice(-maxLines) の意味を保つ。
+  const lines = raw
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
     .filter(Boolean)
@@ -99,12 +115,6 @@ function formatElapsedDuration(startValue, endValue = null) {
     return `${minutes}m ${seconds}s`;
   }
   return `${seconds}s`;
-}
-
-function looksLikeVerificationCommand(line) {
-  return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(
-    line
-  );
 }
 
 function inferLegacyJobPhase(job, progressPreview = []) {
@@ -225,6 +235,7 @@ function reconcileOrphanedJobs(workspaceRoot) {
   }
 }
 
+/** @param {(job: any) => boolean} [predicate] */
 function matchJobReference(jobs, reference, predicate = () => true, options = {}) {
   const filtered = jobs.filter(predicate);
   if (!reference) {

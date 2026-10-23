@@ -11,7 +11,7 @@
 ## コマンドと検証
 
 - Node.js 22 以降と `package.json` の `packageManager` 指定の pnpm を使う。依存導入は `pnpm install --frozen-lockfile`。lockfile は `pnpm-lock.yaml`。
-- 実装変更後は CI と同じ `pnpm test`、`pnpm build` を実行する。`build` は `tsconfig.acp.json` に列挙された JavaScript の型検査で、成果物を生成しない。
+- 実装変更後は CI と同じ `pnpm test`、`pnpm build` を実行する。`build` は `tsconfig.acp.json` で指定した配布ランタイムとバージョン管理スクリプトの型検査・未使用定義の検出で、成果物を生成しない。
 - manifest の整合性は `pnpm check-version` で確認する。
 - フックやホスト連携を変えるときは `tests/hooks.test.mjs`、`tests/commands.test.mjs`、`tests/coexistence.test.mjs` の関連ケースを確認する。テストの fake Grok と一時ディレクトリを使って、実アカウントへの実行と分離する。一時領域は `tests/helpers.mjs` と同様にリポジトリ外へ置き、Git 基点の検出がテスト対象へ干渉しないようにする。
 - Grok の起動環境や ACP 接続・権限処理を変えるときは `tests/grok-env.test.mjs`、`tests/acp.test.mjs`、`tests/runtime.test.mjs` の関連ケースを確認する。JSONL 受信やブローカーの接続・セッション所有権を変えるときは `tests/acp-transport-e2e.test.mjs` で直接起動とブローカー経由の巨大・分割応答、受信中のキャンセル、不正 JSON 後の終了、切断後の遅延要求とセッション再利用も確認する。

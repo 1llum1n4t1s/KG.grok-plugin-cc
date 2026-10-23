@@ -17,19 +17,12 @@ import {
 import { listJobs, readJobFile, resolveJobFile, resolveStateFile, updateState, writeJobFile } from "./lib/state.mjs";
 import { appendLogLine, nowIso, resolveSessionIdWithFallback, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import { readHookInput } from "./lib/fs.mjs";
 
 // 再エクスポート。定義は tracked-jobs.mjs 側が正で、ここで別に持つと
 // 片方だけ変わったときに SessionEnd のジョブ掃除が黙って効かなくなる。
 export { SESSION_ID_ENV };
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
-
-function readHookInput() {
-  const raw = fs.readFileSync(0, "utf8").trim();
-  if (!raw) {
-    return {};
-  }
-  return JSON.parse(raw);
-}
 
 function shellEscape(value) {
   return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;

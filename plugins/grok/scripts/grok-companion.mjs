@@ -19,6 +19,7 @@ import {
     runGrokTurn
   } from "./lib/grok.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
+import { shortenText } from "./lib/text.mjs";
 import { collectReviewContext, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, inspectTrackedJobProcess, stopTrackedJobProcess } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
@@ -168,18 +169,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function shorten(text, limit = 96) {
-  const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
-  const characters = Array.from(normalized);
-  if (!normalized) {
-    return "";
-  }
-  if (characters.length <= limit) {
-    return normalized;
-  }
-  return `${characters.slice(0, limit - 3).join("")}...`;
-}
-
 function firstMeaningfulLine(text, fallback) {
   const line = String(text ?? "")
     .split(/\r?\n/)
@@ -196,15 +185,14 @@ async function buildSetupReport(cwd, actionsTaken = []) {
   const config = getConfig(workspaceRoot);
 
   const nextSteps = [];
-  if (!grokStatus.available) {
+  if (grokStatus.reason === "missing-agent-stdio") {
+    nextSteps.push("Update Grok Build with `!grok update` so that `grok agent stdio` is available.");
+  } else if (!grokStatus.available) {
     nextSteps.push(
       process.platform === "win32"
         ? "Install Grok Build with `irm https://x.ai/cli/install.ps1 | iex`."
         : "Install Grok Build with `curl -fsSL https://x.ai/cli/install.sh | bash`."
     );
-  }
-  if (grokStatus.available && grokStatus.reason === "missing-agent-stdio") {
-    nextSteps.push("Update Grok Build with `!grok update` so that `grok agent stdio` is available.");
   }
   if (grokStatus.available && !authStatus.authenticated) {
     nextSteps.push("Run `!grok login` to sign in with your SuperGrok or X Premium+ account.");
@@ -397,6 +385,7 @@ async function executeReviewRun(request) {
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
     onProgress: request.onProgress
   });
+  /** @type {ReturnType<typeof parseStructuredOutput> & { permissionDenials?: string[] }} */
   const parsed = parseStructuredOutput(result.reviewText, {
     status: result.status,
     failureMessage: result.error?.message ?? result.stderr
@@ -570,7 +559,7 @@ function buildTaskRunMetadata({ prompt, resumeLast = false, stopGate = false }) 
   const fallbackSummary = resumeLast ? DEFAULT_CONTINUE_PROMPT : "Task";
   return {
     title,
-    summary: shorten(prompt || fallbackSummary),
+    summary: shortenText(prompt || fallbackSummary, 96),
     kind: "task",
     jobClass: "task"
   };
@@ -835,7 +824,6 @@ function handleTaskResumeCandidate(argv) {
     booleanOptions: ["json"]
   });
 
-  const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   const sessionId = resolveCurrentSessionId();
   const jobs = filterJobsForCurrentSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
