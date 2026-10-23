@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.0.25
+
+- Reduced processing and memory use when extracting the latest progress lines from long job logs.
+- Fixed setup guidance to recommend updating older Grok Build versions that do not support `grok agent stdio`.
+
+## 1.0.24
+
+- Bounded process identity and stop checks so unresponsive lookups return without incorrectly treating processes as stopped.
+- Fixed child-process termination on Windows when PATH is long.
+- Rejected requests from disconnected sessions instead of routing file operations or permission checks to another connection, and released pending responses on disconnect.
+- Reduced data concatenation and memory use when receiving large responses in chunks.
+
 ## 1.0.23
 
 - Aligned Claude Code and Codex X search instructions to avoid a default 30-day limit unless a date range is requested.
