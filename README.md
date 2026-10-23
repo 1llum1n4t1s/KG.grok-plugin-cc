@@ -49,7 +49,8 @@ curl -fsSL https://x.ai/cli/install.sh | bash
 ```
 
 The plugin talks to Grok over `grok agent stdio`, so you need a build recent enough to expose that
-subcommand. `/grok:setup` tells you if yours is too old.
+subcommand. If `/grok:setup` reports that it is unavailable in an older build, run `grok update`
+in a terminal, then run setup again.
 
 ## Install
 
@@ -130,7 +131,9 @@ Either sign in interactively:
 grok login
 ```
 
-...or set an API key from [console.x.ai](https://console.x.ai) for headless or metered use:
+If browser login is blocked, retry with `grok login --device-auth`.
+
+Alternatively, set an API key from [console.x.ai](https://console.x.ai) for headless or metered use:
 
 ```bash
 $env:XAI_API_KEY = "xai-..."
@@ -420,7 +423,8 @@ curl -fsSL https://x.ai/cli/install.sh | bash
 ```
 
 このプラグインは `grok agent stdio` を介して Grok と通信するため、このサブコマンドを提供する
-新しいバージョンの Grok Build が必要です。バージョンが古い場合は `/grok:setup` で確認できます。
+新しいバージョンの Grok Build が必要です。`/grok:setup` で古い版のため利用できないと報告された場合は、
+ターミナルで `grok update` を実行し、setup を再実行してください。
 
 ## インストール
 
@@ -501,7 +505,9 @@ Claude Code と Codex を併用するときは、それぞれにプラグイン�
 grok login
 ```
 
-ヘッドレス環境または従量課金で利用する場合は、[console.x.ai](https://console.x.ai) で取得した
+ブラウザでのログインが阻まれる場合は、`grok login --device-auth` で再試行してください。
+
+代わりにヘッドレス環境または従量課金で利用する場合は、[console.x.ai](https://console.x.ai) で取得した
 API キーを設定します。
 
 ```bash
