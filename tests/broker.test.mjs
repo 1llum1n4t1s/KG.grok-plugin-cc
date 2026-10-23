@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
-import { makeTempDir } from "./helpers.mjs";
+import { makeTempDir, removeTempFixture } from "./helpers.mjs";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/grok/scripts/lib/broker-endpoint.mjs";
 import { sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/grok/scripts/lib/broker-lifecycle.mjs";
 import { BROKER_BUSY_RPC_CODE } from "../plugins/grok/scripts/lib/acp.mjs";
@@ -49,9 +49,9 @@ async function broker(t, scenario) {
     })]);
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
     await exited;
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    fs.rmSync(fake.binDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    fs.rmSync(fallback.binDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    removeTempFixture(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    removeTempFixture(fake.binDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    removeTempFixture(fallback.binDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
   assert.equal(await waitForBrokerEndpoint(endpoint, 10000), true, stderr);
   assert.ok(fake.readState()?.pid, "the isolated fake Grok must have initialized");

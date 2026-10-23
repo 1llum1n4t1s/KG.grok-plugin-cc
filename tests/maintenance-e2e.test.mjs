@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
-import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+import { initGitRepo, makeTempDir, removeTempFixture, run } from "./helpers.mjs";
 import { resolveStateFile, resolveJobFile, resolveJobLogFile } from "../plugins/grok/scripts/lib/state.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
@@ -21,8 +21,8 @@ function workspace(t, scenario = { replies: [{ text: "DONE" }] }) {
   const env = { ...fake.env, CLAUDE_PLUGIN_DATA: path.join(root, "data") };
   const command = (args) => run(process.execPath, [SCRIPT, ...args], { cwd: repo, env });
   t.after(() => {
-    fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(fake.binDir, { recursive: true, force: true });
+    removeTempFixture(root, { recursive: true, force: true });
+    removeTempFixture(fake.binDir, { recursive: true, force: true });
   });
   return { root, fake, repo, env, command };
 }

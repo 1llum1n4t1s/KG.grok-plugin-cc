@@ -46,7 +46,8 @@ for (const endingHost of ['claude', 'codex']) {
     // 同じワークスペース・セッションID・ジョブIDでも、各インストールの保存先は独立する。
     const results = await Promise.all(hosts.map(host => {
       const moduleUrl = pathToFileURL(path.join(host.install, 'scripts/lib/state.mjs')).href;
-      const code = `import { upsertJob, resolveStateDir } from ${JSON.stringify(moduleUrl)}; for(let i=0;i<20;i++) upsertJob(process.cwd(),{id:'job-'+i,sessionId:'same-session-id',status:'running',owner:${JSON.stringify(host.name)}}); console.log(resolveStateDir(process.cwd()));`;
+      // ホスト分離を検証する20件の初期状態は、一度の保存で用意する。
+      const code = `import { updateState, resolveStateDir } from ${JSON.stringify(moduleUrl)}; updateState(process.cwd(), state => { for(let i=0;i<20;i++) { const timestamp = new Date().toISOString(); state.jobs.unshift({createdAt:timestamp,updatedAt:timestamp,id:'job-'+i,sessionId:'same-session-id',status:'running',owner:${JSON.stringify(host.name)}}); } }); console.log(resolveStateDir(process.cwd()));`;
       return execute(process.execPath, ['--input-type=module', '-e', code], host.env, workspace);
     }));
     const dirs = results.map(result => result.stdout.trim());
