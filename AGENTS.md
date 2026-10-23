@@ -14,7 +14,7 @@
 - 実装変更後は CI と同じ `pnpm test`、`pnpm build` を実行する。`build` は `tsconfig.acp.json` に列挙された JavaScript の型検査で、成果物を生成しない。
 - manifest の整合性は `pnpm check-version` で確認する。
 - フックやホスト連携を変えるときは `tests/hooks.test.mjs`、`tests/commands.test.mjs`、`tests/coexistence.test.mjs` の関連ケースを確認する。テストの fake Grok と一時ディレクトリを使って、実アカウントへの実行と分離する。一時領域は `tests/helpers.mjs` と同様にリポジトリ外へ置き、Git 基点の検出がテスト対象へ干渉しないようにする。
-- Grok の起動環境や ACP 接続・権限処理を変えるときは `tests/grok-env.test.mjs`、`tests/acp.test.mjs`、`tests/runtime.test.mjs` の関連ケースを確認する。
+- Grok の起動環境や ACP 接続・権限処理を変えるときは `tests/grok-env.test.mjs`、`tests/acp.test.mjs`、`tests/runtime.test.mjs` の関連ケースを確認する。JSONL 受信やブローカーの接続・セッション所有権を変えるときは `tests/acp-transport-e2e.test.mjs` で直接起動とブローカー経由の巨大・分割応答、受信中のキャンセル、不正 JSON 後の終了、切断後の遅延要求とセッション再利用も確認する。
 - 文書だけの変更は参照先、実装との整合性、`git diff --check` を確認する。利用者向けの変更は README の英語・日本語をそろえる。
 
 ## 実装上の制約
@@ -22,5 +22,5 @@
 - フックのパスは `hooks/hooks.json` の Node.js 起動方式にそろえ、両ホストの root/data 環境変数と空白を含むパスを扱う。
 - 状態の読み書きは `scripts/lib/state.mjs` の API を使い、ホスト別の保存先とワークスペース境界を維持する。
 - 権限、ジョブ所有者、キャンセル、構造化レビュー出力を変更するときは [設計の不変条件](DESIGN.md#重要な不変条件) と対応するテストを照合する。レビュー結果の契約は `schemas/review-output.schema.json`、`prompts/`、共通ランタイムの判定・表示をそろえ、`tests/runtime.test.mjs` と `tests/render.test.mjs` で初回実行と保存結果の再表示を確認する。
-- 読み取り専用シェル許可リストの変更は `tests/shell-allowlist.test.mjs`、ジョブのプロセス識別・状態遷移・停止の変更は `tests/process.test.mjs`、`tests/tracked-jobs.test.mjs`、`tests/runtime.test.mjs`、`tests/hooks.test.mjs` の関連ケースで確認する。
+- 読み取り専用シェル許可リストの変更は `tests/shell-allowlist.test.mjs`、ジョブのプロセス識別・状態遷移・停止の変更は `tests/process.test.mjs`、`tests/tracked-jobs.test.mjs`、`tests/runtime.test.mjs`、`tests/hooks.test.mjs` の関連ケースで確認する。照会の期限や Windows の停止コマンドを変えるときは `tests/process-deadline-e2e.test.mjs` で外部照会の停止、再試行全体の時間予算、開始時の登録拒否を確認し、Windows では長い PATH と実際の CIM 照会のケースも確認する。
 - ランタイムは配布される `.mjs` を直接実行する。型検査だけに存在する生成物へ実行を依存させず、`plugins/grok/.generated/` は生成領域として扱う。
