@@ -56,7 +56,18 @@ if (!(argv[0] === "agent" && argv[1] === "stdio")) {
 const state = { pid: process.pid, prompts: [], models: [], cancels: [], loads: [], configs: [], sessions: 0 };
 function persist() {
   if (STATE_PATH) {
-    fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+    const temporaryPath = STATE_PATH + "." + process.pid + ".tmp";
+    fs.writeFileSync(temporaryPath, JSON.stringify(state, null, 2), "utf8");
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        fs.renameSync(temporaryPath, STATE_PATH);
+        break;
+      } catch (error) {
+        // Windowsでは親のreadStateが開いている間だけ置換が拒否される。
+        if (process.platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt >= 100) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    }
   }
 }
 persist();
@@ -173,13 +184,13 @@ function handle(message) {
         return;
       }
 
-      if (reply.requestClientFileWrite) {
-        pendingReply = { id, reply, sessionId: params.sessionId, kind: "file-write" };
+      if (reply.requestClientFileWrite || reply.requestClientFileRead) {
+        pendingReply = { id, reply, sessionId: params.sessionId, kind: reply.requestClientFileRead ? "file-read" : "file-write" };
         send({
           jsonrpc: "2.0",
           id: 9000 + promptIndex,
-          method: "fs/write_text_file",
-          params: reply.requestClientFileWrite
+          method: reply.requestClientFileRead ? "fs/read_text_file" : "fs/write_text_file",
+          params: reply.requestClientFileRead ?? reply.requestClientFileWrite
         });
         return;
       }
@@ -221,8 +232,11 @@ rl.on("line", (line) => {
     const optionId = message.result?.outcome?.optionId;
     const { id, reply, sessionId, kind } = pendingReply;
     pendingReply = null;
-    if (kind === "file-write") {
-      state.clientWriteResponse = message.error ?? message.result;
+    if (kind === "file-write" || kind === "file-read") {
+      const response = message.error ?? message.result;
+      if (kind === "file-write") state.clientWriteResponse = response;
+      state.clientFileResponses ??= [];
+      state.clientFileResponses.push(response);
       persist();
       emitReply(id, sessionId, reply);
       return;

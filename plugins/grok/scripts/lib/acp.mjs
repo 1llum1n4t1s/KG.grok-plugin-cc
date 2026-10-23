@@ -397,10 +397,41 @@ class AcpClientBase {
     const root = path.resolve(this.cwd);
     const resolved = path.resolve(root, target);
     const relative = path.relative(root, resolved);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) {
       return null;
     }
-    return resolved;
+
+    const realRoot = fs.realpathSync(root);
+    let existing = resolved;
+    const missing = [];
+    // 未作成のwrite先も、存在する最深の祖先までリンク先を確認する。
+    while (true) {
+      try {
+        fs.lstatSync(existing);
+        break;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        const parent = path.dirname(existing);
+        if (parent === existing) return null;
+        missing.unshift(path.basename(existing));
+        existing = parent;
+      }
+    }
+
+    let realExisting;
+    try {
+      realExisting = fs.realpathSync(existing);
+    } catch (error) {
+      // dangling link は新規ファイルと区別して拒否する。
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }
+    const realTarget = path.resolve(realExisting, ...missing);
+    const realRelative = path.relative(realRoot, realTarget);
+    if (realRelative === ".." || realRelative.startsWith(".." + path.sep) || path.isAbsolute(realRelative)) {
+      return null;
+    }
+    return realTarget;
   }
 
   handleExit(error) {
