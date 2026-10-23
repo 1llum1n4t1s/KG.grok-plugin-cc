@@ -1,6 +1,28 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import process from "node:process";
+import { performance } from "node:perf_hooks";
+
+// 通常の Windows CIM 照会（約 0.5～0.8 秒）に余裕を持たせ、再試行で期限を延ばさない。
+const PROCESS_LOOKUP_TIMEOUT_MS = 3000;
+const PROCESS_EXIT_TIMEOUT_MS = 5000;
+
+function withProcessLookupDeadline(options, budget) {
+  return {
+    ...options,
+    processLookupDeadline: Math.min(options.processLookupDeadline ?? Infinity, performance.now() + budget)
+  };
+}
+
+function remainingProcessLookupTime(options) {
+  return Math.max(0, options.processLookupDeadline - performance.now());
+}
+
+function runProcessLookup(run, command, args, options) {
+  const remaining = remainingProcessLookupTime(options);
+  if (remaining <= 0) return null;
+  return run(command, args, { shell: false, timeout: Math.max(1, Math.ceil(remaining)) });
+}
 
 /**
  * shell 経由で渡す 1 語をエスケープする。
@@ -43,6 +65,7 @@ export function runCommand(command, args = [], options = {}) {
     encoding: "utf8",
     input: options.input,
     maxBuffer: options.maxBuffer,
+    timeout: options.timeout,
     stdio: options.stdio ?? "pipe",
     shell,
     windowsHide: true
@@ -101,7 +124,9 @@ export function terminateProcessTree(pid, options = {}) {
   if (platform === "win32") {
     const result = runCommandImpl("taskkill", ["/PID", String(pid), "/T", "/F"], {
       cwd: options.cwd,
-      env: options.env
+      env: options.env,
+      // CMD は長い PATH を失うことがあるため、OS の実行ファイルは直接起動する。
+      shell: false
     });
 
     if (!result.error && result.status === 0) {
@@ -156,20 +181,21 @@ export function processCommandContains(pid, marker, options = {}) {
   }
   const platform = options.platform ?? process.platform;
   const runCommandImpl = options.runCommandImpl ?? runCommand;
+  const lookupOptions = withProcessLookupDeadline(options, PROCESS_LOOKUP_TIMEOUT_MS);
   try {
     if (platform === "linux") {
       const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ");
       return cmdline.includes(marker);
     }
     const result = platform === "win32"
-      ? runCommandImpl("powershell.exe", [
+      ? runProcessLookup(runCommandImpl, "powershell.exe", [
           "-NoProfile",
           "-NonInteractive",
           "-Command",
           `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`
-        ], { shell: false })
-      : runCommandImpl("ps", ["-p", String(pid), "-o", "command="], { shell: false });
-    return !result.error && result.status === 0 && String(result.stdout).includes(marker);
+        ], lookupOptions)
+      : runProcessLookup(runCommandImpl, "ps", ["-p", String(pid), "-o", "command="], lookupOptions);
+    return !!result && !result.error && result.status === 0 && String(result.stdout).includes(marker);
   } catch {
     return false;
   }
@@ -181,6 +207,7 @@ export function getProcessSnapshot(pid, options = {}) {
   const platform = options.platform ?? process.platform;
   const readFile = options.readFileImpl ?? fs.readFileSync;
   const run = options.runCommandImpl ?? runCommand;
+  const lookupOptions = withProcessLookupDeadline(options, PROCESS_LOOKUP_TIMEOUT_MS);
   try {
     if (platform === "linux") {
       const stat = readFile(`/proc/${pid}/stat`, "utf8");
@@ -196,16 +223,16 @@ export function getProcessSnapshot(pid, options = {}) {
       // Windows PowerShell の既定出力は環境によって CP932 になる。
       // 日本語の依頼文を含む CommandLine を JSON として読むため UTF-8 に固定する。
       const script = `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if ($null -ne $p) { [pscustomobject]@{ startKey = $p.CreationDate.ToUniversalTime().ToString('o'); commandLine = $p.CommandLine } | ConvertTo-Json -Compress }`;
-      const result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { shell: false });
-      if (result.error || result.status !== 0 || !result.stdout.trim()) return null;
+      const result = runProcessLookup(run, "powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], lookupOptions);
+      if (!result || result.error || result.status !== 0 || !result.stdout.trim()) return null;
       const snapshot = JSON.parse(result.stdout);
       return typeof snapshot.startKey === "string" && typeof snapshot.commandLine === "string"
         ? snapshot
         : null;
     }
-    const start = run("ps", ["-p", String(pid), "-o", "lstart="], { shell: false });
-    const command = run("ps", ["-p", String(pid), "-o", "command="], { shell: false });
-    return !start.error && !command.error && start.status === 0 && command.status === 0 &&
+    const start = runProcessLookup(run, "ps", ["-p", String(pid), "-o", "lstart="], lookupOptions);
+    const command = runProcessLookup(run, "ps", ["-p", String(pid), "-o", "command="], lookupOptions);
+    return start && command && !start.error && !command.error && start.status === 0 && command.status === 0 &&
       start.stdout.trim() && command.stdout.trim()
       ? { startKey: start.stdout.trim(), commandLine: command.stdout.trim() }
       : null;
@@ -242,15 +269,17 @@ export function inspectTrackedJobProcess(pid, startKey, options = {}) {
     }
   });
   const sleep = options.sleepImpl ?? ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+  const lookupOptions = withProcessLookupDeadline(options, PROCESS_LOOKUP_TIMEOUT_MS);
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const snapshot = readSnapshot(pid, options);
+    if (remainingProcessLookupTime(lookupOptions) <= 0) break;
+    const snapshot = readSnapshot(pid, lookupOptions);
     if (snapshot) {
       return snapshot.startKey === startKey &&
         /(?:^|[\s\\/])grok-companion\.mjs(?=$|[\s"'])/i.test(snapshot.commandLine)
         ? "match"
         : "mismatch";
     }
-    if (attempt < 2) sleep(100);
+    if (attempt < 2) sleep(Math.min(100, remainingProcessLookupTime(lookupOptions)));
   }
   return processExists(pid) ? "unavailable" : "absent";
 }
@@ -259,10 +288,12 @@ export function inspectTrackedJobProcess(pid, startKey, options = {}) {
 export function waitForTrackedJobExit(pid, startKey, options = {}) {
   const inspect = options.inspectImpl ?? inspectTrackedJobProcess;
   const sleep = options.sleepImpl ?? ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+  const lookupOptions = withProcessLookupDeadline(options, PROCESS_EXIT_TIMEOUT_MS);
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const identity = inspect(pid, startKey, options);
+    if (remainingProcessLookupTime(lookupOptions) <= 0) break;
+    const identity = inspect(pid, startKey, lookupOptions);
     if (identity === "absent" || identity === "mismatch") return true;
-    if (attempt < 9) sleep(100);
+    if (attempt < 9) sleep(Math.min(100, remainingProcessLookupTime(lookupOptions)));
   }
   return false;
 }
