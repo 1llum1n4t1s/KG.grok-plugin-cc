@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.23
+
+- Aligned Claude Code and Codex X search instructions to avoid a default 30-day limit unless a date range is requested.
+- Checked resolved link targets for ACP file reads and writes to prevent access outside the workspace.
+- Clarified Codex skill descriptions so users can choose the appropriate workflow.
+
 ## 1.0.22
 
 - Preserved equals signs in inline option values, including prompt-file paths and model IDs.
