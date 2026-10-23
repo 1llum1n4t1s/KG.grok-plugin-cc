@@ -164,7 +164,7 @@ should change; it does not change it.
 In read-only runs, `Test-Path -LiteralPath` is also allowed for one path inside the repository,
 including an absolute path. Paths outside the repository and paths through links that leave it
 are denied.
-The built-in `WebFetch` request is allowed once for an HTTP(S) URL without credentials, so
+Each built-in `WebFetch` request for an HTTP(S) URL without credentials receives one-time permission, so
 read-only rescue and reviews can consult public sources. Extra input fields remain denied.
 
 Reviews and audits cover all review perspectives in one Grok session; subagent delegation is
@@ -176,8 +176,8 @@ an incomplete review remains marked as incomplete when displayed again.
 
 Every Grok command runs in the foreground in both Claude Code and Codex. This keeps command output,
 the exact Grok job ID, cancellation, and stored results under one consistent lifecycle. The old
-`--wait` flag is accepted as a no-op for compatibility; `--background` is rejected instead of
-silently changing execution behavior.
+`--wait` flag on review, audit, and task execution is accepted as a no-op for compatibility;
+`--background` is rejected. `status <job-id> --wait` still waits for that job to finish.
 
 Codex skills use the companion's buffered JSON mode, so long-running reviews, audits, delegated
 tasks, and X searches stay quiet in chat until Grok finishes. Detailed progress remains available
@@ -349,9 +349,9 @@ No. It uses whatever Grok Build on your machine is already signed in with.
 
 ### Does it use my existing Grok configuration?
 
-Yes, with one exception: reviews start with no MCP servers attached, so your global MCP setup does
-not get loaded into every review and inflate the token count. Delegated `/grok:rescue` runs use
-your normal configuration.
+It uses your existing Grok Build authentication. Reviews and delegated `/grok:rescue` tasks
+both request sessions with an empty MCP server list, including when resuming a task. The plugin
+does not attach your global MCP servers to these sessions.
 
 ### Is `/grok:review` really read-only?
 
@@ -536,7 +536,7 @@ API キーはブラウザの認証情報より優先されます。
 変更すべき内容を報告しますが、実際の変更は行いません。
 読み取り専用の実行では、リポジトリ内の単一パスに対する `Test-Path -LiteralPath` も、
 絶対パスを含めて許可します。リポジトリ外のパスと、リンクを経由して外へ出るパスは拒否します。
-組み込みの `WebFetch` は、認証情報を含まない HTTP(S) URL の取得に限って一度だけ許可し、
+組み込みの `WebFetch` は、認証情報を含まない HTTP(S) URL の取得要求ごとに一回限りの権限を許可し、
 読み取り専用のレスキューやレビューでも公開資料を参照できます。追加の入力項目は拒否します。
 
 レビューと監査は、一つの Grok セッションで各観点を調査します。読み取り専用の実行環境では
@@ -548,8 +548,9 @@ API キーはブラウザの認証情報より優先されます。
 
 Claude Code と Codex のどちらでも、すべての Grok コマンドをフォアグラウンドで実行します。
 コマンド出力、正確な Grok ジョブ ID、キャンセル、保存済み結果を一つの一貫したライフサイクルで
-扱えるためです。旧 `--wait` は互換性のため何もしないフラグとして受け付けますが、`--background` は
-実行方法を暗黙に変えず、明確なエラーとして拒否します。
+扱えるためです。レビュー・監査・タスク実行の旧 `--wait` は互換性のため何もしないフラグとして
+受け付けますが、`--background` はエラーとして拒否します。`status <job-id> --wait` は引き続き
+対象ジョブの完了を待ちます。
 
 Codex向けスキルはコンパニオンのバッファ済みJSONモードを使用するため、長時間のレビュー、監査、
 委任タスク、X検索ではGrokの完了までチャットへ途中経過を流しません。詳細な進捗は保存済みジョブログと
@@ -722,9 +723,9 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 
 ### 既存の Grok 設定は使用されますか？
 
-はい。ただし 1 つ例外があります。レビューは MCP サーバーを接続せずに開始されるため、グローバルの
-MCP 設定がレビューのたびに読み込まれてトークン数を増やすことはありません。委任された
-`/grok:rescue` の実行では通常の設定が使用されます。
+既存の Grok Build の認証を使用します。レビューと委任された `/grok:rescue` タスクは、
+タスクを再開する場合も含め、空の MCP サーバー一覧でセッションを要求します。
+プラグインはこれらのセッションにグローバルの MCP サーバーを接続しません。
 
 ### `/grok:review` は本当に読み取り専用ですか？
 
