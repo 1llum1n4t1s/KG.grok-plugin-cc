@@ -1,20 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
 const processModule = new URL("../plugins/grok/scripts/lib/process.mjs", import.meta.url).href;
 const trackedJobsModule = new URL("../plugins/grok/scripts/lib/tracked-jobs.mjs", import.meta.url).href;
+const stateModule = new URL("../plugins/grok/scripts/lib/state.mjs", import.meta.url).href;
 
 // 外側の実プロセスにも watchdog を置く。故障注入の子は自力でも有限時間で終了する。
-function runWorker(source, timeout) {
+function runWorker(source, timeout, options = {}) {
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
     import assert from "node:assert/strict";
     import { performance } from "node:perf_hooks";
     import { getProcessSnapshot, inspectTrackedJobProcess, processCommandContains,
       runCommand, terminateProcessTree, waitForTrackedJobExit } from ${JSON.stringify(processModule)};
     ${source}
-  `], { encoding: "utf8", shell: false, windowsHide: true, timeout });
+  `], { ...options, encoding: "utf8", shell: false, windowsHide: true, timeout });
   assert.equal(result.error, undefined, result.stderr || result.error?.message);
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
@@ -93,11 +97,11 @@ test("identity retries and exit waiting share their real elapsed-time budgets", 
   const effect = runWorker(`${stalledCommand}
     const options = { platform: "win32", runCommandImpl: runStalled };
     let begin = performance.now();
-    const identity = inspectTrackedJobProcess(process.pid, "unverified-start", options);
+    const identity = inspectTrackedJobProcess(process.pid, "win32-filetime:133000000000000000", options);
     const identityElapsed = performance.now() - begin;
     const identityCalls = calls.splice(0);
     begin = performance.now();
-    const exited = waitForTrackedJobExit(process.pid, "unverified-start", options);
+    const exited = waitForTrackedJobExit(process.pid, "win32-filetime:133000000000000000", options);
     console.log(JSON.stringify({ identity, identityElapsed, identityCalls,
       exited, exitElapsed: performance.now() - begin, exitCalls: calls }));
   `, 12000);
@@ -114,21 +118,42 @@ test("identity retries and exit waiting share their real elapsed-time budgets", 
   console.log(JSON.stringify({ scenario: "cumulative-budgets", ...effect }));
 });
 
-test("tracked startup refuses to register a job after three bounded real lookup failures", () => {
+test("tracked startup refuses to start a job after three bounded real lookup failures", t => {
+  const parent = fs.realpathSync.native(os.tmpdir());
+  const root = fs.mkdtempSync(path.join(parent, "process-deadline-"));
+  const created = fs.lstatSync(root);
+  const workspace = path.join(root, "workspace"), data = path.join(root, "data");
+  fs.mkdirSync(workspace); fs.mkdirSync(data);
+  t.after(() => {
+    const current = fs.lstatSync(root);
+    assert.equal(path.dirname(root), parent);
+    assert.equal(fs.realpathSync.native(root), root);
+    assert.ok(current.isDirectory() && !current.isSymbolicLink());
+    assert.equal(current.dev, created.dev); assert.equal(current.ino, created.ino);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   const effect = runWorker(`${stalledCommand}
     const { runTrackedJob } = await import(${JSON.stringify(trackedJobsModule)});
+    const { migrateStateLock, resolveStateDir, resolveJobFile, readJobFile } = await import(${JSON.stringify(stateModule)});
+    const workspaceRoot = process.cwd();
+    migrateStateLock(workspaceRoot, { offlineConfirmed: true, localOnly: true,
+      expectedStateDir: resolveStateDir(workspaceRoot) });
+    const job = { id: "deadline-fixture", workspaceRoot, jobClass: "review", title: "Review" };
     const begin = performance.now();
     let error;
     try {
-      await runTrackedJob({}, () => assert.fail("unverified job must not start"), {
+      await runTrackedJob(job, () => assert.fail("unverified job must not start"), {
         getProcessSnapshotImpl(pid) {
           return getProcessSnapshot(pid, { platform: "win32", runCommandImpl: runStalled });
         }
       });
     } catch (failure) { error = failure.message; }
-    console.log(JSON.stringify({ error, elapsed: performance.now() - begin, calls }));
-  `, 12500);
+    const elapsed = performance.now() - begin;
+    const status = process.platform === "win32" ? null : readJobFile(resolveJobFile(workspaceRoot, job.id)).status;
+    console.log(JSON.stringify({ error, elapsed, calls, status }));
+  `, 20000, { cwd: workspace, env: { ...process.env, CLAUDE_PLUGIN_DATA: data, PLUGIN_DATA: "" } });
   assert.match(effect.error, /Cannot verify the Grok job process identity/);
+  if (process.platform !== "win32") assert.equal(effect.status, "queued");
   assert.equal(effect.calls.length, 3);
   assert.ok(effect.elapsed < 11000, JSON.stringify(effect));
   for (const call of effect.calls) assert.equal(call.error, "ETIMEDOUT");

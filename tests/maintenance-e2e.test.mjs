@@ -8,11 +8,11 @@ import test from "node:test";
 
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
 import { initGitRepo, makeTempDir, removeTempFixture, run } from "./helpers.mjs";
-import { resolveStateFile, resolveJobFile, resolveJobLogFile } from "../plugins/grok/scripts/lib/state.mjs";
+import { migrateStateLock, resolveStateDir, resolveStateFile, resolveJobFile, resolveJobLogFile } from "../plugins/grok/scripts/lib/state.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
 
-function workspace(t, scenario = { replies: [{ text: "DONE" }] }) {
+function workspace(t, scenario = { replies: [{ text: "DONE" }] }, { stateful = false } = {}) {
   const root = makeTempDir("grok-maintenance-");
   const fake = installFakeGrok(scenario);
   const repo = path.join(root, "repo");
@@ -24,12 +24,23 @@ function workspace(t, scenario = { replies: [{ text: "DONE" }] }) {
     removeTempFixture(root, { recursive: true, force: true });
     removeTempFixture(fake.binDir, { recursive: true, force: true });
   });
+  if (stateful && ["win32", "linux", "darwin"].includes(process.platform)) {
+    const previous = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = env.CLAUDE_PLUGIN_DATA;
+    try {
+      // このfixtureだけの未使用stateを、子CLIと同じdata環境で明示移行する。
+      migrateStateLock(repo, { offlineConfirmed: true, localOnly: true, expectedStateDir: resolveStateDir(repo) });
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+      else process.env.CLAUDE_PLUGIN_DATA = previous;
+    }
+  }
   return { root, fake, repo, env, command };
 }
 
 test("task preserves equals signs in inline prompt-file paths and model values", (t) => {
   const model = "test=model==";
-  const w = workspace(t, { availableModels: [model], replies: [{ text: "DONE" }] });
+  const w = workspace(t, { availableModels: [model], replies: [{ text: "DONE" }] }, { stateful: true });
   const promptFile = path.join(w.repo, "request = original==.txt");
   const prompt = "Read the original request.\nKeep --write as text and preserve = signs.";
   fs.writeFileSync(promptFile, prompt, "utf8");
@@ -45,7 +56,7 @@ test("task preserves equals signs in inline prompt-file paths and model values",
 });
 
 test("completed history keeps queued, running and pending-cancellation jobs available", (t) => {
-  const w = workspace(t);
+  const w = workspace(t, undefined, { stateful: true });
   w.env.GROK_COMPANION_SESSION_ID = "maintenance-history";
   const previous = process.env.CLAUDE_PLUGIN_DATA;
   process.env.CLAUDE_PLUGIN_DATA = w.env.CLAUDE_PLUGIN_DATA;
@@ -79,8 +90,15 @@ test("completed history keeps queued, running and pending-cancellation jobs avai
     assert.equal(status.status, 0, status.stderr);
     assert.ok(JSON.parse(status.stdout).running.some((job) => job.id === "old-pending"));
     const cancelled = w.command(["cancel", "--json", "old-pending"]);
-    assert.equal(cancelled.status, 0, cancelled.stderr);
-    assert.equal(JSON.parse(cancelled.stdout).status, "cancelled");
+    assert.equal(cancelled.status, 1, cancelled.stderr);
+    assert.match(cancelled.stderr, /cancellation remains pending/i);
+    const retained = JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.find(job => job.id === "old-pending");
+    assert.equal(retained.status, "cancelled");
+    assert.equal(retained.terminationPending, true);
+    const stored = JSON.parse(fs.readFileSync(resolveJobFile(w.repo, retained.id), "utf8"));
+    assert.equal(stored.status, "cancelled");
+    assert.equal(stored.terminationPending, true);
+    assert.equal(stored.phase, "termination-pending");
   } finally {
     if (previous === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
     else process.env.CLAUDE_PLUGIN_DATA = previous;
@@ -88,7 +106,7 @@ test("completed history keeps queued, running and pending-cancellation jobs avai
 });
 
 test("cancel stops a held task even when its log path is a directory", async (t) => {
-  const w = workspace(t, { holdPrompt: true });
+  const w = workspace(t, { holdPrompt: true }, { stateful: true });
   const child = spawn(process.execPath, [SCRIPT, "task", "--json", "--fresh", "hold this task"], {
     cwd: w.repo, env: w.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true
   });
@@ -140,15 +158,64 @@ test("cancel stops a held task even when its log path is a directory", async (t)
 });
 
 test("setup performs each Grok availability probe only once", (t) => {
-  const w = workspace(t);
+  const w = workspace(t, undefined, { stateful: true });
   const invocations = path.join(w.root, "invocations.jsonl");
   w.env.FAKE_GROK_INVOCATIONS = invocations;
   const result = w.command(["setup", "--json"]);
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.ready, true);
+  assert.equal(payload.ready, true, JSON.stringify(payload.auth));
   assert.deepEqual(payload.grok, payload.auth.availability);
   const calls = fs.readFileSync(invocations, "utf8").trim().split("\n").map(JSON.parse);
   assert.equal(calls.filter((args) => args[0] === "--version").length, 1);
   assert.equal(calls.filter((args) => args.join(" ") === "agent stdio --help").length, 1);
+});
+
+test("setup distinguishes unavailable authentication check from rejected credentials", (t) => {
+  const unconfirmed = workspace(t);
+  const previous = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = unconfirmed.env.CLAUDE_PLUGIN_DATA;
+  try {
+    const stateFile = resolveStateFile(unconfirmed.repo);
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+    fs.writeFileSync(stateFile, JSON.stringify({ version: 1, config: {}, jobs: [] }));
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = previous;
+  }
+  for (const args of [["setup", "--json"], ["setup"]]) {
+    const result = unconfirmed.command(args);
+    assert.equal(result.status, 0, result.stderr);
+    if (args.includes("--json")) {
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.ready, false);
+      assert.equal(report.auth.reason, "connect-failed");
+      assert.match(report.auth.detail, /explicit offline migration/);
+      assert.doesNotMatch(report.nextSteps.join("\n"), /grok login/);
+    } else {
+      assert.match(result.stdout, /auth:.*could not be checked/i);
+      assert.match(result.stdout, /explicit offline migration/);
+      assert.doesNotMatch(result.stdout, /not signed in|grok login/i);
+    }
+  }
+
+  for (const [scenario, reason] of [[{ authError: true }, "not-authenticated"], [{ sessionError: "Workspace unavailable" }, "check-failed"]]) {
+    const w = workspace(t, scenario, { stateful: true });
+    const json = w.command(["setup", "--json"]);
+    assert.equal(json.status, 0, json.stderr);
+    const report = JSON.parse(json.stdout);
+    assert.equal(report.ready, false);
+    assert.equal(report.auth.reason, reason);
+    const text = w.command(["setup"]);
+    assert.equal(text.status, 0, text.stderr);
+    if (reason === "not-authenticated") {
+      assert.match(report.nextSteps.join("\n"), /grok login/);
+      assert.match(text.stdout, /not signed in/);
+      assert.match(text.stdout, /grok login/);
+    } else {
+      assert.doesNotMatch(report.nextSteps.join("\n"), /grok login/);
+      assert.match(text.stdout, /auth:.*could not be checked/i);
+      assert.match(text.stdout, /Workspace unavailable/);
+      assert.doesNotMatch(text.stdout, /not signed in|grok login/i);
+    }
+  }
 });

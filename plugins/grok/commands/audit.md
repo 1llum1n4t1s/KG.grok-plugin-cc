@@ -22,7 +22,7 @@ Execution rules:
 
 Argument handling:
 - Preserve the user's arguments exactly.
-- Unless the arguments already contain `--language`, append `--language <BCP 47 tag>` for the conversation language.
+- Unless the flags before the focus already contain `--language`, prepend `--language <BCP 47 tag>` for the conversation language to the raw argument string. Use that updated string in place of `$ARGUMENTS` below. Keep all flags before the focus text; a `--language` mentioned inside the focus is literal focus text.
 - Do not add audit criteria or rewrite the user's focus.
 - A focus is optional. Without one, the companion applies its built-in risk-directed deep-audit focus; with one, it narrows the audit to that subsystem or concern.
 - If the user wants only current changes reviewed, point them at `/grok:review`.

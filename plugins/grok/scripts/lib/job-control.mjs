@@ -2,8 +2,13 @@ import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./grok.mjs";
 import { isActiveJob, looksLikeVerificationCommand } from "./job-status.mjs";
-import { compareUpdatedAtNewestFirst, getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
-import { resolveSessionIdWithFallback } from "./tracked-jobs.mjs";
+import { getProcessSnapshot, inspectTrackedJobProcess } from "./process.mjs";
+import { assertDarwinPruneContext, assertLinuxHistoryContext, compareUpdatedAtNewestFirst, getConfig, listJobs, readJobFile, resolveJobFile, resolveStateDir, updateState, withStateLockMigrationScope, writeJobFile } from "./state.mjs";
+import { darwinLeaseDirectory, resolveSessionIdWithFallback, sameDarwinLease, sameLinuxLease } from "./tracked-jobs.mjs";
+import { withAvailableDarwinLease } from "./darwin-worker-lease.mjs";
+import { verifyPublishedDarwinLeaseRecords } from "./darwin-lease-sweep.mjs";
+import { withAvailableLinuxLease } from "./linux-worker-lease.mjs";
+import { verifyPublishedLinuxLeaseRecords } from "./linux-lease-ledger.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
@@ -191,12 +196,20 @@ export function enrichJob(job, options = {}) {
   };
 }
 
-export function readStoredJob(workspaceRoot, jobId) {
-  const jobFile = resolveJobFile(workspaceRoot, jobId);
+export function readStoredJob(workspaceRoot, jobId, context = undefined) {
+  if (context) {
+    if (process.platform === "darwin") assertDarwinPruneContext(context);
+    else if (process.platform === "linux") assertLinuxHistoryContext(context);
+    else context.check();
+  }
+  const jobFile = resolveJobFile(workspaceRoot, jobId, context?.stateDir);
   if (!fs.existsSync(jobFile)) {
+    context?.check();
     return null;
   }
-  return readJobFile(jobFile);
+  const result = readJobFile(jobFile);
+  context?.check();
+  return result;
 }
 
 /**
@@ -207,32 +220,149 @@ export function readStoredJob(workspaceRoot, jobId) {
 const JOB_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const STALE_QUEUED_JOB_MS = 60_000;
 
-function processExists(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
+function validProcessStartKey(startKey) {
+  if (typeof startKey !== "string") return false;
+  if (process.platform === "win32") return /^win32-filetime:[1-9]\d{16,18}$/.test(startKey);
+  if (process.platform === "linux") return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:\d+$/i.test(startKey);
+  if (process.platform === "darwin") {
+    const match = /^darwin-lstart-utc-v1:(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}([1-9]|[12]\d|3[01]) ((?:[01]\d|2[0-3])):([0-5]\d):([0-5]\d) (\d{4})$/.exec(startKey);
+    if (!match) return false;
+    const [, weekday, month, day, hour, minute, second, year] = match;
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const date = new Date(Date.UTC(Number(year), months.indexOf(month), Number(day), Number(hour), Number(minute), Number(second)));
+    return Number(year) >= 1970 && date.getUTCFullYear() === Number(year) && date.getUTCMonth() === months.indexOf(month) &&
+      date.getUTCDate() === Number(day) && ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getUTCDay()] === weekday;
   }
+  return false;
 }
 
 function reconcileOrphanedJobs(workspaceRoot) {
   const now = Date.now();
-  for (const job of listJobs(workspaceRoot)) {
-    const queuedTooLong = job.status === "queued" && now - Date.parse(job.createdAt ?? job.updatedAt ?? "") > STALE_QUEUED_JOB_MS;
-    const runningProcessExited = job.status === "running" && Number.isInteger(job.pid) && !processExists(job.pid);
-    if (!queuedTooLong && !runningProcessExited) continue;
+  const candidates = listJobs(workspaceRoot).filter(candidate => candidate.status === "queued" || candidate.status === "running");
+  if (!candidates.length) return;
+  withStateLockMigrationScope(resolveStateDir(workspaceRoot), check => {
+    for (const candidate of candidates) {
+      check();
+      const candidateDetail = readStoredJob(workspaceRoot, candidate.id);
+      if (process.platform === "linux" && (!candidateDetail || candidate.epoch !== check.epoch ||
+          candidateDetail.id !== candidate.id || candidateDetail.epoch !== check.epoch)) continue;
+      if ((process.platform === "darwin" || process.platform === "linux") && (candidate.workerLease || candidateDetail?.workerLease)) {
+        const sameLease = process.platform === "linux" ? sameLinuxLease : sameDarwinLease;
+        const unconfirmed = {};
+        try {
+          updateState(workspaceRoot, (state, context) => {
+            const indexed = state.jobs.find(entry => entry.id === candidate.id);
+            const stored = readStoredJob(workspaceRoot, candidate.id, context);
+            const matchingTurnEvidence = ["grokPromptState", "grokSessionId", "grokTransport", "grokBrokerGeneration",
+              "grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey"]
+              .every(key => (indexed[key] ?? null) === (stored[key] ?? null));
+            const terminationPending = !matchingTurnEvidence || indexed.terminationPending === true || stored.terminationPending === true ||
+              (indexed.grokPromptState !== "not-sent" && indexed.grokPromptState !== "terminal");
+            const patch = { status: "failed", phase: terminationPending ? "termination-pending" : "failed", terminationPending,
+              pid: null, completedAt: new Date(now).toISOString(), errorMessage: "Job process exited without recording a final result.",
+              workerStopConfirmed: true, workerStopProof: process.platform === "linux" ? "linux-lease-released" : "darwin-lease-released", workerStopLeaseId: indexed.workerLease.id,
+              workerStopProcessStartKey: indexed.processStartKey ?? null };
+            context.check();
+            writeJobFile(workspaceRoot, indexed.id, { ...stored, ...patch }, context);
+            Object.assign(indexed, patch);
+          }, { aroundCommit: (state, context, commit) => {
+            const indexed = state.jobs.find(entry => entry.id === candidate.id);
+            const stored = readStoredJob(workspaceRoot, candidate.id, context);
+            if (indexed && stored && indexed.epoch === context.epoch && stored.epoch === context.epoch &&
+                indexed.createdAt === stored.createdAt && indexed.claimToken && indexed.claimToken === stored.claimToken &&
+                sameLease(indexed.workerLease, stored.workerLease) &&
+                (indexed.status !== stored.status || indexed.pid !== stored.pid)) {
+              throw new Error(`Job ${candidate.id} has partially saved worker state; both records were preserved. Stop all runtimes and inspect the records before offline recovery.`);
+            }
+            const same = record => record && record.id === candidate.id && record.createdAt === candidate.createdAt &&
+              record.startedAt === candidate.startedAt && record.status === candidate.status && record.pid === candidate.pid &&
+              record.processStartKey === candidate.processStartKey && record.epoch === context.epoch &&
+              record.claimToken && record.claimToken === candidate.claimToken && sameLease(record.workerLease, candidate.workerLease);
+            if (context.epoch !== check.epoch || ![indexed, stored].every(same) || !["queued", "running"].includes(indexed.status)) throw unconfirmed;
+            if (process.platform === "linux") {
+              const observedLease = withAvailableLinuxLease(indexed.workerLease, context, () => {
+                verifyPublishedLinuxLeaseRecords({ context, indexed, stored, lease: indexed.workerLease });
+                context.check();
+                return commit();
+              });
+              if (observedLease.status !== "available") throw unconfirmed;
+              return observedLease.value;
+            }
+            const leaseContext = darwinLeaseDirectory(context);
+            if (leaseContext.expectedDirectoryIdentity.dev !== indexed.workerLease.directoryDev ||
+                leaseContext.expectedDirectoryIdentity.ino !== indexed.workerLease.directoryIno) throw unconfirmed;
+            const observedLease = withAvailableDarwinLease(indexed.workerLease, leaseContext, () => {
+              verifyPublishedDarwinLeaseRecords({ context, indexed, stored, lease: indexed.workerLease });
+              context.check();
+              return commit();
+            });
+            if (observedLease.status !== "available") throw unconfirmed;
+            return observedLease.value;
+          } });
+        } catch (error) { if (error !== unconfirmed) throw error; }
+        continue;
+      }
+      // 旧世代の lease 不在は停止の証拠にならない。
+      if (["linux", "darwin"].includes(process.platform)) continue;
+      if (process.platform === "darwin" && (!candidateDetail || candidateDetail.id !== candidate.id ||
+          candidate.createdAt !== candidateDetail.createdAt || candidate.startedAt !== candidateDetail.startedAt ||
+          candidate.status !== candidateDetail.status || candidate.pid !== candidateDetail.pid ||
+          candidate.processStartKey !== candidateDetail.processStartKey)) continue;
+      const observed = { ...candidate, ...candidateDetail };
+      const queuedCandidate = process.platform !== "darwin" && observed.status === "queued" && now - Date.parse(observed.createdAt ?? observed.updatedAt ?? "") > STALE_QUEUED_JOB_MS;
+      let exited = false;
+      if (observed.status === "running" && Number.isInteger(observed.pid) && validProcessStartKey(observed.processStartKey)) {
+        if (process.platform === "darwin") {
+          try { process.kill(observed.pid, 0); } catch (error) { exited = error?.code === "ESRCH"; }
+        } else {
+          const identity = inspectTrackedJobProcess(observed.pid, observed.processStartKey, { getProcessSnapshotImpl: (pid, options) => {
+            check();
+            const snapshot = getProcessSnapshot(pid, options);
+            return validProcessStartKey(snapshot?.startKey) ? snapshot : null;
+          } });
+          exited = identity === "absent" || identity === "mismatch";
+        }
+      }
+      if (!queuedCandidate && !exited) continue;
+      check();
+      const staleEpoch = {};
+      try { updateState(workspaceRoot, (state, context) => {
+        const indexed = state.jobs.find((entry) => entry.id === candidate.id);
+        if (!indexed) return;
+        const stored = readStoredJob(workspaceRoot, candidate.id, context);
+        if (process.platform === "linux" && (context.epoch !== check.epoch || indexed.epoch !== context.epoch ||
+            !stored || stored.id !== indexed.id || stored.epoch !== context.epoch)) throw staleEpoch;
+        if (process.platform === "darwin" && (context.epoch !== check.epoch || !stored || indexed.workerLease || stored.workerLease ||
+            indexed.id !== stored.id || indexed.createdAt !== stored.createdAt || indexed.startedAt !== stored.startedAt ||
+            indexed.status !== stored.status || indexed.pid !== stored.pid || indexed.processStartKey !== stored.processStartKey)) throw staleEpoch;
+        const job = { ...indexed, ...stored };
+        const queuedTooLong = process.platform !== "darwin" && job.status === "queued" && now - Date.parse(job.createdAt ?? job.updatedAt ?? "") > STALE_QUEUED_JOB_MS;
+        // ロック外の照会と確定の間に、別世代や完了状態が記録された場合は触らない。
+        const sameWorker = record => record && record.id === observed.id && record.createdAt === observed.createdAt &&
+          record.status === "running" && record.pid === observed.pid && record.processStartKey === observed.processStartKey;
+        const runningProcessExited = exited && sameWorker(indexed) && (!stored || sameWorker(stored));
+        if (!queuedTooLong && !runningProcessExited) return;
 
-    const completedAt = new Date(now).toISOString();
-    const errorMessage = queuedTooLong
-      ? "Job process did not start within 60 seconds."
-      : "Job process exited without recording a final result.";
-    const stored = readStoredJob(workspaceRoot, job.id) ?? job;
-    const failed = { ...stored, status: "failed", phase: "failed", pid: null, completedAt, errorMessage };
-    writeJobFile(workspaceRoot, job.id, failed);
-    upsertJob(workspaceRoot, { id: job.id, status: "failed", phase: "failed", pid: null, completedAt, errorMessage });
-  }
+        const completedAt = new Date(now).toISOString();
+        const errorMessage = queuedTooLong
+          ? "Job process did not start within 60 seconds."
+          : "Job process exited without recording a final result.";
+        // 索引と詳細のどちらかだけを採用すると、送信済みの turn を未送信と誤認し得る。
+        // 欠落・矛盾があるときは各原本を保ち、終了証拠が揃うまで保留する。
+        const matchingTurnEvidence = stored && ["grokPromptState", "grokSessionId", "grokTransport", "grokBrokerGeneration",
+          "grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey"]
+          .every(key => (indexed[key] ?? null) === (stored[key] ?? null));
+        const terminationPending = !matchingTurnEvidence || indexed.terminationPending === true || stored?.terminationPending === true ||
+          (job.grokPromptState !== "not-sent" && job.grokPromptState !== "terminal");
+        const patch = { status: "failed", phase: terminationPending ? "termination-pending" : "failed",
+          terminationPending, pid: null, completedAt, errorMessage };
+        if (stored) writeJobFile(workspaceRoot, job.id, { ...stored, ...patch }, context);
+        Object.assign(indexed, patch);
+      }); } catch (error) {
+        if (error !== staleEpoch) throw error;
+      }
+    }
+  });
 }
 
 /** @param {(job: any) => boolean} [predicate] */

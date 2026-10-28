@@ -36,6 +36,10 @@ export function validateReviewResultShape(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     return "Expected a top-level JSON object.";
   }
+  const resultFields = new Set(["verdict", "summary", "findings", "next_steps"]);
+  if (Object.keys(data).some((field) => !resultFields.has(field))) {
+    return "Unexpected property in review result.";
+  }
   if (typeof data.verdict !== "string" || !data.verdict.trim()) {
     return "Missing string `verdict`.";
   }
@@ -52,10 +56,16 @@ export function validateReviewResultShape(data) {
     return "Invalid `verdict`.";
   }
   const severities = new Set(["critical", "high", "medium", "low"]);
+  const findingFields = new Set([
+    "severity", "title", "body", "file", "line_start", "line_end", "confidence", "recommendation"
+  ]);
   for (let index = 0; index < data.findings.length; index += 1) {
     const finding = data.findings[index];
     if (!finding || typeof finding !== "object" || Array.isArray(finding)) {
       return `Finding ${index + 1} must be an object.`;
+    }
+    if (Object.keys(finding).some((field) => !findingFields.has(field))) {
+      return `Finding ${index + 1} has an unexpected property.`;
     }
     for (const field of ["title", "body", "file", "recommendation"]) {
       if (typeof finding[field] !== "string" || (field !== "recommendation" && !finding[field].trim())) {
@@ -266,6 +276,9 @@ function describeGrokAuth(auth) {
     const method = auth.method === "api-key" ? "XAI_API_KEY" : "browser login";
     return auth.currentModelId ? `signed in via ${method} (model: ${auth.currentModelId})` : `signed in via ${method}`;
   }
+  if (auth.reason === "connect-failed" || auth.reason === "check-failed") {
+    return auth.detail ? `could not be checked — ${auth.detail}` : "could not be checked";
+  }
   return auth.detail ? `not signed in — ${auth.detail}` : `not signed in (${auth.reason ?? "unknown reason"})`;
 }
 
@@ -303,17 +316,25 @@ export function renderSetupReport(report) {
 }
 
 export function renderReviewResult(parsedResult, meta) {
-  if (!parsedResult.parsed) {
+  const unfinished = parsedResult.status && parsedResult.status !== "completed";
+  const validationError = parsedResult.parsed ? validateReviewResultShape(parsedResult.parsed) : null;
+  if (!parsedResult.parsed || (unfinished && validationError)) {
     const lines = [
       `# Grok ${meta.reviewLabel}`,
       "",
-      "Grok did not return valid structured JSON.",
-      "",
-      `- Parse error: ${parsedResult.parseError}`
+      ...(unfinished
+        ? [
+            `Target: ${meta.targetLabel}`,
+            "Review incomplete; Grok stopped before returning a final structured result.",
+            `Stop reason: ${parsedResult.stopReason ?? "unknown"}`
+          ]
+        : ["Grok did not return valid structured JSON.", "", `- Parse error: ${parsedResult.parseError}`])
     ];
 
+    if (unfinished && parsedResult.error) lines.push(`Error: ${parsedResult.error}`);
+    appendPermissionDenials(lines, normalizePermissionDenials(parsedResult.permissionDenials));
     if (parsedResult.rawOutput) {
-      lines.push("", "Raw final message:", "", "```text", parsedResult.rawOutput, "```");
+      lines.push("", unfinished ? "Partial message:" : "Raw final message:", "", "```text", parsedResult.rawOutput, "```");
     }
 
     appendReasoningSection(lines, meta.reasoningSummary ?? parsedResult.reasoningSummary);
@@ -321,7 +342,6 @@ export function renderReviewResult(parsedResult, meta) {
     return `${lines.join("\n").trimEnd()}\n`;
   }
 
-  const validationError = validateReviewResultShape(parsedResult.parsed);
   if (validationError) {
     const lines = [
       `# Grok ${meta.reviewLabel}`,
@@ -332,6 +352,7 @@ export function renderReviewResult(parsedResult, meta) {
       `- Validation error: ${validationError}`
     ];
 
+    appendPermissionDenials(lines, normalizePermissionDenials(parsedResult.permissionDenials));
     if (parsedResult.rawOutput) {
       lines.push("", "Raw final message:", "", "```text", parsedResult.rawOutput, "```");
     }
@@ -356,6 +377,10 @@ export function renderReviewResult(parsedResult, meta) {
 
   if (data.verdict === "incomplete") {
     lines.push("Review incomplete; this result must not be treated as approval.", "");
+    if (parsedResult.status && parsedResult.status !== "completed") {
+      lines.push(`Stop reason: ${parsedResult.stopReason ?? "unknown"}`, "");
+      if (parsedResult.error) lines.push(`Error: ${parsedResult.error}`, "");
+    }
   }
 
   if (findings.length === 0) {
@@ -387,16 +412,20 @@ export function renderReviewResult(parsedResult, meta) {
 export function renderTaskResult(parsedResult, meta) {
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
   const permissionDenials = normalizePermissionDenials(parsedResult?.permissionDenials);
-  if (meta?.stopGate && permissionDenials.length > 0) {
+  if (meta?.stopGate && (permissionDenials.length > 0 || parsedResult?.incomplete)) {
     const lines = [
       "# Grok Stop Gate Review",
       "",
       "Review incomplete; this result must not be treated as approval."
     ];
+    if (parsedResult?.stopReason !== "end_turn") {
+      lines.push(`Stop reason: ${parsedResult?.stopReason ?? "unknown"}`);
+    }
+    if (parsedResult?.error) lines.push(`Error: ${parsedResult.error}`);
     appendPermissionDenials(lines, permissionDenials);
     if (rawOutput) {
-      lines.push("", "Raw final message:", "", "```text", rawOutput, "```");
-    } else {
+      lines.push("", parsedResult?.stopReason === "end_turn" ? "Raw final message:" : "Partial message:", "", "```text", rawOutput, "```");
+    } else if (!parsedResult?.error) {
       const message = String(parsedResult?.failureMessage ?? "").trim() || "Grok did not return a final message.";
       lines.push("", message);
     }
@@ -559,6 +588,11 @@ export function renderCancelReport(job) {
   }
   if (job.summary) {
     lines.push(`- Summary: ${job.summary}`);
+  }
+  if (Number.isSafeInteger(job.logWarningCount) && job.logWarningCount > 0) {
+    const truncated = Number.isSafeInteger(job.logWarningTruncatedCount) ? job.logWarningTruncatedCount : 0;
+    const omitted = Number.isSafeInteger(job.logWarningOmittedCount) ? job.logWarningOmittedCount : 0;
+    lines.push(`- Log warnings: ${job.logWarningCount} (${truncated} truncated, ${omitted} omitted). ${job.logWarningStderrUnavailable ? "Full diagnostics could not be written to stderr." : "Full diagnostics were written to stderr."}`);
   }
   lines.push("- Check `/grok:status` for the updated queue.");
 

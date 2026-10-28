@@ -22,7 +22,7 @@ Execution rules:
 
 Argument handling:
 - Preserve the user's arguments exactly.
-- Unless the arguments already contain `--language`, append `--language <BCP 47 tag>` for the language the user has been conversing in (for example `--language ja` for Japanese, `--language en` for English).
+- Unless the flags before the focus already contain `--language`, prepend `--language <BCP 47 tag>` for the conversation language to the raw argument string. Use that updated string in place of `$ARGUMENTS` below. Keep all flags before the focus text; a `--language` mentioned inside the focus is literal focus text.
 - Do not add extra review instructions or rewrite the user's intent.
 - Any text left after the flags is passed through as review focus. Preserve it verbatim.
 - If the user wants a deliberately skeptical, ship/no-ship framing, point them at `/grok:adversarial-review`.

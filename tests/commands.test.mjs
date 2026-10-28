@@ -13,6 +13,16 @@ function read(relativePath) {
   return fs.readFileSync(path.join(PLUGIN_ROOT, relativePath), "utf8");
 }
 
+test("conversation language precedes focus in both host entrypoints", () => {
+  for (const name of ["review", "adversarial-review", "audit"]) {
+    const claude = read(`commands/${name}.md`);
+    assert.match(claude, /prepend `--language <BCP 47 tag>`/);
+    assert.match(claude, /before.*focus/i);
+    assert.doesNotMatch(claude, /append `--language/);
+    assert.match(read(`skills/source-command-${name}/SKILL.md`), /before the focus text/);
+  }
+});
+
 function listCommands() {
   return fs
     .readdirSync(path.join(PLUGIN_ROOT, "commands"))
@@ -264,8 +274,8 @@ test("hooks keep session lifecycle cleanup and stop gating wired", () => {
   assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
   assert.match(hooks.hooks.Stop[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
   assert.equal(hooks.hooks.SessionStart[0].hooks[0].timeout, 5);
-  assert.equal(hooks.hooks.SessionEnd[0].hooks[0].timeout, 3);
-  assert.equal(hooks.hooks.UserPromptSubmit[0].hooks[0].timeout, 10);
+  assert.equal(hooks.hooks.SessionEnd[0].hooks[0].timeout, 5);
+  assert.equal(hooks.hooks.UserPromptSubmit[0].hooks[0].timeout, 60);
   assert.equal(hooks.hooks.Stop[0].hooks[0].timeout, 900);
 });
 

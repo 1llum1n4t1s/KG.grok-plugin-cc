@@ -46,8 +46,12 @@ for (const endingHost of ['claude', 'codex']) {
     // 同じワークスペース・セッションID・ジョブIDでも、各インストールの保存先は独立する。
     const results = await Promise.all(hosts.map(host => {
       const moduleUrl = pathToFileURL(path.join(host.install, 'scripts/lib/state.mjs')).href;
-      // ホスト分離を検証する20件の初期状態は、一度の保存で用意する。
-      const code = `import { updateState, resolveStateDir } from ${JSON.stringify(moduleUrl)}; updateState(process.cwd(), state => { for(let i=0;i<20;i++) { const timestamp = new Date().toISOString(); state.jobs.unshift({createdAt:timestamp,updatedAt:timestamp,id:'job-'+i,sessionId:'same-session-id',status:'running',owner:${JSON.stringify(host.name)}}); } }); console.log(resolveStateDir(process.cwd()));`;
+      // 終了済み20件と停止証拠のない1件を、各ホストの個別ファイルにも保存する。
+      const code = `import { migrateStateLock, updateState, resolveStateDir, writeJobFile } from ${JSON.stringify(moduleUrl)};
+        if (['win32', 'linux', 'darwin'].includes(process.platform)) migrateStateLock(process.cwd(), {
+          offlineConfirmed: true, localOnly: true, expectedStateDir: resolveStateDir(process.cwd())
+        });
+        updateState(process.cwd(), state => { for(let i=0;i<21;i++) { const timestamp = new Date().toISOString(); const job = {createdAt:timestamp,updatedAt:timestamp,id:'job-'+i,sessionId:'same-session-id',status:i<20?'completed':'running',owner:${JSON.stringify(host.name)}}; state.jobs.unshift(job); writeJobFile(process.cwd(), job.id, job); } }); console.log(resolveStateDir(process.cwd()));`;
       return execute(process.execPath, ['--input-type=module', '-e', code], host.env, workspace);
     }));
     const dirs = results.map(result => result.stdout.trim());
@@ -55,7 +59,7 @@ for (const endingHost of ['claude', 'codex']) {
     hosts.forEach((host, i) => {
       assert.ok(dirs[i].startsWith(host.data + path.sep));
       const state = JSON.parse(fs.readFileSync(path.join(dirs[i], 'state.json'), 'utf8'));
-      assert.equal(state.jobs.length, 20);
+      assert.equal(state.jobs.length, 21);
       assert.ok(state.jobs.every(job => job.owner === host.name));
     });
     await Promise.all(hosts.map(host => runHook(host, 'Stop')));
@@ -69,6 +73,10 @@ for (const endingHost of ['claude', 'codex']) {
     await runHook(hosts[endingIndex], 'SessionEnd');
     assert.equal(fs.readFileSync(survivorFile, 'utf8'), before);
     assert.equal(JSON.parse(fs.readFileSync(brokerFile, 'utf8')).marker, 'survivor');
-    assert.equal(JSON.parse(fs.readFileSync(path.join(dirs[endingIndex], 'state.json'), 'utf8')).jobs.length, 0);
+    const remaining = JSON.parse(fs.readFileSync(path.join(dirs[endingIndex], 'state.json'), 'utf8')).jobs;
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].id, 'job-20');
+    assert.equal(remaining[0].status, 'cancelled');
+    assert.equal(remaining[0].terminationPending, true);
   });
 }

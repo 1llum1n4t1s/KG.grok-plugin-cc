@@ -5,10 +5,12 @@ import process from "node:process";
 import { getGrokAuthStatus, getGrokAvailability, runGrokTurn } from "../plugins/grok/scripts/lib/grok.mjs";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
 import { makeTempDir } from "./helpers.mjs";
+import { prepareFixtureState } from "./broker-fixture-helper.mjs";
 
-test("injected Grok environment is used for preflight, authentication and model selection", async () => {
-  const fake = installFakeGrok({ replies: [{ text: "ok" }] });
+test("injected Grok environment is used for preflight, authentication and model selection", async (t) => {
   const cwd = makeTempDir("grok-env-override-");
+  prepareFixtureState(t, cwd, cwd);
+  const fake = installFakeGrok({ replies: [{ text: "ok" }] });
   const env = { ...fake.env, GROK_PLUGIN_MODEL: "grok-4.5" };
   const previousBin = process.env.GROK_BIN;
   const previousModel = process.env.GROK_PLUGIN_MODEL;

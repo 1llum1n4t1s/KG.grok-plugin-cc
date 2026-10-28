@@ -16,6 +16,8 @@ import {
 
 /** 引数をそのまま JSON で吐くだけの子プロセス。二重引用符を含めない。 */
 const ECHO_ARGV_SCRIPT = "process.stdout.write(JSON.stringify(process.argv.slice(1)))";
+const WINDOWS_START_KEY = "win32-filetime:134000000000000001";
+const DARWIN_START_KEY = "darwin-lstart-utc-v1:Wed Sep 23 01:00:00 2026";
 
 test("quoteShellArgument leaves plain words and pre-quoted values alone", () => {
   assert.equal(quoteShellArgument("grok"), "grok");
@@ -39,7 +41,7 @@ test("processCommandContains verifies a job marker before termination", () => {
 });
 
 test("tracked job termination requires the same process start and companion command", () => {
-  let snapshot = { startKey: "2026-09-23T01:00:00.000Z", commandLine: "node grok-companion.mjs task" };
+  let snapshot = { startKey: WINDOWS_START_KEY, commandLine: "node grok-companion.mjs task" };
   const options = {
     platform: "win32",
     runCommandImpl() {
@@ -48,21 +50,24 @@ test("tracked job termination requires the same process start and companion comm
   };
 
   assert.equal(inspectTrackedJobProcess(1234, snapshot.startKey, options), "match");
-  snapshot = { ...snapshot, startKey: "2026-09-23T01:00:01.000Z" };
-  assert.equal(inspectTrackedJobProcess(1234, "2026-09-23T01:00:00.000Z", options), "mismatch");
+  snapshot = { ...snapshot, startKey: "win32-filetime:134000000000000002" };
+  assert.equal(inspectTrackedJobProcess(1234, WINDOWS_START_KEY, options), "mismatch");
   snapshot = { ...snapshot, commandLine: "node unrelated.mjs task" };
-  assert.equal(inspectTrackedJobProcess(1234, snapshot.startKey, options), "mismatch");
+  assert.equal(inspectTrackedJobProcess(1234, snapshot.startKey, options), "unavailable");
   assert.equal(inspectTrackedJobProcess(1234, null, options), "unavailable");
+  assert.equal(inspectTrackedJobProcess(1234, "2026-09-23T01:00:00.000Z", options), "unavailable");
 });
 
 test("a failed process lookup is retried and never treated as a different process", () => {
   let lookups = 0;
   let waits = 0;
   const options = {
+    platform: "darwin",
+    runCommandImpl: () => ({ status: 0, stdout: "1234 S", stderr: "", error: null }),
     getProcessSnapshotImpl() {
       lookups += 1;
       return lookups === 1 ? null : {
-        startKey: "start",
+        startKey: DARWIN_START_KEY,
         commandLine: "node grok-companion.mjs task"
       };
     },
@@ -72,16 +77,19 @@ test("a failed process lookup is retried and never treated as a different proces
     }
   };
 
-  assert.equal(inspectTrackedJobProcess(1234, "start", options), "match");
+  assert.equal(inspectTrackedJobProcess(1234, DARWIN_START_KEY, options), "match");
   assert.equal(lookups, 2);
   assert.equal(waits, 1);
-  assert.equal(inspectTrackedJobProcess(1234, "start", {
+  assert.equal(inspectTrackedJobProcess(1234, "Wed Sep 23 01:00:00 2026", options), "unavailable");
+  assert.equal(inspectTrackedJobProcess(1234, DARWIN_START_KEY, {
+    ...options,
     getProcessSnapshotImpl: () => null,
     processExistsImpl: () => true,
     sleepImpl: () => { waits += 1; }
   }), "unavailable");
   assert.equal(waits, 3);
-  assert.equal(inspectTrackedJobProcess(1234, "start", {
+  assert.equal(inspectTrackedJobProcess(1234, DARWIN_START_KEY, {
+    ...options,
     getProcessSnapshotImpl: () => null,
     processExistsImpl: () => false,
     sleepImpl: () => {}
@@ -105,15 +113,18 @@ test("a termination signal is not treated as process exit", () => {
 test("a taskkill error after process exit does not leave cancellation pending", () => {
   const taskkillError = new Error("taskkill exited nonzero after a child disappeared");
   assert.doesNotThrow(() => stopTrackedJobProcess(1234, "start", {
+    platform: "win32",
     terminateImpl: () => { throw taskkillError; },
     inspectImpl: () => "absent"
   }));
   assert.throws(() => stopTrackedJobProcess(1234, "start", {
+    platform: "win32",
     terminateImpl: () => { throw taskkillError; },
     inspectImpl: () => "match",
     sleepImpl: () => {}
   }), (error) => error === taskkillError);
   assert.throws(() => stopTrackedJobProcess(1234, "start", {
+    platform: "win32",
     terminateImpl: () => { throw taskkillError; },
     inspectImpl: () => "unavailable",
     sleepImpl: () => {}
@@ -131,7 +142,7 @@ test("Windows process snapshot requests UTF-8 for a Japanese command line", () =
       return {
         status: 0,
         stdout: JSON.stringify({
-          startKey: "2026-09-23T01:00:00.000Z",
+          startKey: WINDOWS_START_KEY,
           commandLine: "node grok-companion.mjs task 日本語の依頼"
         }),
         stderr: "",
@@ -141,6 +152,9 @@ test("Windows process snapshot requests UTF-8 for a Japanese command line", () =
   });
 
   assert.match(commandScript, /\[Console\]::OutputEncoding = \[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
+  assert.match(commandScript, /ToFileTimeUtc\(\)/);
+  assert.ok(commandScript.indexOf(".Handle") < commandScript.indexOf("Get-CimInstance"));
+  assert.equal(snapshot.startKey, WINDOWS_START_KEY);
   assert.equal(snapshot.commandLine, "node grok-companion.mjs task 日本語の依頼");
 });
 

@@ -5,10 +5,11 @@ import path from "node:path";
 import os from "node:os";
 import { GrokAcpClient } from "../plugins/grok/scripts/lib/acp.mjs";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
+import { prepareFixtureState } from "./broker-fixture-helper.mjs";
 
 // 失敗条件: 外部リンク経由のread/write、未作成の親、隣接rootの接頭辞。
 // 保全条件: 内部リンク、リンクのcwd、通常の新規write、欠損readの既存エラー。
-test("ACP file requests stay inside the real session workspace", async () => {
+test("ACP file requests stay inside the real session workspace", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-workspace-e2e-"));
   const workspace = path.join(root, "workspace");
   const outside = path.join(root, "workspace-sibling");
@@ -23,6 +24,7 @@ test("ACP file requests stay inside the real session workspace", async () => {
   const cwdAlias = path.join(root, "cwd-alias");
   fs.symlinkSync(workspace, cwdAlias, linkType);
   fs.symlinkSync(path.join(outside, "missing-target"), path.join(workspace, "dangling-link"), linkType);
+  prepareFixtureState(t, cwdAlias, root);
   const cases = [
     { read: "outside-link/canary.txt", code: -32602 },
     { write: "outside-link/canary.txt", code: -32602 },
@@ -63,8 +65,9 @@ test("ACP file requests stay inside the real session workspace", async () => {
 });
 
 // 失敗条件: ACP処理中のstate更新と親のreadStateが重なり、不完全JSONを読む。
-test("fake ACP state remains readable while the agent publishes updates", async () => {
+test("fake ACP state remains readable while the agent publishes updates", async (t) => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "acp-state-e2e-"));
+  prepareFixtureState(t, workspace, workspace);
   const fake = installFakeGrok({ holdPrompt: true });
   const client = await GrokAcpClient.connect(workspace, { disableBroker: true, grokBin: fake.env.GROK_BIN, env: fake.env });
   try {

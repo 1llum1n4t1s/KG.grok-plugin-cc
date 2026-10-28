@@ -58,7 +58,7 @@ Keep JSON keys, `severity` values (`critical`, `high`, `medium`, `low`), verdict
 
 <read_only_contract>
 This is a read-only review.
-Do not modify files, run commands, or write anything to disk. Report what should change instead of changing it.
+Do not modify files, run commands with side effects, or write anything to disk. Report what should change instead of changing it.
 </read_only_contract>
 
 <repository_context>

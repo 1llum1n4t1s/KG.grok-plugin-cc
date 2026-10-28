@@ -3,11 +3,54 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import vm from "node:vm";
 
 import { makeTempDir } from "./helpers.mjs";
-import { loadState, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
+import { loadState, migrateStateLock, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
 
-test("resolveStateDir uses a temp-backed per-workspace directory", () => {
+function setStateDataForTest(t, dataDir) {
+  const previous = ["CLAUDE_PLUGIN_DATA", "PLUGIN_DATA"].map(name => [name, process.env[name]]);
+  t.after(() => {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  if (dataDir === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+  else process.env.CLAUDE_PLUGIN_DATA = dataDir;
+  delete process.env.PLUGIN_DATA;
+}
+
+test("FG-2 Windows pruning commits its index before cleanup and tolerates cleanup failure", () => {
+  const source = fs.readFileSync(new URL("../plugins/grok/scripts/lib/state.mjs", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("function validJobLogReference("), source.indexOf("const DARWIN_JOB_EVIDENCE")) +
+    source.slice(source.indexOf("function saveStateWithPreviousJobs("), source.indexOf("function resolveStateLockFile("));
+  const logFile = path.resolve("jobs", "old.log");
+  for (const failCommit of [true, false]) {
+    const events = [];
+    const context = {
+      STATE_VERSION: 1,
+      process: { platform: "win32", stderr: { write() {} } }, path,
+      ensureStateDir() {}, pruneJobs: () => [], defaultState: () => ({ config: {} }),
+      pruneReviewGateSessions: () => [], resolveStateFile: () => "state", resolveJobFile: () => "job",
+      resolveJobsDir: () => "jobs", readJobFile: () => ({ id: "old", epoch: "epoch" }),
+      writeJsonAtomic() { events.push("commit"); if (failCommit) throw new Error("disk full"); },
+      removeJobFile() { events.push("cleanup-job"); throw new Error("locked artifact"); },
+      removeFileIfExists() { events.push("cleanup-log"); }
+    };
+    const save = vm.runInNewContext(`${body}; saveStateWithPreviousJobs`, context);
+    if (failCommit) {
+      assert.throws(() => save("workspace", { jobs: [] }, [{ id: "old", logFile, epoch: "epoch" }], undefined, "epoch"), /disk full/);
+      assert.deepEqual(events, ["commit"]);
+    } else {
+      assert.doesNotThrow(() => save("workspace", { jobs: [] }, [{ id: "old", logFile, epoch: "epoch" }], undefined, "epoch"));
+      assert.deepEqual(events, ["commit", "cleanup-job", "cleanup-log"]);
+    }
+  }
+});
+
+test("resolveStateDir uses a temp-backed per-workspace directory", t => {
+  setStateDataForTest(t);
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);
 
@@ -16,7 +59,8 @@ test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   assert.match(stateDir, new RegExp(`^${os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 });
 
-test("corrupt state is reported and never silently replaced", () => {
+test("corrupt state is reported and never silently replaced", t => {
+  setStateDataForTest(t, makeTempDir("grok-state-data-"));
   const workspace = makeTempDir();
   const stateFile = resolveStateFile(workspace);
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
@@ -26,8 +70,10 @@ test("corrupt state is reported and never silently replaced", () => {
   assert.equal(fs.readFileSync(stateFile, "utf8"), "{broken");
 });
 
-test("state and job JSON writes leave no temporary files", () => {
+test("state and job JSON writes leave no temporary files", t => {
+  setStateDataForTest(t, makeTempDir("grok-state-data-"));
   const workspace = makeTempDir();
+  migrateStateLock(workspace, { offlineConfirmed: true, localOnly: true });
   saveState(workspace, { version: 1, config: {}, jobs: [] });
   writeJobFile(workspace, "job-atomic", { id: "job-atomic", status: "queued" });
 
@@ -64,8 +110,10 @@ test("resolveStateDir uses CLAUDE_PLUGIN_DATA when it is provided", () => {
   }
 });
 
-test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", () => {
+test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", t => {
+  setStateDataForTest(t, makeTempDir("grok-state-data-"));
   const workspace = makeTempDir();
+  const { epoch } = migrateStateLock(workspace, { offlineConfirmed: true, localOnly: true });
   const stateFile = resolveStateFile(workspace);
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
 
@@ -73,16 +121,19 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
     const jobId = `job-${index}`;
     const updatedAt = new Date(Date.UTC(2026, 0, 1, 0, index, 0)).toISOString();
     const logFile = resolveJobLogFile(workspace, jobId);
-    const jobFile = resolveJobFile(workspace, jobId);
     fs.writeFileSync(logFile, `log ${jobId}\n`, "utf8");
-    fs.writeFileSync(jobFile, JSON.stringify({ id: jobId, status: "completed" }, null, 2), "utf8");
-    return {
+    const job = {
       id: jobId,
       status: "completed",
       logFile,
       updatedAt,
-      createdAt: updatedAt
+      createdAt: updatedAt,
+      ...(epoch ? { epoch } : {}),
+      terminationPending: false,
+      grokPromptState: "terminal"
     };
+    writeJobFile(workspace, jobId, job);
+    return job;
   });
 
   fs.writeFileSync(

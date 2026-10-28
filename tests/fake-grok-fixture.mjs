@@ -102,6 +102,10 @@ function handle(message) {
       return;
 
     case "session/new": {
+      if (scenario.sessionError) {
+        send({ jsonrpc: "2.0", id, error: { code: -32000, message: scenario.sessionError } });
+        return;
+      }
       if (scenario.authError) {
         send({ jsonrpc: "2.0", id, error: { code: -32000, message: "Authentication required" } });
         return;
@@ -216,6 +220,10 @@ function emitReply(id, sessionId, reply) {
   // 本物と同じくトークン単位の断片で流す。
   for (const chunk of String(reply.text ?? "").match(/.{1,8}/gs) ?? []) {
     send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: chunk } } } });
+  }
+  if (reply.rpcError) {
+    send({ jsonrpc: "2.0", id, error: { code: -32000, message: reply.rpcError } });
+    return;
   }
   send({ jsonrpc: "2.0", method: "_x.ai/session_notification", params: { sessionId, update: { sessionUpdate: "response_completed", usage: { input_tokens: 10, output_tokens: 20 } } } });
   send({ jsonrpc: "2.0", id, result: { stopReason: reply.stopReason ?? "end_turn" } });

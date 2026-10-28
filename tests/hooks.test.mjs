@@ -3,9 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import test from "node:test";
+import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 
-import { getReviewGateSession, listJobs, readJobFile, resolveJobFile, saveState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
+import { getReviewGateSession, listJobs, migrateStateLock, readJobFile, resolveJobFile, resolveStateDir, saveState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
 import { copyTestDirectory, initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
@@ -15,6 +16,33 @@ const PLUGIN_ROOT = path.join(ROOT, "plugins", "grok");
 const SESSION_HOOK = path.join(PLUGIN_ROOT, "scripts", "session-lifecycle-hook.mjs");
 const STOP_HOOK = path.join(PLUGIN_ROOT, "scripts", "stop-review-gate-hook.mjs");
 
+test("FG-1 SessionEnd continues stopping jobs when a retained job log is unwritable", async () => {
+  const source = fs.readFileSync(SESSION_HOOK, "utf8");
+  const body = source.slice(source.indexOf("async function cleanupOwnedSessionJobs("), source.indexOf("function handleSessionStart("));
+  for (const failure of ["unavailable", "stop-failed"]) {
+    const jobs = [1, 2].map((pid) => ({ id: String(pid), pid, processStartKey: `start-${pid}`,
+      status: "running", sessionId: "session", logFile: "unwritable", grokPromptState: "not-sent" }));
+    const files = new Map(jobs.map(job => [job.id, { ...job }]));
+    const stopped = [];
+    const state = { jobs, reviewGateSessions: [] };
+    const cleanup = vm.runInNewContext(`${body}; cleanupSessionJobs`, {
+      fs: { existsSync: () => true }, resolveWorkspaceRoot: (cwd) => cwd, resolveStateFile: () => "state",
+      performance, process: { platform: "darwin", stderr: { write() {} } },
+      nowIso: () => "2026-10-27T00:00:00.000Z", resolveJobFile: (_cwd, id) => id,
+      readJobFile: file => files.get(file), writeJobFile: (_cwd, id, job) => files.set(id, { ...job }),
+      createProcessLookupDiagnostics: () => ({}),
+      inspectTrackedJobProcess: (pid) => pid === 1 && failure === "unavailable" ? "unavailable" : "match",
+      stopTrackedJobProcess(pid) { if (pid === 1) throw new Error("stop failed"); stopped.push(pid); },
+      appendLogLine() { throw new Error("log denied"); },
+      updateState: (_cwd, mutate) => mutate(state)
+    });
+    await assert.doesNotReject(() => cleanup("workspace", "session"));
+    assert.deepEqual(stopped, [2]);
+    assert.equal(state.jobs.length, 1);
+    assert.equal(state.jobs[0].id, "1");
+  }
+});
+
 function withPluginData(pluginData, callback) {
   const previous = process.env.CLAUDE_PLUGIN_DATA;
   process.env.CLAUDE_PLUGIN_DATA = pluginData;
@@ -23,6 +51,37 @@ function withPluginData(pluginData, callback) {
   } finally {
     if (previous == null) delete process.env.CLAUDE_PLUGIN_DATA;
     else process.env.CLAUDE_PLUGIN_DATA = previous;
+  }
+}
+
+function prepareFixtureMigration(workspace) {
+  if (["win32", "linux", "darwin"].includes(process.platform)) {
+    migrateStateLock(workspace, {
+      offlineConfirmed: true, localOnly: true, expectedStateDir: resolveStateDir(workspace)
+    });
+  }
+}
+
+function saveFixtureState(workspace, state) {
+  prepareFixtureMigration(workspace);
+  return saveState(workspace, state);
+}
+
+function prepareHostFixtureMigration(workspace, env) {
+  if (!["win32", "linux", "darwin"].includes(process.platform)) return;
+  const keys = ["CLAUDE_PLUGIN_DATA", "PLUGIN_DATA"];
+  const previous = keys.map(key => process.env[key]);
+  try {
+    for (const key of keys) {
+      if (env[key] == null) delete process.env[key];
+      else process.env[key] = env[key];
+    }
+    prepareFixtureMigration(workspace);
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] == null) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
   }
 }
 
@@ -44,6 +103,15 @@ function makeReviewWorkspace() {
   run("git", ["add", "app.js"], { cwd: workspace });
   run("git", ["commit", "-m", "init"], { cwd: workspace });
   return workspace;
+}
+
+function assertUnsupportedGate(result, workspace, pluginData) {
+  if (process.platform === "win32") return false;
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /incomplete/i);
+  assert.equal(JSON.parse(result.stdout).decision, "block");
+  assert.deepEqual(withPluginData(pluginData, () => listJobs(workspace)), []);
+  return true;
 }
 
 test("SessionStart exports shared session and plugin-data variables for Claude Code", () => {
@@ -69,7 +137,7 @@ test("Stop reports a running job from the current session without running the di
   const workspace = makeTempDir("grok-stop-hook-workspace-");
   const pluginData = makeTempDir("grok-stop-hook-data-");
   withPluginData(pluginData, () => {
-    saveState(workspace, {
+    saveFixtureState(workspace, {
       version: 1,
       config: { stopReviewGate: false },
       jobs: [
@@ -99,16 +167,20 @@ test("Stop reports a running job from the current session without running the di
 });
 
 test("Stop runs the enabled review gate with the normalized fallback session environment", () => {
-  const workspace = makeTempDir("grok-stop-hook-enabled-workspace-");
+  const workspace = makeReviewWorkspace();
   const pluginData = makeTempDir("grok-stop-hook-enabled-data-");
   const fake = installFakeGrok({ replies: [{ text: "ALLOW: no blockers" }] });
   withPluginData(pluginData, () => {
-    saveState(workspace, {
+    saveFixtureState(workspace, {
       version: 1,
       config: { stopReviewGate: true },
       jobs: []
     });
   });
+
+  const env = { ...fake.env, CLAUDE_PLUGIN_DATA: pluginData, GROK_COMPANION_SESSION_ID: "environment-session" };
+  runHook(STOP_HOOK, [], { session_id: "   ", cwd: workspace, hook_event_name: "UserPromptSubmit" }, env);
+  fs.writeFileSync(path.join(workspace, "app.js"), "console.log('updated');\n", "utf8");
 
   const result = runHook(
     STOP_HOOK,
@@ -127,12 +199,61 @@ test("Stop runs the enabled review gate with the normalized fallback session env
     }
   );
 
+  if (assertUnsupportedGate(result, workspace, pluginData)) return;
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "");
-  assert.match(result.stderr, /could not snapshot the working tree[\s\S]*Git repository/i);
+  assert.doesNotMatch(result.stderr, /could not snapshot the working tree/i);
   const jobs = withPluginData(pluginData, () => listJobs(workspace));
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0].sessionId, "environment-session");
+});
+
+for (const stopReason of ["cancelled", "unknown_reason"]) {
+  test(`Stop does not accept ALLOW from an unfinished ${stopReason} review`, () => {
+    const workspace = makeReviewWorkspace();
+    const pluginData = makeTempDir("grok-stop-hook-unfinished-data-");
+    const fake = installFakeGrok({ replies: [{ text: "ALLOW: partial review", stopReason }] });
+    withPluginData(pluginData, () => saveFixtureState(workspace, {
+      version: 1, config: { stopReviewGate: true }, jobs: []
+    }));
+    runHook(STOP_HOOK, [], { session_id: "unfinished-session", cwd: workspace, hook_event_name: "UserPromptSubmit" }, { ...fake.env, CLAUDE_PLUGIN_DATA: pluginData });
+    fs.writeFileSync(path.join(workspace, "app.js"), "console.log('updated');\n", "utf8");
+    const result = runHook(STOP_HOOK, [], {
+      session_id: "unfinished-session", cwd: workspace, hook_event_name: "Stop",
+      stop_hook_active: false, last_assistant_message: "Done"
+    }, { ...fake.env, CLAUDE_PLUGIN_DATA: pluginData });
+    if (assertUnsupportedGate(result, workspace, pluginData)) return;
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /incomplete|failed/i);
+    const [job] = withPluginData(pluginData, () => listJobs(workspace));
+    assert.equal(job.status, "failed");
+    const stored = withPluginData(pluginData, () => readJobFile(resolveJobFile(workspace, job.id)));
+    assert.match(stored.rendered, /Review incomplete/i);
+    assert.match(stored.rendered, new RegExp(stopReason));
+  });
+}
+
+test("Stop preserves an ACP failure alongside a partial review", () => {
+  const workspace = makeReviewWorkspace();
+  const pluginData = makeTempDir("grok-stop-hook-error-data-");
+  const fake = installFakeGrok({ replies: [{ text: "ALLOW: partial review", rpcError: "Review connection failed" }] });
+  withPluginData(pluginData, () => saveFixtureState(workspace, {
+    version: 1, config: { stopReviewGate: true }, jobs: []
+  }));
+  runHook(STOP_HOOK, [], { session_id: "error-session", cwd: workspace, hook_event_name: "UserPromptSubmit" }, { ...fake.env, CLAUDE_PLUGIN_DATA: pluginData });
+  fs.writeFileSync(path.join(workspace, "app.js"), "console.log('updated');\n", "utf8");
+  const result = runHook(STOP_HOOK, [], {
+    session_id: "error-session", cwd: workspace, hook_event_name: "Stop",
+    stop_hook_active: false, last_assistant_message: "Done"
+  }, { ...fake.env, CLAUDE_PLUGIN_DATA: pluginData });
+  if (assertUnsupportedGate(result, workspace, pluginData)) return;
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Review connection failed/);
+  const [job] = withPluginData(pluginData, () => listJobs(workspace));
+  assert.equal(job.status, "failed");
+  const stored = withPluginData(pluginData, () => readJobFile(resolveJobFile(workspace, job.id)));
+  assert.equal(stored.result.error, "Review connection failed");
+  assert.match(stored.rendered, /Review connection failed/);
 });
 
 test("Stop skips Grok when UserPromptSubmit proves the turn made no repository changes", () => {
@@ -141,7 +262,7 @@ test("Stop skips Grok when UserPromptSubmit proves the turn made no repository c
   const fake = installFakeGrok({ replies: [{ text: "ALLOW: no blockers" }] });
   const env = { ...fake.env, CLAUDE_PLUGIN_DATA: pluginData };
   withPluginData(pluginData, () => {
-    saveState(workspace, { version: 1, config: { stopReviewGate: true }, jobs: [] });
+    saveFixtureState(workspace, { version: 1, config: { stopReviewGate: true }, jobs: [] });
   });
 
   const baseline = runHook(
@@ -164,6 +285,8 @@ test("Stop skips Grok when UserPromptSubmit proves the turn made no repository c
     env
   );
 
+  if (assertUnsupportedGate(stop, workspace, pluginData)) return;
+
   assert.equal(baseline.status, 0, baseline.stderr);
   assert.equal(stop.status, 0, stop.stderr);
   assert.equal(stop.stdout, "");
@@ -177,7 +300,7 @@ test("Stop reviews edits from a continuation even when another Stop hook caused 
   const fake = installFakeGrok({ replies: [{ text: "ALLOW: continuation edit is safe" }] });
   const env = { ...fake.env, CLAUDE_PLUGIN_DATA: pluginData };
   withPluginData(pluginData, () => {
-    saveState(workspace, { version: 1, config: { stopReviewGate: true }, jobs: [] });
+    saveFixtureState(workspace, { version: 1, config: { stopReviewGate: true }, jobs: [] });
   });
 
   runHook(
@@ -201,6 +324,7 @@ test("Stop reviews edits from a continuation even when another Stop hook caused 
     env
   );
 
+  if (assertUnsupportedGate(stop, workspace, pluginData)) return;
   assert.equal(stop.status, 0, stop.stderr);
   assert.equal(stop.stdout, "");
   assert.equal(withPluginData(pluginData, () => listJobs(workspace)).length, 1);
@@ -212,7 +336,7 @@ test("Stop sends long assistant responses through stdin instead of the Windows c
   const fake = installFakeGrok({ replies: [{ text: "ALLOW: long response reviewed" }] });
   const env = { ...fake.env, CLAUDE_PLUGIN_DATA: pluginData };
   withPluginData(pluginData, () => {
-    saveState(workspace, { version: 1, config: { stopReviewGate: true }, jobs: [] });
+    saveFixtureState(workspace, { version: 1, config: { stopReviewGate: true }, jobs: [] });
   });
 
   runHook(
@@ -236,6 +360,7 @@ test("Stop sends long assistant responses through stdin instead of the Windows c
     env
   );
 
+  if (assertUnsupportedGate(stop, workspace, pluginData)) return;
   assert.equal(stop.status, 0, stop.stderr);
   assert.equal(stop.stdout, "");
   assert.match(fake.readState().prompts[0], /Previous assistant response:\nx{1024}/);
@@ -250,7 +375,7 @@ test("Stop reuses an unresolved Grok blocker until edits are made, then re-revie
   const blockingFake = installFakeGrok({ replies: [{ text: "BLOCK: retry still drops messages" }] });
   const blockingEnv = { ...blockingFake.env, CLAUDE_PLUGIN_DATA: pluginData };
   withPluginData(pluginData, () => {
-    saveState(workspace, { version: 1, config: { stopReviewGate: true }, jobs: [] });
+    saveFixtureState(workspace, { version: 1, config: { stopReviewGate: true }, jobs: [] });
   });
 
   runHook(
@@ -273,6 +398,7 @@ test("Stop reuses an unresolved Grok blocker until edits are made, then re-revie
     },
     blockingEnv
   );
+  if (assertUnsupportedGate(blocked, workspace, pluginData)) return;
   assert.equal(blocked.status, 0, blocked.stderr);
   assert.match(blocked.stdout, /retry still drops messages/);
   assert.equal(withPluginData(pluginData, () => listJobs(workspace)).length, 1);
@@ -337,7 +463,7 @@ test("SessionEnd removes only jobs owned by the normalized fallback session", ()
   const workspace = makeTempDir("grok-session-end-hook-workspace-");
   const pluginData = makeTempDir("grok-session-end-hook-data-");
   withPluginData(pluginData, () => {
-    saveState(workspace, {
+    saveFixtureState(workspace, {
       version: 1,
       config: { stopReviewGate: false },
       reviewGateSessions: [
@@ -345,8 +471,16 @@ test("SessionEnd removes only jobs owned by the normalized fallback session", ()
         { sessionId: "session-b", pendingReason: "theirs", updatedAt: "2026-01-01T00:00:02.000Z" }
       ],
       jobs: [
+        // 個別ファイルがない終了済みジョブは、生成世代を識別できる場合だけ除去する。
         {
           id: "mine",
+          status: "completed",
+          sessionId: "environment-session",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z"
+        },
+        {
+          id: "unknown-generation",
           status: "completed",
           sessionId: "environment-session",
           updatedAt: "2026-01-01T00:00:01.000Z"
@@ -370,7 +504,11 @@ test("SessionEnd removes only jobs owned by the normalized fallback session", ()
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "");
   const remaining = withPluginData(pluginData, () => listJobs(workspace));
-  assert.deepEqual(remaining.map((job) => job.id), ["theirs"]);
+  assert.deepEqual(remaining.map((job) => job.id).sort(), ["theirs", "unknown-generation"]);
+  const unknownGeneration = remaining.find((job) => job.id === "unknown-generation");
+  assert.equal(unknownGeneration.status, "completed");
+  assert.equal(unknownGeneration.createdAt, undefined);
+  assert.equal(withPluginData(pluginData, () => fs.existsSync(resolveJobFile(workspace, "unknown-generation"))), false);
   assert.equal(withPluginData(pluginData, () => getReviewGateSession(workspace, "environment-session")), null);
   assert.equal(
     withPluginData(pluginData, () => getReviewGateSession(workspace, "session-b"))?.pendingReason,
@@ -381,7 +519,7 @@ test("SessionEnd removes only jobs owned by the normalized fallback session", ()
 test("Stop reports a cancellation that still needs process termination", () => {
   const workspace = makeTempDir("grok-stop-hook-pending-workspace-");
   const pluginData = makeTempDir("grok-stop-hook-pending-data-");
-  withPluginData(pluginData, () => saveState(workspace, {
+  withPluginData(pluginData, () => saveFixtureState(workspace, {
     version: 1,
     config: { stopReviewGate: false },
     jobs: [{ id: "pending", status: "cancelled", terminationPending: true, sessionId: "session-a" }]
@@ -398,7 +536,7 @@ test("SessionEnd cancels and retains a queued job until its worker observes the 
   const pluginData = makeTempDir("grok-session-end-queued-data-");
   withPluginData(pluginData, () => {
     const job = { id: "queued", status: "queued", sessionId: "ending-session", workspaceRoot: workspace };
-    saveState(workspace, { version: 1, config: {}, jobs: [job] });
+    saveFixtureState(workspace, { version: 1, config: {}, jobs: [job] });
     writeJobFile(workspace, job.id, job);
   });
 
@@ -420,7 +558,7 @@ test("SessionEnd retains a running job when process identity cannot be verified"
   const workspace = makeTempDir("grok-session-end-unverifiable-workspace-");
   const pluginData = makeTempDir("grok-session-end-unverifiable-data-");
   withPluginData(pluginData, () => {
-    saveState(workspace, {
+    saveFixtureState(workspace, {
       version: 1,
       config: {},
       jobs: [{ id: "unverifiable", status: "running", sessionId: "ending-session", pid: process.pid }]
@@ -450,6 +588,7 @@ for (const flavor of ['codex', 'claude']) {
     const env = { ...process.env, CLAUDE_PLUGIN_ROOT: '', PLUGIN_ROOT: '', CLAUDE_PLUGIN_DATA: '', PLUGIN_DATA: '', CLAUDE_ENV_FILE: '' };
     env[flavor === 'codex' ? 'PLUGIN_ROOT' : 'CLAUDE_PLUGIN_ROOT'] = root;
     env[flavor === 'codex' ? 'PLUGIN_DATA' : 'CLAUDE_PLUGIN_DATA'] = data;
+    prepareHostFixtureMigration(temp, env);
     for (const [event, groups] of Object.entries(manifest.hooks)) {
       const command = groups[0].hooks[0].command;
       const executable = process.platform === 'win32' ? 'pwsh' : '/bin/sh';

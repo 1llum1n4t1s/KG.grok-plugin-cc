@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -7,10 +8,25 @@ import {
   resolveCancelableJob,
   resolveResultJob
 } from "../plugins/grok/scripts/lib/job-control.mjs";
-import { saveState } from "../plugins/grok/scripts/lib/state.mjs";
+import { migrateStateLock, resolveStateDir, saveState } from "../plugins/grok/scripts/lib/state.mjs";
 import { makeTempDir } from "./helpers.mjs";
 
-function seedJobs(workspace, jobs) {
+function seedJobs(t, workspace, jobs) {
+  const keys = ["CLAUDE_PLUGIN_DATA", "PLUGIN_DATA"];
+  const previous = keys.map(key => process.env[key]);
+  t.after(() => {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+  });
+  process.env.CLAUDE_PLUGIN_DATA = path.join(workspace, "plugin-data");
+  delete process.env.PLUGIN_DATA;
+  if (["win32", "linux", "darwin"].includes(process.platform)) {
+    migrateStateLock(workspace, {
+      offlineConfirmed: true, localOnly: true, expectedStateDir: resolveStateDir(workspace)
+    });
+  }
   saveState(workspace, {
     version: 1,
     config: { stopReviewGate: false },
@@ -52,9 +68,9 @@ test("session filtering falls back to the environment when the explicit hook ses
   );
 });
 
-test("cancel without an id selects only the sole active job in the current session", () => {
+test("cancel without an id selects only the sole active job in the current session", (t) => {
   const workspace = makeTempDir();
-  seedJobs(workspace, [
+  seedJobs(t, workspace, [
     { id: "mine", status: "running", sessionId: "session-a" },
     { id: "theirs", status: "running", sessionId: "session-b" }
   ]);
@@ -62,9 +78,9 @@ test("cancel without an id selects only the sole active job in the current sessi
   assert.equal(resolveCancelableJob(workspace, "", { env: { GROK_COMPANION_SESSION_ID: "session-a" } }).job.id, "mine");
 });
 
-test("cancel without an id accepts the Codex thread id as session identity", () => {
+test("cancel without an id accepts the Codex thread id as session identity", (t) => {
   const workspace = makeTempDir();
-  seedJobs(workspace, [
+  seedJobs(t, workspace, [
     { id: "mine", status: "running", sessionId: "codex-task" },
     { id: "theirs", status: "running", sessionId: "other-task" }
   ]);
@@ -72,9 +88,9 @@ test("cancel without an id accepts the Codex thread id as session identity", () 
   assert.equal(resolveCancelableJob(workspace, "", { env: { CODEX_THREAD_ID: "codex-task" } }).job.id, "mine");
 });
 
-test("a cancellation with pending process termination can be retried by job id", () => {
+test("a cancellation with pending process termination can be retried by job id", (t) => {
   const workspace = makeTempDir();
-  seedJobs(workspace, [{ id: "pending", status: "cancelled", terminationPending: true, sessionId: "session-a" }]);
+  seedJobs(t, workspace, [{ id: "pending", status: "cancelled", terminationPending: true, sessionId: "session-a" }]);
 
   assert.equal(resolveCancelableJob(workspace, "pending", { env: {} }).job.id, "pending");
   const status = buildStatusSnapshot(workspace, { env: {} });
@@ -83,9 +99,9 @@ test("a cancellation with pending process termination can be retried by job id",
   assert.throws(() => resolveResultJob(workspace, "pending"), /needs process termination/i);
 });
 
-test("cancel without an id rejects multiple active jobs in the current session", () => {
+test("cancel without an id rejects multiple active jobs in the current session", (t) => {
   const workspace = makeTempDir();
-  seedJobs(workspace, [
+  seedJobs(t, workspace, [
     { id: "mine-a", status: "queued", sessionId: "session-a" },
     { id: "mine-b", status: "running", sessionId: "session-a" }
   ]);
@@ -96,16 +112,16 @@ test("cancel without an id rejects multiple active jobs in the current session",
   );
 });
 
-test("cancel without an id never crosses sessions when session identity is absent", () => {
+test("cancel without an id never crosses sessions when session identity is absent", (t) => {
   const workspace = makeTempDir();
-  seedJobs(workspace, [{ id: "unknown-owner", status: "running", sessionId: "session-b" }]);
+  seedJobs(t, workspace, [{ id: "unknown-owner", status: "running", sessionId: "session-b" }]);
 
   assert.throws(() => resolveCancelableJob(workspace, "", { env: {} }), /Pass an exact job id/i);
 });
 
-test("bare result rejects ambiguous parallel results", () => {
+test("bare result rejects ambiguous parallel results", (t) => {
   const workspace = makeTempDir();
-  seedJobs(workspace, [
+  seedJobs(t, workspace, [
     { id: "review-a", status: "completed", sessionId: "session-a" },
     { id: "review-b", status: "completed", sessionId: "session-a" }
   ]);
@@ -120,9 +136,9 @@ test("bare result rejects ambiguous parallel results", () => {
   }
 });
 
-test("bare result uses CODEX_THREAD_ID when the shared session variable is absent", () => {
+test("bare result uses CODEX_THREAD_ID when the shared session variable is absent", (t) => {
   const workspace = makeTempDir();
-  seedJobs(workspace, [
+  seedJobs(t, workspace, [
     { id: "codex-result", status: "completed", sessionId: "codex-task" },
     { id: "other-result", status: "completed", sessionId: "other-task" }
   ]);

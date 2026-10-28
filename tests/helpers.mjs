@@ -49,14 +49,20 @@ export function copyTestDirectory(source, destination) {
 function assertCleanupPath(target, allowedRoot) {
   if (typeof target !== 'string' || !target || typeof allowedRoot !== 'string' || !allowedRoot || !path.isAbsolute(target) || !path.isAbsolute(allowedRoot)) throw new Error('Cleanup paths must be absolute');
   const resolved = path.resolve(target);
-  const relative = path.relative(path.resolve(allowedRoot), resolved);
+  const root = path.resolve(allowedRoot);
+  const relative = path.relative(root, resolved);
   if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('Cleanup target is outside the allowed root');
-  for (let current = resolved; ; current = path.dirname(current)) {
+  // OS指定の一時rootは /var -> /private/var 等の正規aliasを含み得る。
+  // rootの実体を確認し、root配下だけは従来どおりリンクを拒否する。
+  const canonicalRoot = fs.realpathSync(root);
+  const rootStat = fs.lstatSync(canonicalRoot);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error('Cleanup root is not a directory');
+  const canonicalTarget = path.join(canonicalRoot, relative);
+  for (let current = canonicalTarget; path.relative(canonicalRoot, current); current = path.dirname(current)) {
     try { if (fs.lstatSync(current).isSymbolicLink()) throw new Error('Cleanup path contains a link'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
-    if (path.dirname(current) === current) break;
   }
-  const pending = [resolved];
+  const pending = [canonicalTarget];
   while (pending.length) {
     const current = pending.pop();
     let stat;
@@ -64,7 +70,7 @@ function assertCleanupPath(target, allowedRoot) {
     if (stat.isSymbolicLink()) throw new Error('Cleanup directory contains a link');
     if (stat.isDirectory()) for (const entry of fs.readdirSync(current)) pending.push(path.join(current, entry));
   }
-  return resolved;
+  return canonicalTarget;
 }
 
 export function removeTempFixture(target, options) {

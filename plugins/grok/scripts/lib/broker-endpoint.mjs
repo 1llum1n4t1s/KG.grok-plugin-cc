@@ -1,5 +1,10 @@
 import path from "node:path";
 import process from "node:process";
+import { Buffer } from "node:buffer";
+
+// Darwin の旧 libuv は 105 bytes 以上を黙って切り詰める。全 POSIX で
+// この安全側の上限を使い、文字数ではなく UTF-8 byte 数で判断する。
+const MAX_UNIX_SOCKET_PATH_BYTES = 104;
 
 function sanitizePipeName(value) {
   return String(value ?? "")
@@ -16,7 +21,13 @@ export function createBrokerEndpoint(sessionDir, platform = process.platform) {
   // platform を引数で受け取る関数なので、パスの組み立ても実行環境ではなく
   // その platform に従う。path.join だと Windows 上で unix 用の値を作ったときに
   // 区切りがバックスラッシュになってしまう。
-  return `unix:${path.posix.join(sessionDir, "broker.sock")}`;
+  const normal = path.posix.join(sessionDir, "broker.sock");
+  if (Buffer.byteLength(normal) <= MAX_UNIX_SOCKET_PATH_BYTES) return `unix:${normal}`;
+  const short = path.posix.join(sessionDir, "b");
+  if (Buffer.byteLength(short) > MAX_UNIX_SOCKET_PATH_BYTES) {
+    throw new Error(`Broker Unix socket path is too long (${Buffer.byteLength(short)} bytes; maximum ${MAX_UNIX_SOCKET_PATH_BYTES}). Choose a shorter temporary directory.`);
+  }
+  return `unix:${short}`;
 }
 
 export function parseBrokerEndpoint(endpoint) {

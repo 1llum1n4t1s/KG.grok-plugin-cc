@@ -12,7 +12,7 @@
  *      本家 Codex 版はここを一律 -32601 で突き返していたが、ACP では応答しないと
  *      エージェントの実行が止まるため、ハンドラを差し込めるようにしている。
  *
- * @typedef {Error & { data?: unknown, rpcCode?: number }} ProtocolError
+ * @typedef {Error & { data?: unknown, rpcCode?: number, rpcResponseReceived?: boolean }} ProtocolError
  * @typedef {import("./acp-protocol").AcpMethod} AcpMethod
  * @typedef {import("./acp-protocol").AcpNotification} AcpNotification
  * @typedef {import("./acp-protocol").AcpNotificationHandler} AcpNotificationHandler
@@ -25,10 +25,11 @@ import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
-import readline from "node:readline";
+import { performance } from "node:perf_hooks";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
-import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
-import { buildShellCommand, terminateProcessTree } from "./process.mjs";
+import { ensureBrokerSession, loadBrokerSession, reserveDirectAdmission, reserveManagedBroker, inspectManagedBrokerForCancel, authorizeBrokerChild, verifyBrokerEpoch, findExplicitManagedSession } from "./broker-lifecycle.mjs";
+import { finishDirectStart, verifyDirectStart, verifyDirectStartWithinContext } from "./direct-start-admission.mjs";
+import { spawnWindowsAgent } from "./windows-agent.mjs";
 import { JsonlFramer } from "./jsonl.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.codex-plugin/plugin.json", import.meta.url);
@@ -36,6 +37,33 @@ const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"))
 
 export const BROKER_ENDPOINT_ENV = "GROK_COMPANION_ACP_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
+export const BROKER_CAPACITY_RPC_CODE = -32003;
+// callback に渡った Error や data の後続変更から、受信時の未転送証拠を守る。
+const brokerUnsentRejections = new WeakMap();
+const promptFailureEvidence = new WeakMap();
+const promptSuccessEvidence = new WeakMap();
+const BROKER_UNSENT_METHODS = new Set(["session/new", "session/set_model", "session/set_config_option", "session/set_mode", "session/prompt"]);
+
+/** 実際に同じ broker client が受信した未転送応答だけを返す。 */
+export function getBrokerUnsentRejection(error, client) {
+  if (!error || typeof error !== "object") return null;
+  const record = brokerUnsentRejections.get(error);
+  return record && record.client === client ? record.evidence : null;
+}
+
+/** 実際の prompt RPC 応答を受けた時点の停止・未送信証拠を返す。 */
+export function getAcpPromptFailureEvidence(error, client) {
+  if (!error || typeof error !== "object") return null;
+  const record = promptFailureEvidence.get(error);
+  return record && record.client === client ? record.evidence : null;
+}
+
+/** 実際の prompt RPC 成功応答と、受信時の終了理由を返す。 */
+export function getAcpPromptSuccessEvidence(response, client) {
+  if (!response || typeof response !== "object") return null;
+  const record = promptSuccessEvidence.get(response);
+  return record && record.client === client ? record.evidence : null;
+}
 /** ブローカーがエージェントの stderr を中継するときの通知メソッド。 */
 export const BROKER_AGENT_STDERR_METHOD = "broker/agent_stderr";
 
@@ -53,12 +81,53 @@ const BROKER_HANDSHAKE_TIMEOUT_MS = 10_000;
 const DIRECT_HANDSHAKE_TIMEOUT_MS = 10_000;
 const CONTROL_RPC_TIMEOUT_MS = 30_000;
 const CLOSE_TIMEOUT_MS = 1_000;
+// 長寿命の共有プロセスでも、直近の診断だけを最大64K UTF-16コード単位で保持する。
+const STDERR_RETENTION_LIMIT = 65_536;
 
-function waitForExitWithTimeout(exitPromise) {
+/** callback / transport 由来の例外を、agent の RPC 応答証拠と混同しない。 */
+function normalizeTransportError(value) {
+  try {
+    const candidate = /** @type {any} */ (value);
+    const error = new Error(value instanceof Error ? value.message : String(value), { cause: value });
+    const code = candidate?.code;
+    if (typeof code === "string" || typeof code === "number") /** @type {any} */ (error).code = code;
+    return error;
+  } catch {
+    return new Error("Grok ACP transport failure.", { cause: value });
+  }
+}
+
+/** direct 起動の元値を維持しながら broker 側の失敗も記録する。 */
+function attachBrokerFailure(value, brokerError) {
+  try {
+    if (value instanceof Error && !("brokerError" in value)) {
+      if ("cause" in value) {
+        /** @type {any} */ (value).brokerError = brokerError;
+        if (/** @type {any} */ (value).brokerError === brokerError) return value;
+      } else {
+        value.cause = brokerError;
+        if (value.cause === brokerError) return value;
+      }
+    }
+  } catch { /* 変更できない Error は元値を cause として包む。 */ }
+  let message = "Direct Grok agent initialization failed.";
+  try { if (value instanceof Error && typeof value.message === "string") message = value.message; } catch { /* 固定メッセージを使う。 */ }
+  const wrapped = new Error(message, { cause: value });
+  /** @type {any} */ (wrapped).brokerError = brokerError;
+  try {
+    const candidate = /** @type {any} */ (value);
+    const code = candidate?.code;
+    if (typeof code === "string" || typeof code === "number") /** @type {any} */ (wrapped).code = code;
+    if (candidate?.turnStopUnconfirmed === true) /** @type {any} */ (wrapped).turnStopUnconfirmed = true;
+  } catch { /* 元値を触れない場合も cause を維持する。 */ }
+  return wrapped;
+}
+
+function waitForExitWithTimeout(exitPromise, timeoutMs = CLOSE_TIMEOUT_MS) {
   return Promise.race([
     exitPromise,
     new Promise((resolve) => {
-      const timer = setTimeout(resolve, CLOSE_TIMEOUT_MS);
+      const timer = setTimeout(resolve, timeoutMs);
       timer.unref?.();
     })
   ]);
@@ -159,6 +228,7 @@ class AcpClientBase {
     this.nextId = 1;
     this.stderr = "";
     this.closed = false;
+    this.closeStopUnconfirmed = false;
     this.exitError = null;
     /** @type {AcpNotificationHandler | null} */
     this.notificationHandler = null;
@@ -274,7 +344,21 @@ class AcpClientBase {
 
   handleChunk(chunk) {
     if (this.closed) return;
-    this.framer.push(chunk);
+    try {
+      this.framer.push(chunk);
+    } catch (error) {
+      // 通知処理の I/O 失敗も接続を閉じ、未完了の要求へ元の原因を返す。
+      this.handleExit(error, true);
+    }
+  }
+
+  appendStderr(chunk) {
+    const tail = chunk.length >= STDERR_RETENTION_LIMIT
+      ? chunk.slice(-STDERR_RETENTION_LIMIT)
+      : (this.stderr + chunk).slice(-STDERR_RETENTION_LIMIT);
+    // 切断位置がサロゲートペアの途中なら、不完全な先頭だけを除く。
+    const first = tail.charCodeAt(0);
+    this.stderr = first >= 0xdc00 && first <= 0xdfff ? tail.slice(1) : tail;
   }
 
   handleLine(line) {
@@ -304,9 +388,34 @@ class AcpClientBase {
       this.pending.delete(message.id);
 
       if (message.error) {
-        pending.reject(createProtocolError(message.error.message ?? `grok ${pending.method} failed.`, message.error));
+        const error = createProtocolError(message.error.message ?? `grok ${pending.method} failed.`, message.error);
+        error.rpcResponseReceived = true;
+        const code = message.error.code, data = message.error.data;
+        if (this.transport === "broker" && BROKER_UNSENT_METHODS.has(pending.method) &&
+            data?.source === "grok-broker" && data?.promptForwarded === false &&
+            (code === BROKER_BUSY_RPC_CODE || (code === BROKER_CAPACITY_RPC_CODE && pending.method === "session/prompt"))) {
+          brokerUnsentRejections.set(error, { client: this, evidence: Object.freeze({
+            method: pending.method, reason: code === BROKER_BUSY_RPC_CODE ? "busy" : "capacity", requestId: message.id
+          }) });
+        }
+        if (pending.method === "session/prompt") {
+          const cancelledBeforeSend = this.transport === "broker" && code === -32002 &&
+            data?.source === "grok-broker" && data?.promptForwarded === false && data?.reason === "cancelled";
+          const terminal = this.transport === "direct" ? "confirmed"
+            : this.transport === "broker" && (brokerUnsentRejections.has(error) || cancelledBeforeSend) ? "not-sent"
+            : this.transport === "broker" && data?.turnStopConfirmed === true ? "confirmed"
+            : "unconfirmed";
+          promptFailureEvidence.set(error, { client: this, evidence: Object.freeze({ method: pending.method, requestId: message.id, terminal }) });
+        }
+        pending.reject(error);
       } else {
-        pending.resolve(message.result ?? {});
+        const result = message.result ?? {};
+        if (pending.method === "session/prompt" && result && typeof result === "object" && !Array.isArray(result)) {
+          promptSuccessEvidence.set(result, { client: this, evidence: Object.freeze({
+            method: pending.method, requestId: message.id, stopReason: typeof result.stopReason === "string" ? result.stopReason : null
+          }) });
+        }
+        pending.resolve(result);
       }
       return;
     }
@@ -314,7 +423,7 @@ class AcpClientBase {
     // ブローカーが中継してくるエージェントの stderr。直接起動と同じように
     // client.stderr へ溜め、失敗時の診断がどちらの経路でも同じ内容になるようにする。
     if (message.method === BROKER_AGENT_STDERR_METHOD) {
-      this.stderr += String(message.params?.chunk ?? "");
+      this.appendStderr(String(message.params?.chunk ?? ""));
       return;
     }
 
@@ -442,7 +551,7 @@ class AcpClientBase {
     return realTarget;
   }
 
-  handleExit(error) {
+  handleExit(error, failed = error != null) {
     if (this.exitResolved) {
       return;
     }
@@ -450,7 +559,7 @@ class AcpClientBase {
     this.exitResolved = true;
     this.closed = true;
     this.framer.close();
-    this.exitError = error ?? null;
+    this.exitError = failed ? normalizeTransportError(error) : null;
 
     for (const pending of this.pending.values()) {
       pending.reject(this.exitError ?? new Error("grok agent connection closed."));
@@ -482,12 +591,28 @@ class AcpClientBase {
 }
 
 class SpawnedAcpClient extends AcpClientBase {
+  #stopPosixGroup = null;
+  #posixChildClosed = null;
+  #posixChildIsClosed = null;
+  #posixClosePromise = null;
+  #posixGroupIsEmpty = null;
+  #posixGroupEmptyConfirmed = false;
+  #posixSpawnNeverStarted = false;
+
   constructor(cwd, options = {}) {
     super(cwd, options);
     this.transport = "direct";
+    this.windowsOwnedAgent = null;
+    this.windowsOwnedStartup = null;
+    this.windowsClosePromise = null;
+    this.directAgentSpawnAttempted = false;
+    this.directAgentOwner = null;
+    this.directSpawnAdmission = null;
+    this.brokerAuthorization = null;
   }
 
   async initialize() {
+    if (this.closed || this.closeStarted) throw new Error("Direct Grok agent was closed before startup.");
     const command = this.options.grokBin ?? "grok";
     // Windows では shell が要る。PATH / PATHEXT の解決に加えて、
     // `.cmd` / `.bat` は shell 無しでは起動できないため。
@@ -498,31 +623,130 @@ class SpawnedAcpClient extends AcpClientBase {
     const args = ["agent", "stdio"];
     // shell 有効のまま引数配列を渡すと Node 24 以降が DEP0190 を stderr へ出し、
     // ホストが統合する出力に混ざる。shell のときは 1 本の文字列へ畳む。
-    this.proc = spawn(
-      useShell ? buildShellCommand(quoteIfNeeded(command), args) : command,
-      useShell ? [] : args,
-      {
-        cwd: this.cwd,
-        env: this.options.env ?? process.env,
-        stdio: ["pipe", "pipe", "pipe"],
-        shell: useShell,
-        windowsHide: true
+    const validateBeforeSpawn = () => {
+      const checked = this.options.beforeDirectSpawn?.();
+      if (checked && typeof checked.then === "function") {
+        void Promise.resolve(checked).catch(() => {});
+        throw new TypeError("Direct agent startup verification must be synchronous.");
       }
-    );
+      return checked;
+    };
+    const guardedSpawn = !useShell && this.directSpawnAdmission && typeof this.options.guardOwnerEffect === "function";
+    let guardFailure, guardFailed = false;
+    if (!guardedSpawn) validateBeforeSpawn();
+    if (useShell) {
+      this.windowsOwnedStartup = spawnWindowsAgent(this.cwd, quoteIfNeeded(command), args, {
+        env: this.options.env ?? process.env,
+        beforeSpawn: () => {
+          if (this.closed || this.closeStarted) throw new Error("Direct Grok agent was closed before supervisor startup.");
+          const checked = validateBeforeSpawn();
+          this.directAgentSpawnAttempted = true;
+          return checked;
+        }
+      });
+      this.windowsOwnedAgent = await this.windowsOwnedStartup;
+      this.proc = this.windowsOwnedAgent.proc;
+      if (this.closed || this.closeStarted) {
+        await this.close();
+        throw new Error("Direct Grok agent was closed during startup.");
+      }
+    } else {
+      const spawnChild = () => {
+        if (this.closed || this.closeStarted) throw new Error("Direct Grok agent was closed before spawn.");
+        this.directAgentSpawnAttempted = true;
+        this.proc = spawn(command, args, {
+          cwd: this.cwd,
+          env: this.options.env ?? process.env,
+          stdio: ["pipe", "pipe", "pipe"],
+          shell: false,
+          detached: this.options.posixGroupMode !== "inherit",
+          windowsHide: true
+        });
+        return this.proc;
+      };
+      if (guardedSpawn) {
+        let active = true, called = false, repeated = false;
+        try {
+          let result;
+          try {
+            result = this.options.guardOwnerEffect((_state, context) => {
+              // guard が遅延実行を仕掛けても mutex の外で spawn させない。
+              if (!active) return undefined;
+              if (called) { repeated = true; throw new Error("Direct spawn guard invoked its effect more than once."); }
+              called = true;
+              verifyDirectStartWithinContext(context, this.directSpawnAdmission);
+              context.check();
+              return spawnChild();
+            });
+          } finally { active = false; }
+          if (result && typeof result.then === "function") {
+            void Promise.resolve(result).catch(() => {});
+            throw new TypeError("Direct spawn guard must be synchronous.");
+          }
+          if (!called || repeated || !this.proc || result !== this.proc) throw new Error("Direct spawn guard did not return exactly one owned child.");
+        } catch (error) {
+          guardFailed = true;
+          guardFailure = error;
+        }
+        if (!this.proc) throw guardFailure;
+      } else {
+        spawnChild();
+      }
+      // PIDだけを受け取る停止APIを作らず、このspawnの直子だけをclosureに固定する。
+      const child = this.proc;
+      child.once("error", () => { if (!Number.isInteger(child.pid) || child.pid <= 0) this.#posixSpawnNeverStarted = true; });
+      const groupPid = child.pid;
+      let childExited = false;
+      let childClosed = false;
+      let groupSignalled = false;
+      child.once("exit", () => { childExited = true; });
+      this.#posixChildClosed = new Promise((resolve) => {
+        child.once("close", () => { childClosed = true; resolve(undefined); });
+      });
+      this.#posixChildIsClosed = () => this.proc === child && childClosed;
+      this.#stopPosixGroup = () => {
+        if (this.proc !== child || childExited || groupSignalled || child.killed || child.exitCode !== null || child.signalCode ||
+            !Number.isInteger(groupPid) || groupPid <= 0) return;
+        groupSignalled = true;
+        try {
+          // broker内はbroker所有groupを継承する。agentからその親groupへsignalしない。
+          if (this.options.posixGroupMode === "inherit") child.kill("SIGTERM");
+          else process.kill(-groupPid, "SIGTERM");
+        } catch { /* 後の停止証拠だけで判定する */ }
+      };
+      this.#posixGroupIsEmpty = () => {
+        if (this.options.posixGroupMode === "inherit" || this.proc !== child || !Number.isInteger(groupPid) || groupPid <= 0) return false;
+        try { process.kill(-groupPid, 0); return false; }
+        catch (error) { return error?.code === "ESRCH"; }
+      };
+    }
 
     this.proc.stdout.setEncoding("utf8");
     this.proc.stderr.setEncoding("utf8");
 
     this.proc.stderr.on("data", (chunk) => {
-      this.stderr += chunk;
-      this.options.onStderr?.(chunk);
+      this.appendStderr(chunk);
+      try {
+        this.options.onStderr?.(chunk);
+      } catch (error) {
+        this.handleExit(error, true);
+      }
+    });
+
+    this.proc.stdout.on("error", (error) => this.handleExit(error));
+    this.proc.stderr.on("error", (error) => this.handleExit(error));
+
+    // write() 後の EPIPE 等は ChildProcess ではなく stdin stream に届く。
+    this.proc.stdin.on("error", (error) => {
+      this.handleExit(error);
     });
 
     this.proc.on("error", (error) => {
       this.handleExit(error);
     });
 
-    this.proc.on("exit", (code, signal) => {
+    // exit時点ではstdioに未読データが残り得る。最終応答と診断をdrainしてから確定する。
+    this.proc.on("close", (code, signal) => {
       const stderr = this.stderr.trim();
       const detail =
         code === 0
@@ -533,17 +757,21 @@ class SpawnedAcpClient extends AcpClientBase {
       this.handleExit(detail);
     });
 
-    this.readline = readline.createInterface({ input: this.proc.stdout });
-    this.readline.on("line", (line) => {
-      this.handleLine(line);
-    });
+    this.proc.stdout.on("data", (chunk) => this.handleChunk(chunk));
 
+    // guard 違反時も先に子の所有・終了監視を登録し、呼出元の close へ渡す。
+    if (guardFailed) throw guardFailure;
+
+    if (this.windowsOwnedAgent) await this.windowsOwnedAgent.ready;
+    if (this.closed || this.closeStarted) throw new Error("Direct Grok agent was closed before its ACP handshake.");
     await withTimeout(this.performInitialize(), DIRECT_HANDSHAKE_TIMEOUT_MS);
   }
 
   async close() {
     if (this.closeStarted) {
-      await waitForExitWithTimeout(this.exitPromise);
+      if (this.windowsClosePromise) await this.windowsClosePromise;
+      else if (this.#posixClosePromise) await this.#posixClosePromise;
+      else await waitForExitWithTimeout(this.exitPromise);
       return;
     }
 
@@ -551,31 +779,83 @@ class SpawnedAcpClient extends AcpClientBase {
     this.closed = true;
     this.framer.close();
 
-    if (this.readline) {
-      this.readline.close();
-    }
-
-    if (this.proc && !this.proc.killed) {
-      this.proc.stdin.end();
-      setTimeout(() => {
-        if (this.proc && !this.proc.killed && this.proc.exitCode === null) {
-          // Windows で shell: true のとき直接の子は cmd.exe なので、
-          // 孫の grok プロセスまで含めてツリーごと終了させる。
-          if (process.platform === "win32") {
-            try {
-              terminateProcessTree(this.proc.pid);
-            } catch {
-              // unref 済みタイマー内のベストエフォート後始末。
-              // ここで投げるとホストプロセスごと落ちるので握り潰す。
-            }
-          } else {
-            this.proc.kill("SIGTERM");
-          }
+    if (process.platform === "win32") {
+      // hookから同期closeされても、monitor代入と起動gateの確定を先に終える。
+      this.windowsClosePromise = Promise.resolve().then(async () => {
+        if (!this.windowsOwnedAgent && this.windowsOwnedStartup) {
+          try { this.windowsOwnedAgent = await this.windowsOwnedStartup; } catch { /* 終了証拠は推測しない */ }
         }
-      }, 50).unref?.();
+        if (this.windowsOwnedAgent) {
+          this.proc = this.windowsOwnedAgent.proc;
+          this.proc?.stdin?.end();
+          this.closeStopUnconfirmed = !(await this.windowsOwnedAgent.close());
+        } else {
+          this.closeStopUnconfirmed = Boolean(this.directAgentSpawnAttempted || this.proc);
+        }
+        try {
+          const proof = this.directAgentStopProof();
+          if (this.directAgentOwner && !(await this.directAgentOwner.finish(proof))) this.closeStopUnconfirmed = true;
+        } catch (error) {
+          this.closeStopUnconfirmed = true;
+          throw error;
+        } finally {
+          if (this.closeStopUnconfirmed) this.releaseUnconfirmedProcess();
+        }
+      });
+      await this.windowsClosePromise;
+      return;
     }
 
-    await waitForExitWithTimeout(this.exitPromise);
+    // 同期closeが登録callback内で再入しても、ownerの代入を先に完了する。
+    this.#posixClosePromise = Promise.resolve().then(async () => {
+      const deadline = Date.now() + CLOSE_TIMEOUT_MS;
+      if (this.proc && !this.proc.killed) {
+        this.proc.stdin?.end();
+        setTimeout(() => {
+          // 通常Node/libuvはreapと全exit callbackの配送を同じloop内で終え、
+          // timer phaseと交差させない。未配送のleaderは未reapでPID/PGIDを保持する。
+          // checkとkillは同期のままにし、任意のexit callbackへ移動しない。
+          // 独自waitpidを行う外部native addonの実行環境はこの保証に含めない。
+          this.#stopPosixGroup?.();
+        }, 50).unref?.();
+      }
+
+      // protocol fatalもexitPromiseを解決するため、実子のstdio closeを別に待つ。
+      if (this.proc) await waitForExitWithTimeout(this.#posixChildClosed ?? this.exitPromise, Math.max(0, deadline - Date.now()));
+      if (this.#posixChildIsClosed?.() && this.options.posixGroupMode !== "inherit") {
+        do {
+          if (this.#posixGroupIsEmpty?.()) { this.#posixGroupEmptyConfirmed = true; break; }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          await new Promise(resolve => setTimeout(resolve, Math.min(10, remaining)));
+        } while (true);
+      }
+      if (this.proc && !this.#posixSpawnNeverStarted && (!this.#posixChildIsClosed?.() || !this.#posixGroupEmptyConfirmed)) this.closeStopUnconfirmed = true;
+      try {
+        if (this.directAgentOwner && !(await this.directAgentOwner.finish(this.directAgentStopProof()))) this.closeStopUnconfirmed = true;
+      } catch (error) {
+        this.closeStopUnconfirmed = true;
+        throw error;
+      } finally {
+        if (this.closeStopUnconfirmed) this.releaseUnconfirmedProcess();
+      }
+    });
+    await this.#posixClosePromise;
+  }
+
+  releaseUnconfirmedProcess() {
+    this.proc?.stdin?.destroy?.();
+    this.proc?.stdout?.destroy?.();
+    this.proc?.stderr?.destroy?.();
+    this.proc?.unref?.();
+  }
+
+  directAgentStopProof() {
+    if (this.windowsOwnedAgent?.stopConfirmed === true) return "job-empty";
+    if (this.#posixChildIsClosed?.() && this.#posixGroupEmptyConfirmed) return "posix-group-empty";
+    if (this.#posixSpawnNeverStarted) return "never-started";
+    // closed gateを立てた後の「一度もspawnを試みていない」だけを別証拠にする。
+    return this.closed && !this.directAgentSpawnAttempted && !this.proc ? "never-started" : false;
   }
 
   sendMessage(message) {
@@ -588,13 +868,38 @@ class SpawnedAcpClient extends AcpClientBase {
   }
 }
 
-async function connectDirectClient(cwd, options) {
+async function connectDirectClient(cwd, options, brokerOwned = false) {
   const client = new SpawnedAcpClient(cwd, options);
+  let admission = null;
   try {
+    if (options.directAgentStarting) {
+      client.directAgentOwner = options.directAgentStarting({ close: async () => {
+        await client.close();
+        return client.directAgentStopProof();
+      } });
+    }
+    if (!brokerOwned) {
+      if (client.closed || client.closeStarted) throw new Error("Direct Grok agent was closed before startup.");
+      admission = reserveDirectAdmission(cwd);
+      client.directSpawnAdmission = admission;
+      client.options.beforeDirectSpawn = () => verifyDirectStart(cwd, admission);
+    }
     await client.initialize();
+    if (client.closed || client.closeStarted) throw new Error("Direct Grok agent was closed during startup.");
+    if (admission) {
+      finishDirectStart(cwd, admission, "ready");
+      admission = null;
+    }
     return client;
   } catch (error) {
-    await client.close().catch(() => {});
+    try { await client.close(); } catch { client.closeStopUnconfirmed = true; }
+    if (admission) {
+      try {
+        const proof = client.directAgentStopProof();
+        if (!proof || !finishDirectStart(cwd, admission, proof)) client.closeStopUnconfirmed = true;
+      } catch { client.closeStopUnconfirmed = true; }
+    }
+    if (client.closeStopUnconfirmed && error && typeof error === "object") error.turnStopUnconfirmed = true;
     throw error;
   }
 }
@@ -631,6 +936,7 @@ class BrokerAcpClient extends AcpClientBase {
 
   async close() {
     if (this.closeStarted) {
+      if (this.exitError) this.socket?.destroy();
       await waitForExitWithTimeout(this.exitPromise);
       return;
     }
@@ -639,12 +945,20 @@ class BrokerAcpClient extends AcpClientBase {
     this.closed = true;
     this.framer.close();
     if (this.socket) {
-      this.socket.end();
-    }
+      if (this.options.brokerOnly || this.exitError) this.socket.destroy();
+      else this.socket.end();
+    } else this.handleExit(null);
     await waitForExitWithTimeout(this.exitPromise);
   }
 
   sendMessage(message) {
+    if (this.options.cancellationOnly &&
+        (message.method !== "initialize" && (message.method !== "broker/cancelTurn" ||
+          message.params?.generation !== this.options.cancellationGeneration ||
+          message.params?.sessionId !== this.options.cancellationSessionId ||
+          message.params?.executionId !== this.options.cancellationExecutionId))) {
+      throw new Error("Cancellation-only broker client refuses this operation or generation.");
+    }
     const line = `${JSON.stringify(message)}\n`;
     const socket = this.socket;
     if (!socket) {
@@ -655,37 +969,107 @@ class BrokerAcpClient extends AcpClientBase {
 }
 
 export class GrokAcpClient {
+  static async connectBrokerOwned(cwd, options = {}) {
+    const authorization = await authorizeBrokerChild(cwd, options.brokerEndpoint);
+    try {
+      const env = { ...(options.env ?? process.env) };
+      for (const key of ["CLAUDE_PLUGIN_DATA", "PLUGIN_DATA", "TMPDIR", "TMP", "TEMP"]) {
+        const value = authorization.grant.agentEnv[key];
+        if (value === null) delete env[key]; else env[key] = value;
+      }
+      const client = await connectDirectClient(cwd, { ...options, env,
+        beforeDirectSpawn: () => verifyBrokerEpoch(cwd, authorization.grant.ownerIdentity.epoch) }, true);
+      client.brokerAuthorization = authorization;
+      return client;
+    } catch (error) { authorization.channel.destroy(); throw error; }
+  }
   static async connect(cwd, options = {}) {
+    if (options.cancellationOnly && (!options.brokerOnly ||
+        ![options.cancellationGeneration, options.cancellationSessionId, options.cancellationExecutionId].every(value => typeof value === "string" && value))) {
+      throw new Error("Cancellation-only broker connection requires recorded generation, session, and execution identities.");
+    }
     let brokerEndpoint = null;
+    let managedAdmission = null;
+    let managedGeneration = null;
     if (!options.disableBroker) {
       brokerEndpoint = options.brokerEndpoint ?? options.env?.[BROKER_ENDPOINT_ENV] ?? process.env[BROKER_ENDPOINT_ENV] ?? null;
-      if (!brokerEndpoint && options.reuseExistingBroker) {
-        brokerEndpoint = loadBrokerSession(cwd)?.endpoint ?? null;
+      if (brokerEndpoint && process.platform === "linux") {
+        const known = findExplicitManagedSession(cwd, brokerEndpoint);
+        if (known?.legacy) throw new Error("Explicit managed broker belongs to a legacy epoch; offline recovery is required.");
+        if (known) {
+          if (options.cancellationOnly) {
+            if (known.session.generation !== options.cancellationGeneration) throw new Error("Recorded broker generation changed before cancellation.");
+            inspectManagedBrokerForCancel(cwd, known.session);
+          } else managedAdmission = reserveManagedBroker(cwd, known.session);
+          managedGeneration = known.session.generation;
+        }
       }
-      if (!brokerEndpoint && !options.reuseExistingBroker) {
+      if (!brokerEndpoint && options.reuseExistingBroker) {
+        const lookupBudget = options.brokerDeadlineMs ? options.brokerDeadlineMs - Date.now() : 7500;
+        if (lookupBudget <= 0) throw new Error("Broker lookup deadline expired.");
+        const session = loadBrokerSession(cwd, performance.now() + lookupBudget);
+        if (session) {
+          const timeoutMs = options.brokerDeadlineMs ? Math.max(1, options.brokerDeadlineMs - Date.now()) : 7500;
+          if (options.cancellationOnly) {
+            if (session.generation !== options.cancellationGeneration) throw new Error("Recorded broker generation changed before cancellation.");
+            inspectManagedBrokerForCancel(cwd, session, { timeoutMs });
+          } else managedAdmission = reserveManagedBroker(cwd, session, { timeoutMs });
+          brokerEndpoint = session.endpoint;
+          managedGeneration = session.generation;
+        }
+      }
+      if (!brokerEndpoint && !options.reuseExistingBroker && !options.brokerOnly) {
         const brokerSession = await ensureBrokerSession(cwd, { env: options.env });
-        brokerEndpoint = brokerSession?.endpoint ?? null;
+        if (brokerSession) {
+          managedAdmission = reserveManagedBroker(cwd, brokerSession);
+          brokerEndpoint = brokerSession.endpoint;
+          managedGeneration = brokerSession.generation;
+        }
       }
     }
     if (!brokerEndpoint) {
+      if (options.brokerOnly) throw new Error("No existing Grok broker is available for cancellation.");
       return connectDirectClient(cwd, options);
     }
 
     const client = new BrokerAcpClient(cwd, { ...options, brokerEndpoint });
+    let brokerInitialized = false;
     try {
-      await withTimeout(client.initialize(), BROKER_HANDSHAKE_TIMEOUT_MS);
+      const timeoutMs = options.brokerDeadlineMs
+        ? Math.max(1, Math.min(BROKER_HANDSHAKE_TIMEOUT_MS, options.brokerDeadlineMs - Date.now()))
+        : BROKER_HANDSHAKE_TIMEOUT_MS;
+      await withTimeout(client.initialize(), timeoutMs);
+      brokerInitialized = true;
+      if (options.cancellationOnly && client.initializeResult?._meta?.grokBrokerGeneration !== options.cancellationGeneration) {
+        throw new Error("Broker generation did not match the cancellation request.");
+      }
+      if (managedGeneration && client.initializeResult?._meta?.grokBrokerGeneration !== managedGeneration) {
+        throw new Error("Broker generation did not match the managed session.");
+      }
+      if (managedAdmission) {
+        const remaining = options.brokerDeadlineMs ? Math.max(1, options.brokerDeadlineMs - Date.now()) : 7500;
+        finishDirectStart(cwd, managedAdmission, "ready", { timeoutMs: remaining });
+        managedAdmission = null;
+      }
       return client;
     } catch (error) {
       // 応答しないブローカーを掴んだ場合は、それを諦めて自前で起動し直す。
       // ここで諦めないと呼び出し側がハングしたまま戻らない。
       await client.close().catch(() => {});
+      if (managedAdmission) {
+        try {
+          const remaining = options.brokerDeadlineMs ? Math.max(1, options.brokerDeadlineMs - Date.now()) : 7500;
+          finishDirectStart(cwd, managedAdmission, brokerInitialized ? "ready" : "never-started", { timeoutMs: remaining });
+        }
+        catch (releaseError) { error.cause ??= releaseError; throw error; }
+      }
+      if (options.brokerOnly || brokerInitialized) throw error;
       // タイムアウトに限らず、接続失敗（消えたソケット等）でも直接起動へ落とす。
       // 直接起動まで失敗したときだけ、元の失敗理由を添えて投げ直す。
       try {
         return await connectDirectClient(cwd, options);
       } catch (fallbackError) {
-        fallbackError.cause = error;
-        throw fallbackError;
+        throw attachBrokerFailure(fallbackError, error);
       }
     }
   }

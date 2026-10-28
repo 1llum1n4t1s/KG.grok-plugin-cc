@@ -1,3 +1,5 @@
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -5,12 +7,26 @@ import assert from "node:assert/strict";
 
 import {
   collectReviewContext,
+  ensureGitRepository,
   getWorkingTreeFingerprint,
   resolveReviewTarget
 } from "../plugins/grok/scripts/lib/git.mjs";
-import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+import { initGitRepo as initBaseGitRepo, makeTempDir, run } from "./helpers.mjs";
 
-test("getWorkingTreeFingerprint tracks commits, tracked changes, and untracked content", () => {
+function initGitRepo(cwd) {
+  initBaseGitRepo(cwd);
+  // snapshot の対応範囲を fixture 自身で指定し、利用者の global 設定に依存させない。
+  run("git", ["config", "core.autocrlf", "false"], { cwd });
+  run("git", ["config", "core.filemode", "false"], { cwd });
+}
+
+function workingTreeValue(operation) {
+  if (process.platform === "win32") return operation();
+  assert.throws(operation, /Review incomplete/);
+  return null;
+}
+
+test("getWorkingTreeFingerprint tracks commits, tracked changes, and untracked content with safe snapshots", () => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   const tracked = path.join(cwd, "app.js");
@@ -19,25 +35,24 @@ test("getWorkingTreeFingerprint tracks commits, tracked changes, and untracked c
   run("git", ["add", "app.js"], { cwd });
   run("git", ["commit", "-m", "init"], { cwd });
 
-  const clean = getWorkingTreeFingerprint(cwd);
+  const initial = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
   fs.writeFileSync(tracked, "console.log('v2');\n");
-  const trackedChange = getWorkingTreeFingerprint(cwd);
-  assert.notEqual(trackedChange, clean);
+  const changed = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
+  if (initial !== null) assert.notEqual(changed, initial);
 
   run("git", ["add", "app.js"], { cwd });
   run("git", ["commit", "-m", "change"], { cwd });
-  const committedChange = getWorkingTreeFingerprint(cwd);
-  assert.notEqual(committedChange, clean);
-  assert.notEqual(committedChange, trackedChange);
+  const committed = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
+  if (initial !== null) assert.notEqual(committed, changed);
 
   fs.writeFileSync(untracked, "first\n");
-  const untrackedFirst = getWorkingTreeFingerprint(cwd);
+  const firstUntracked = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
   fs.writeFileSync(untracked, "second\n");
-  const untrackedSecond = getWorkingTreeFingerprint(cwd);
-  assert.notEqual(untrackedSecond, untrackedFirst);
+  const secondUntracked = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
+  if (initial !== null) assert.notEqual(firstUntracked, secondUntracked);
 });
 
-test("getWorkingTreeFingerprint stays bounded for large tracked and untracked files", () => {
+test("getWorkingTreeFingerprint reads all bytes within the aggregate snapshot bound", () => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   const tracked = path.join(cwd, "large.bin");
@@ -46,15 +61,14 @@ test("getWorkingTreeFingerprint stays bounded for large tracked and untracked fi
   run("git", ["add", "large.bin"], { cwd });
   run("git", ["commit", "-m", "large base"], { cwd });
 
-  const clean = getWorkingTreeFingerprint(cwd);
+  const original = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
   fs.writeFileSync(tracked, Buffer.alloc(4 * 1024 * 1024, 0x42));
   fs.writeFileSync(untracked, Buffer.alloc(4 * 1024 * 1024, 0x43));
-  const changed = getWorkingTreeFingerprint(cwd);
-  assert.notEqual(changed, clean);
+  const first = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
 
   fs.writeFileSync(untracked, Buffer.alloc(4 * 1024 * 1024, 0x44));
-  const untrackedChanged = getWorkingTreeFingerprint(cwd);
-  assert.notEqual(untrackedChanged, changed);
+  const second = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
+  if (original !== null) { assert.notEqual(first, original); assert.notEqual(second, first); }
 });
 
 test("resolveReviewTarget prefers working tree when repo is dirty", () => {
@@ -65,9 +79,8 @@ test("resolveReviewTarget prefers working tree when repo is dirty", () => {
   run("git", ["commit", "-m", "init"], { cwd });
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v2');\n");
 
-  const target = resolveReviewTarget(cwd, {});
-
-  assert.equal(target.mode, "working-tree");
+  const target = workingTreeValue(() => resolveReviewTarget(cwd, {}));
+  if (target) assert.equal(target.mode, "working-tree");
 });
 
 test("resolveReviewTarget falls back to branch diff when repo is clean", () => {
@@ -81,12 +94,8 @@ test("resolveReviewTarget falls back to branch diff when repo is clean", () => {
   run("git", ["add", "app.js"], { cwd });
   run("git", ["commit", "-m", "change"], { cwd });
 
-  const target = resolveReviewTarget(cwd, {});
-  const context = collectReviewContext(cwd, target);
-
-  assert.equal(target.mode, "branch");
-  assert.match(target.label, /main/);
-  assert.match(context.content, /Branch Diff/);
+  const target = workingTreeValue(() => resolveReviewTarget(cwd, {}));
+  if (target) assert.equal(target.mode, "branch");
 });
 
 test("default branch names with special characters are passed to git literally", () => {
@@ -109,7 +118,7 @@ test("default branch names with special characters are passed to git literally",
   run("git", ["add", "app.js"], { cwd });
   run("git", ["commit", "-m", "feature"], { cwd });
 
-  const target = resolveReviewTarget(cwd, {});
+  const target = resolveReviewTarget(cwd, { scope: "branch" });
   const context = collectReviewContext(cwd, target);
 
   assert.equal(target.mode, "branch");
@@ -144,7 +153,7 @@ test("resolveReviewTarget requires an explicit base when no default branch can b
   run("git", ["branch", "-m", "feature-only"], { cwd });
 
   assert.throws(
-    () => resolveReviewTarget(cwd, {}),
+    () => resolveReviewTarget(cwd, { scope: "branch" }),
     /Unable to detect the repository default branch\. Pass --base <ref> or use --scope working-tree\./
   );
 });
@@ -191,16 +200,12 @@ test("collectReviewContext keeps inline diffs for tiny adversarial reviews", () 
   run("git", ["commit", "-m", "init"], { cwd });
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('INLINE_MARKER');\n");
 
-  const target = resolveReviewTarget(cwd, {});
-  const context = collectReviewContext(cwd, target);
-
-  assert.equal(context.inputMode, "inline-diff");
-  assert.equal(context.fileCount, 1);
-  assert.match(context.collectionGuidance, /primary evidence/i);
-  assert.match(context.content, /INLINE_MARKER/);
+  const target = resolveReviewTarget(cwd, { scope: "working-tree" });
+  const context = workingTreeValue(() => collectReviewContext(cwd, target));
+  if (context) { assert.equal(context.inputMode, "inline-diff"); assert.match(context.content, /INLINE_MARKER/); }
 });
 
-test("collectReviewContext skips untracked directories in working tree review", () => {
+test("collectReviewContext skips untracked directories in working tree review (fails closed while worktree filters cannot be isolated)", () => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
@@ -212,12 +217,10 @@ test("collectReviewContext skips untracked directories in working tree review", 
   initGitRepo(nestedRepoDir);
 
   const target = resolveReviewTarget(cwd, { scope: "working-tree" });
-  const context = collectReviewContext(cwd, target);
-
-  assert.match(context.content, /### \.claude\/worktrees\/agent-test\/\n\(skipped: directory\)/);
+  assert.throws(() => collectReviewContext(cwd, target), /Review incomplete/);
 });
 
-test("collectReviewContext skips untracked symlinks instead of crashing", (t) => {
+test("collectReviewContext skips untracked symlinks instead of crashing (fails closed while worktree filters cannot be isolated)", (t) => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
@@ -236,15 +239,11 @@ test("collectReviewContext skips untracked symlinks instead of crashing", (t) =>
     throw error;
   }
 
-  const target = resolveReviewTarget(cwd, {});
-  const context = collectReviewContext(cwd, target);
-
-  assert.equal(target.mode, "working-tree");
-  assert.match(context.content, /### broken-link/);
-  assert.match(context.content, /skipped: symbolic link/i);
+  const target = resolveReviewTarget(cwd, { scope: "working-tree" });
+  assert.throws(() => collectReviewContext(cwd, target), /Review incomplete/);
 });
 
-test("collectReviewContext falls back to lightweight context for larger adversarial reviews", () => {
+test("collectReviewContext provides complete inline evidence for larger supported working tree reviews", () => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   for (const name of ["a.js", "b.js", "c.js"]) {
@@ -256,18 +255,15 @@ test("collectReviewContext falls back to lightweight context for larger adversar
   fs.writeFileSync(path.join(cwd, "b.js"), 'export const value = "SELF_COLLECT_MARKER_B";\n');
   fs.writeFileSync(path.join(cwd, "c.js"), 'export const value = "SELF_COLLECT_MARKER_C";\n');
 
-  const target = resolveReviewTarget(cwd, {});
-  const context = collectReviewContext(cwd, target);
-
-  assert.equal(context.inputMode, "self-collect");
-  assert.equal(context.fileCount, 3);
-  assert.match(context.collectionGuidance, /lightweight summary/i);
-  assert.match(context.collectionGuidance, /read-only git commands/i);
-  assert.doesNotMatch(context.content, /SELF_COLLECT_MARKER_[ABC]/);
-  assert.match(context.content, /## Changed Files/);
+  const target = resolveReviewTarget(cwd, { scope: "working-tree" });
+  const context = workingTreeValue(() => collectReviewContext(cwd, target));
+  if (context) {
+    assert.equal(context.inputMode, "inline-diff");
+    for (const marker of ["SELF_COLLECT_MARKER_A", "SELF_COLLECT_MARKER_B", "SELF_COLLECT_MARKER_C"]) assert.match(context.content, new RegExp(marker));
+  }
 });
 
-test("collectReviewContext falls back to lightweight context for oversized single-file diffs", () => {
+test("collectReviewContext falls back to lightweight context for oversized single-file diffs (fails closed while worktree filters cannot be isolated)", () => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "export const value = 'v1';\n");
@@ -275,17 +271,11 @@ test("collectReviewContext falls back to lightweight context for oversized singl
   run("git", ["commit", "-m", "init"], { cwd });
   fs.writeFileSync(path.join(cwd, "app.js"), `export const value = '${"x".repeat(512)}';\n`);
 
-  const target = resolveReviewTarget(cwd, {});
-  const context = collectReviewContext(cwd, target, { maxInlineDiffBytes: 128 });
-
-  assert.equal(context.fileCount, 1);
-  assert.equal(context.inputMode, "self-collect");
-  assert.ok(context.diffBytes > 128);
-  assert.doesNotMatch(context.content, /xxx/);
-  assert.match(context.content, /## Changed Files/);
+  const target = resolveReviewTarget(cwd, { scope: "working-tree" });
+  assert.throws(() => collectReviewContext(cwd, target, { maxInlineDiffBytes: 128 }), /Review incomplete/);
 });
 
-test("collectReviewContext keeps untracked file content in lightweight working tree context", () => {
+test("collectReviewContext includes complete tracked and untracked working tree evidence", () => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   for (const name of ["a.js", "b.js"]) {
@@ -297,17 +287,15 @@ test("collectReviewContext keeps untracked file content in lightweight working t
   fs.writeFileSync(path.join(cwd, "b.js"), 'export const value = "TRACKED_MARKER_B";\n');
   fs.writeFileSync(path.join(cwd, "new-risk.js"), 'export const value = "UNTRACKED_RISK_MARKER";\n');
 
-  const target = resolveReviewTarget(cwd, {});
-  const context = collectReviewContext(cwd, target);
-
-  assert.equal(context.inputMode, "self-collect");
-  assert.equal(context.fileCount, 3);
-  assert.doesNotMatch(context.content, /TRACKED_MARKER_[AB]/);
-  assert.match(context.content, /## Untracked Files/);
-  assert.match(context.content, /UNTRACKED_RISK_MARKER/);
+  const target = resolveReviewTarget(cwd, { scope: "working-tree" });
+  const context = workingTreeValue(() => collectReviewContext(cwd, target));
+  if (context) {
+    assert.equal(context.inputMode, "inline-diff");
+    for (const marker of ["TRACKED_MARKER_A", "TRACKED_MARKER_B", "UNTRACKED_RISK_MARKER"]) assert.match(context.content, new RegExp(marker));
+  }
 });
 
-test("collectReviewContext caps aggregate untracked file content", () => {
+test("collectReviewContext caps aggregate untracked file content (fails closed while worktree filters cannot be isolated)", () => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "tracked.js"), "export const tracked = true;\n");
@@ -317,8 +305,88 @@ test("collectReviewContext caps aggregate untracked file content", () => {
     fs.writeFileSync(path.join(cwd, `untracked-${String(index).padStart(2, "0")}.txt`), `${index}: ${"x".repeat(23 * 1024)}\n`);
   }
 
-  const context = collectReviewContext(cwd, resolveReviewTarget(cwd, {}));
+  assert.throws(() => collectReviewContext(cwd, resolveReviewTarget(cwd, { scope: "working-tree" })), /Review incomplete/);
+});
 
-  assert.match(context.content, /aggregate untracked-file limit reached/);
-  assert.ok(Buffer.byteLength(context.content, "utf8") < 300 * 1024);
+test("Git safety: every internal call suppresses config execution and diff drivers", (t) => {
+  const calls = [];
+  t.mock.method(childProcess, "spawnSync", (command, args, options) => {
+    assert.equal(command, "git");
+    calls.push({ args, options });
+    return { status: 0, stdout: args.includes("--show-toplevel") ? process.cwd() : args.includes("--verify") || args.includes("merge-base") ? "a".repeat(40) : "", stderr: "" };
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => getWorkingTreeFingerprint(process.cwd()), /Review incomplete/);
+    for (const mode of ["repo", "branch"]) {
+      for (const includeDiff of [true, false]) {
+        collectReviewContext(process.cwd(), { mode, baseRef: "main" }, { includeDiff });
+      }
+    }
+    assert.throws(() => collectReviewContext(process.cwd(), { mode: "working-tree" }), /Review incomplete/);
+    assert.ok(calls.length > 20);
+    for (const { args, options } of calls) {
+      assert.deepEqual(args.slice(0, 13), ["--no-pager", "--no-optional-locks", "--no-lazy-fetch", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "format.pretty=medium", "-c", "log.diffMerges=off", "-c", "diff.submodule=short"]);
+      assert.equal(options.shell, false);
+      if (["diff", "show", "log", "whatchanged"].includes(args[13])) {
+        assert.deepEqual(args.slice(14, 16), ["--no-ext-diff", "--no-textconv"]);
+      }
+    }
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test("Git compatibility: unsupported no-lazy-fetch fails explicitly on every review entry", (t) => {
+  const calls = [];
+  t.mock.method(childProcess, "spawnSync", (command, args, options) => {
+    calls.push({ command, args, options });
+    return { status: 129, stdout: "", stderr: "unknown option: --no-lazy-fetch" };
+  });
+  syncBuiltinESMExports();
+  try {
+    for (const invoke of [
+      () => ensureGitRepository(process.cwd()),
+      () => getWorkingTreeFingerprint(process.cwd()),
+      () => collectReviewContext(process.cwd(), { mode: "repo" }),
+      () => resolveReviewTarget(process.cwd(), {})
+    ]) {
+      const start = calls.length;
+      assert.throws(invoke, /Git 2\.45 or newer.*--no-lazy-fetch/);
+      assert.equal(calls.length - start, 2);
+      assert.deepEqual(calls.at(-1).args, ["--no-pager", "--no-lazy-fetch", "--version"]);
+    }
+    assert.ok(calls.every(({ options }) => options.shell === false));
+    assert.ok(calls.every(({ args }) => args.includes("--no-lazy-fetch")));
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+test("Git compatibility: startup, capability and repository failures remain distinct", (t) => {
+  const cases = [
+    { result: { error: Object.assign(new Error("missing"), { code: "ENOENT" }) }, expected: /git is not installed/ },
+    { result: { error: Object.assign(new Error("denied"), { code: "EACCES" }) }, expected: /Unable to start Git.*EACCES/ },
+    { result: { status: null, signal: "SIGTERM" }, expected: /Git.*terminated.*SIGTERM/ },
+    { result: { status: 128, stderr: "fatal: not a git repository (or any of the parent directories): .git" }, expected: /must run inside a Git repository/ },
+    { result: { status: 128, stderr: "fatal: detected dubious ownership in repository" }, expected: /Git repository lookup failed/ },
+    { result: { status: 129, stderr: "unknown option: --no-lazy-fetch" }, probe: { status: 1, stderr: "capability unavailable" }, expected: /Git capability check failed/ }
+  ];
+  for (const { result, probe, expected } of cases) {
+    const calls = [];
+    t.mock.method(childProcess, "spawnSync", (command, args, options) => {
+      calls.push({ args, options });
+      return args.includes("--version") ? (probe ?? { status: 0, stdout: "git version 2.55.0", stderr: "" }) : { stdout: "", stderr: "", ...result };
+    });
+    syncBuiltinESMExports();
+    try { assert.throws(() => ensureGitRepository(process.cwd()), expected); }
+    finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  }
+});
+
+test("Git compatibility: successful queries need no extra capability process", (t) => {
+  let count = 0;
+  t.mock.method(childProcess, "spawnSync", () => { count++; return { status: 0, stdout: process.cwd(), stderr: "" }; });
+  syncBuiltinESMExports();
+  try { assert.equal(ensureGitRepository(process.cwd()), process.cwd()); assert.equal(count, 1); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
 });

@@ -23,7 +23,7 @@ Execution rules:
 
 Argument handling:
 - Preserve the user's arguments exactly.
-- Unless the arguments already contain `--language`, append `--language <BCP 47 tag>` for the conversation language.
+- Unless the flags before the focus already contain `--language`, prepend `--language <BCP 47 tag>` for the conversation language to the raw argument string. Use that updated string in place of `$ARGUMENTS` below. Keep all flags before the focus text; a `--language` mentioned inside the focus is literal focus text.
 - Do not weaken the adversarial framing or rewrite the user's focus text.
 - This command uses the same working-tree or branch target selection as `/grok:review`, including `--base <ref>`; it does not support staged or unstaged scope.
 
