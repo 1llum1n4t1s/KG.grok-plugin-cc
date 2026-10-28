@@ -117,18 +117,7 @@ Worth knowing before you install, because this plugin does more than add prompts
   This differs from an unresolved startup admission journal:
   the broker admission journal under the repository's plugin state directory blocks startup
   explicitly if pending, corrupt, or full; it does not silently fall back to a direct agent.
-  Journal v2 records `pending` → `spawned` → `settled` → `confirmed`; `settled` alone remains unconfirmed.
-  A complete matching `confirmed` line records that the preceding `settled` write and synchronization
-  succeeded. Legacy v1 journals are retained and refused, without automatic migration.
-  Direct startup is reserved under the same state mutex as broker pending, with journal files
-  marking unconfirmed starts. On Linux, broker and direct records use `broker-v3/<epoch>` and
-  `direct-start-v2/<epoch>`; on Windows and macOS they use `broker-v2/broker-admission.jsonl`
-  and `direct-start-v1/*.jsonl`. A pending broker blocks direct startup;
-  an unconfirmed direct start blocks a new broker generation. Automatically selected existing
-  brokers also require matching confirmed admission. Cancellation-only connections cannot send
-  prompts and target only the recorded generation/session/execution, without starting a replacement.
-  A child broker may start its agent only after dedicated inherited-pipe authorization and validation
-  of its recorded startup identity; its ready acknowledgement is sent only after listen succeeds.
+  Startup reservation and cancellation ownership are described in [DESIGN.md](DESIGN.md#データフローと設計判断).
   The append-only journal has a 4 MiB limit and reserves space for three following records. Even normal
   long-term use can exhaust it and block new broker generations before 4 MiB; automatic rotation or
   compaction is not implemented. Keep the journal and logs for investigation rather than deleting them.
@@ -470,7 +459,8 @@ node scripts/grok-companion.mjs state-lock migrate --offline-confirmed --local-o
 Replace the placeholders with the actual paths, keeping PowerShell's single quotes so dollar signs
 and backticks are not expanded. Inside a single-quoted PowerShell path, write an apostrophe as `''`.
 
-On macOS/Linux, use a POSIX shell:
+On macOS/Linux, use a POSIX shell. On macOS this command initializes a new state directory;
+existing legacy file locks and older markers are refused as described below:
 
 ```sh
 node scripts/grok-companion.mjs state-lock migrate --offline-confirmed --local-only --expected-state-dir '<absolute-state-dir>' --cwd '<workspace>'
@@ -530,9 +520,12 @@ rename the whole barrier to an unused sibling name inside the same state directo
 Then rerun migration with the same host environment, workspace and correct `--expected-state-dir`.
 Do not apply this recovery to symbolic links or unknown paths. Keep the archived barrier and all state data.
 
-On macOS the current marker is `posix-local-v3`. An older marker is refused and requires the same
-explicit offline migration; it is not upgraded automatically. Migration also checks the existing state
-and job records and refuses unknown, missing, inconsistent, or oversized records. In particular, an
+On macOS the current marker is `posix-local-v4`. Older markers are retained and refused;
+they are not upgraded automatically. Legacy file-lock migration requires
+`--all-old-processes-stopped` and the exact state directory, but currently refuses even with these
+confirmations because migration completion evidence is not integrated. Keep the old processes stopped
+and preserve the records; changing flags or markers does not make this migration available.
+Migration also checks the existing state and job records and refuses unknown, missing, inconsistent, or oversized records. In particular, an
 archived lock or barrier left beside `state.lock` is an unknown state-directory entry and prevents
 migration. If migration refuses an existing lock, marker, or inventory, keep the old processes stopped
 and preserve the state, jobs, and barrier for investigation. Do not delete or manually alter records to
@@ -770,15 +763,8 @@ Claude Code と Codex を併用するときは、それぞれにプラグイン�
   journal がある孤立した起動 lock により、以降が直接起動になる場合があり、自動復旧はありません。不正な保存済み broker
   記録も保持して拒否します。起動 lock が残っているのに journal がない場合は起動を拒否し、調査用に lock を保持します。
   一方、リポジトリ別のプラグイン状態内にある broker admission journal が未完了・破損・容量不足なら、
-  起動を明示拒否し、直接起動へ黙って切り替えません。journal v2 は `pending` → `spawned` → `settled` → `confirmed` と記録し、
-  `settled` だけでは未確定のままです。対応する完全な `confirmed` 行は、直前の `settled` の書込み・同期成功を示します。
-  旧 v1 journal は保全して拒否し、自動移行しません。direct 起動は broker pending と同じ state mutex 内で予約し、
-  journal に未確認の起動を記録します。Linux の記録先は `broker-v3/<epoch>` と `direct-start-v2/<epoch>`、
-  Windows と macOS では `broker-v2/broker-admission.jsonl` と `direct-start-v1/*.jsonl` です。
-  broker pending 中は direct 起動を、direct 起動が未確認なら新しい
-  broker 世代を拒否します。保存済み broker の自動採用にも対応する確定済み admission が必要です。取消専用接続は prompt を
-  送信できず、記録された generation/session/execution だけを対象とし、代替プロセスを起動しません。子 broker の agent 起動には
-  専用の継承 pipe による認可と記録された起動 identity の検証が必要で、ready ACK は listen 成功後にだけ返します。
+  起動を明示拒否し、直接起動へ黙って切り替えません。起動予約と取消の所有権の内部仕様は
+  [DESIGN.md](DESIGN.md#データフローと設計判断) を参照してください。
   この追記専用 journal は後続3記録分の予約領域を含む 4 MiB 上限があり、
   通常の長期利用でも 4 MiB に達する前に新しい broker 世代を起動できなくなり得ます。自動ローテーション・圧縮は未実装です。
   調査のため journal とログを保持し、削除しないでください。
@@ -1103,7 +1089,8 @@ node scripts/grok-companion.mjs state-lock migrate --offline-confirmed --local-o
 placeholder を実際のパスへ置き換え、`$` や backtick が展開されないよう PowerShell の単一引用符を維持してください。
 単一引用符で囲んだパス内の `'` は、PowerShell では `''` と記述します。
 
-macOS/Linux では POSIX shell を使います。
+macOS/Linux では POSIX shell を使います。macOS では次のコマンドは新規状態の初期化に使います。
+既存の旧 file lock や旧 marker は、後述のとおり拒否されます。
 
 ```sh
 node scripts/grok-companion.mjs state-lock migrate --offline-confirmed --local-only --expected-state-dir '<absolute-state-dir>' --cwd '<workspace>'
@@ -1153,8 +1140,11 @@ state directory 内の未使用の別名へ barrier 全体を改名して保管�
 その後、同じ host 環境・workspace と正しい `--expected-state-dir` で明示移行を再実行します。
 symbolic link や不明なパスへこの復旧を適用せず、保管した barrier と既存 state を保持してください。
 
-macOS の現行 marker は `posix-local-v3` です。旧 marker は拒否され、同じ明示的な offline 移行が必要で、
-自動更新されません。移行時には既存の state と job 記録も検査し、未知・欠落・不整合・サイズ超過の記録を拒否します。
+macOS の現行 marker は `posix-local-v4` です。旧 marker は保全して拒否し、自動更新しません。
+旧 file-lock の移行には `--all-old-processes-stopped` と正確な保存先が必要ですが、現行実装では
+移行完了の証拠が未統合のため、これらを指定しても拒否されます。旧プロセスを停止したまま記録を保全してください。
+フラグや marker の変更で移行できるようにはなりません。
+移行時には既存の state と job 記録も検査し、未知・欠落・不整合・サイズ超過の記録を拒否します。
 特に `state.lock` の隣に保管した旧 lock や barrier は未知の state directory entry となり、移行を妨げます。
 既存 lock・marker・記録の検査で拒否された場合は、旧プロセスを停止したまま state・jobs・barrier を保全して調査してください。
 移行を強行するために記録を削除・手動変更しないでください。これら macOS のケースを自動保管・復旧する汎用コマンドはありません。
