@@ -4,8 +4,15 @@ export function readJsonFile(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
-export function readHookInput() {
-  const raw = fs.readFileSync(0, "utf8").trim();
+async function readStdin() {
+  process.stdin.setEncoding("utf8");
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return chunks.join("");
+}
+
+export async function readHookInput() {
+  const raw = (await readStdin()).trim();
   return raw ? JSON.parse(raw) : {};
 }
 
@@ -19,9 +26,9 @@ export function isProbablyText(buffer) {
   return true;
 }
 
-export function readStdinIfPiped() {
+export async function readStdinIfPiped() {
   if (process.stdin.isTTY) {
     return "";
   }
-  return fs.readFileSync(0, "utf8");
+  return await readStdin();
 }

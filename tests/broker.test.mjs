@@ -3,7 +3,8 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
-import { spawn } from "node:child_process";
+import { performance } from "node:perf_hooks";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -13,6 +14,7 @@ import { prepareFixtureState, startFixtureBroker } from "./broker-fixture-helper
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/grok/scripts/lib/broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession, resolveBrokerStateDir, saveBrokerSession, sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/grok/scripts/lib/broker-lifecycle.mjs";
 import { migrateStateLock, resolveStateDir } from "../plugins/grok/scripts/lib/state.mjs";
+import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, GrokAcpClient } from "../plugins/grok/scripts/lib/acp.mjs";
 
 const frame = (message) => JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n";
@@ -48,14 +50,57 @@ function writeConfirmedBrokerJournal(stateDir, session) {
     ...(process.platform === "linux" ? { epoch: path.basename(stateDir) } : {}) }) + "\n").join(""));
 }
 
-function ownedIdleBrokerProcess(t) {
+function ownedIdleBrokerProcess() {
   // テスト親PIDをbroker所有者と偽らず、実際に独立したsession/groupを生成する。
   const child = spawn(process.execPath, ["-e", "process.stdin.resume();"], {
     detached: true, windowsHide: true, stdio: ["pipe", "ignore", "ignore"]
   });
-  const exited = new Promise((resolve) => child.once("close", resolve));
-  t.after(async () => { child.stdin.end(); await exited; });
+  child.fixtureClosed = new Promise((resolve) => child.once("close", resolve));
   return child;
+}
+
+async function waitForExit(promise) {
+  let timer;
+  try { return await Promise.race([promise.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 5000); })]); }
+  finally { clearTimeout(timer); }
+}
+
+// fixture 専有プロセスと同じ epoch の sentinel の停止が確認できなければ保持する。
+function fixtureCleanup(t, roots) {
+  const states = [], owners = [], before = [], pids = new Set(), groups = new Set();
+  t.after(async () => {
+    try {
+      for (const fn of before) await fn();
+      for (const child of owners) {
+        if (child.exitCode === null && child.signalCode === null) child.stdin?.end();
+      }
+      for (const child of owners) {
+        const stopped = await waitForExit(child.fixtureClosed);
+        assert.equal(stopped, true, `owner did not exit: ${child.pid}`);
+      }
+      if (process.platform === "linux") {
+        const ps = spawnSync("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8" });
+        assert.equal(ps.status, 0, ps.stderr);
+        const live = ps.stdout.split("\n").map(line => line.trim().split(/\s+/)).filter(parts => parts.length === 3 && !parts[2].startsWith("Z"));
+        assert.ok(!live.some(([pid, pgid]) => pids.has(Number(pid)) || groups.has(Number(pgid))), "owner, agent, or process group is still running");
+        for (const { stateDir, epoch } of states) {
+          const marker = JSON.parse(fs.readFileSync(path.join(stateDir, "state.lock", "protocol.json"), "utf8"));
+          assert.equal(marker.epoch, epoch, "fixture sentinel epoch changed");
+          const result = shutdownPosixStateLockSentinel(stateDir, { offlineConfirmed: true, expectedStateDir: stateDir });
+          assert.equal(result.stopped, true);
+          assert.equal(result.epoch, epoch);
+        }
+      }
+      for (const dir of roots) removeTempFixture(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch (error) {
+      throw new Error(`Fixture retained because offline cleanup could not be confirmed: ${roots.join(", ")}; ${error.message}`, { cause: error });
+    }
+  });
+  return { roots, owners, before, pids, groups, state(brokerDir) {
+    if (process.platform !== "linux") return;
+    const stateDir = path.dirname(path.dirname(brokerDir));
+    states.push({ stateDir, epoch: path.basename(brokerDir) });
+  }, owner(child) { owners.push(child); pids.add(child.pid); if (process.platform !== "win32") groups.add(child.pid); } };
 }
 
 async function until(predicate, message, timeoutMs = 5000) {
@@ -70,32 +115,32 @@ async function until(predicate, message, timeoutMs = 5000) {
 
 async function broker(t, scenario) {
   const root = makeTempDir("grok-broker-e2e-");
+  const cleanup = fixtureCleanup(t, [root]);
   prepareFixtureState(t, root, root);
+  cleanup.state(resolveBrokerStateDir(root));
   const fake = installFakeGrok(scenario);
   const fallback = installFakeGrok({ replies: [{ text: "WRONG_BINARY" }] });
+  cleanup.roots.push(fake.binDir, fallback.binDir);
   // broker の既存起動経路も含め、実物の Grok を PATH から選ばせない。
   const env = { ...fake.env, CLAUDE_PLUGIN_DATA: root, PATH: `${fallback.binDir}${path.delimiter}${fake.env.PATH ?? ""}` };
   const endpoint = createBrokerEndpoint(root);
   const sockets = [];
   let child, exited, session;
-  t.after(async () => {
+  cleanup.before.push(async () => {
     for (const socket of sockets) socket.destroy();
-    if (child) {
-      if (child.exitCode === null && child.signalCode === null) await sendBrokerShutdown(endpoint, 2000);
-      await Promise.race([exited, new Promise((resolve) => {
-        const timer = setTimeout(resolve, 5000);
-        timer.unref();
-      })]);
+    if (fake.readState()?.pid) cleanup.pids.add(fake.readState().pid);
+    if (fallback.readState()?.pid) cleanup.pids.add(fallback.readState().pid);
+    if (child && child.exitCode === null && child.signalCode === null) {
+      await sendBrokerShutdown(endpoint, 2000);
+      await waitForExit(exited);
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      await exited;
     }
-    removeTempFixture(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    removeTempFixture(fake.binDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    removeTempFixture(fallback.binDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
   ({ session } = await startFixtureBroker(root, env, endpoint, { onChild(value) {
     child = value;
     exited = new Promise(resolve => child.once("exit", resolve));
+    child.fixtureClosed = new Promise(resolve => child.once("close", resolve));
+    cleanup.owner(child);
   } }));
   const stderr = () => fs.existsSync(session.logFile) ? fs.readFileSync(session.logFile, "utf8") : "";
   assert.equal(await waitForBrokerEndpoint(endpoint, 10000), true, stderr());
@@ -137,7 +182,12 @@ async function cleanupBrokerFixture(t, { receipt = false } = {}) {
   if (receipt) record.shutdownAcceptedGeneration = record.generation;
   // ここはcleanup/fault injectionの境界fixture。実Job停止は専用Windows E2Eで検証する。
   if (receipt && process.platform === "win32") record.shutdownAgentTerminatedGeneration = record.generation;
+  const cleanup = fixtureCleanup(t, [root, sessionDir]);
   const stateDir = prepareBrokerState(root, root);
+  cleanup.state(stateDir);
+  cleanup.pids.add(exited.pid);
+  if (process.platform !== "win32") cleanup.groups.add(exited.pid);
+  if (process.platform === "linux") record.epoch = path.basename(stateDir);
   fs.mkdirSync(stateDir, { recursive: true });
   const stateFile = path.join(stateDir, "broker.json");
   fs.writeFileSync(stateFile, JSON.stringify(record));
@@ -163,11 +213,9 @@ async function cleanupBrokerFixture(t, { receipt = false } = {}) {
     });
   });
   await new Promise((resolve) => server.listen(parseBrokerEndpoint(record.endpoint).path, resolve));
-  t.after(async () => {
+  cleanup.before.push(async () => {
     for (const socket of sockets) socket.destroy();
     await new Promise((resolve) => server.close(resolve));
-    removeTempFixture(root, { recursive: true, force: true });
-    removeTempFixture(sessionDir, { recursive: true, force: true });
   });
   async function hook(preloadSource = "") {
     const preload = path.join(root, "faults.cjs");
@@ -194,7 +242,7 @@ async function cleanupBrokerFixture(t, { receipt = false } = {}) {
     child.stdin.end(JSON.stringify({ cwd: root, session_id: "A" }));
     assert.equal(await new Promise((resolve) => child.once("close", resolve)), 0, stderr);
   }
-  return { root, record, stateFile, hook, requests: () => requests, onRequest: (callback) => { onRequest = callback; } };
+  return { root, record, stateFile, hook, cleanup, requests: () => requests, onRequest: (callback) => { onRequest = callback; } };
 }
 
 test("BD-2 idle shutdown preserves connected clients between requests", async (t) => {
@@ -220,7 +268,9 @@ test("BD-2 versioned broker state survives legacy SessionEnd and auth replacemen
     const legacyFile = path.join(legacyDir, "broker.json");
     const legacyLock = path.join(legacyDir, "broker.lock");
     const legacy = { endpoint: "legacy-fake-only", pid: 111111, authMode: "browser" };
-    const current = { endpoint: b.endpoint, pid: 222222, generation: "test-generation", authMode: "browser" };
+    const current = process.platform === "linux" ? b.session : { endpoint: b.endpoint, pid: 222222, generation: "test-generation", authMode: "browser" };
+    const currentFile = path.join(resolveBrokerStateDir(b.root), "broker.json");
+    if (process.platform === "linux") saveBrokerSession(b.root, current);
     const legacySource = `
       const fs = require('node:fs');
       const file = process.argv[1];
@@ -232,8 +282,8 @@ test("BD-2 versioned broker state survives legacy SessionEnd and auth replacemen
       process.stdout.write(JSON.stringify({ killedPid: teardown ? state.pid : null }));
     `;
     for (const mode of ["SessionEnd", "auth-mismatch"]) {
+      if (process.platform !== "linux") saveBrokerSession(b.root, current);
       fs.writeFileSync(legacyFile, JSON.stringify(legacy));
-      saveBrokerSession(b.root, current);
       fs.writeFileSync(legacyLock, "old-owner-lock\n");
       const child = spawn(process.execPath, ["-e", legacySource, legacyFile, mode], {
         cwd: b.root, env: b.env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"]
@@ -242,10 +292,17 @@ test("BD-2 versioned broker state survives legacy SessionEnd and auth replacemen
       child.stdout.on("data", (chunk) => { output += chunk; });
       assert.equal(await new Promise((resolve) => child.once("close", resolve)), 0);
       assert.equal(JSON.parse(output).killedPid, legacy.pid);
-      assert.deepEqual(loadBrokerSession(b.root), current);
       assert.equal(fs.readFileSync(legacyLock, "utf8"), "old-owner-lock\n");
-      owner.socket.write(frame({ id: mode, method: "session/new", params: {} }));
-      assert.ok((await owner.response(mode)).result.sessionId);
+      assert.deepEqual(JSON.parse(fs.readFileSync(currentFile, "utf8")), current);
+      if (process.platform === "linux") {
+        assert.throws(() => loadBrokerSession(b.root), /offline recovery|inventory/i);
+        owner.socket.write(frame({ id: mode, method: "session/new", params: {} }));
+        assert.match((await owner.response(mode)).error?.message ?? "", /epoch is no longer valid/i);
+      } else {
+        assert.deepEqual(loadBrokerSession(b.root), current);
+        owner.socket.write(frame({ id: mode, method: "session/new", params: {} }));
+        assert.ok((await owner.response(mode)).result.sessionId);
+      }
     }
   } finally {
     if (previous === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
@@ -271,12 +328,7 @@ test("BD-2 idle shutdown atomically accepts only the matching generation", async
 
 test("BD-3 existing incompatible or unreachable brokers survive direct fallback", async (t) => {
   const root = makeTempDir("broker-safe-mode-");
-  const children = [];
-  t.after(async () => {
-    for (const { child } of children) child.stdin.end();
-    await Promise.all(children.map(({ closed }) => closed));
-    removeTempFixture(root, { recursive: true, force: true });
-  });
+  const cleanup = fixtureCleanup(t, [root]);
   const noStart = path.join(root, "no-start.mjs");
   fs.writeFileSync(noStart, "process.exit(0);\n");
   const previous = process.env.CLAUDE_PLUGIN_DATA;
@@ -287,9 +339,10 @@ test("BD-3 existing incompatible or unreachable brokers survive direct fallback"
       fs.mkdirSync(cwd);
       migrateStateLock(cwd, { offlineConfirmed: true, localOnly: true, expectedStateDir: resolveStateDir(cwd) });
       const stateDir = resolveBrokerStateDir(cwd);
+      cleanup.state(stateDir);
       fs.mkdirSync(stateDir, { recursive: true });
-      const child = ownedIdleBrokerProcess(t);
-      children.push({ child, closed: new Promise(resolve => child.once("close", resolve)) });
+      const child = ownedIdleBrokerProcess();
+      cleanup.owner(child);
       const generation = "retained-generation";
       const original = { endpoint: createBrokerEndpoint(cwd), authMode, generation, pid: child.pid,
         sessionDir: cwd, pidFile: path.join(cwd, "broker.pid"), logFile: path.join(cwd, "broker.log"),
@@ -313,17 +366,21 @@ test("BD-2 SessionEnd preserves an unknown broker and a replacement generation",
   const root = makeTempDir("broker-safe-hook-");
   const sessionDir = makeTempDir("gkc-");
   const endpoint = createBrokerEndpoint(sessionDir);
+  const cleanup = fixtureCleanup(t, [root, sessionDir]);
   const stateDir = prepareBrokerState(root, root);
+  cleanup.state(stateDir);
   fs.mkdirSync(stateDir, { recursive: true });
   const stateFile = path.join(stateDir, "broker.json");
-  const owned = ownedIdleBrokerProcess(t);
+  const owned = ownedIdleBrokerProcess();
+  cleanup.owner(owned);
   const original = { endpoint, generation: "old-generation", authMode: "browser", pid: owned.pid,
     sessionDir, pidFile: path.join(sessionDir, "broker.pid"), logFile: path.join(sessionDir, "broker.log"),
     ...brokerOwnership(owned.pid, "old-generation"), ...(process.platform === "linux" ? { epoch: path.basename(stateDir) } : {}) };
   fs.writeFileSync(original.pidFile, String(original.pid));
   fs.writeFileSync(original.logFile, "retained diagnostic\n");
   writeConfirmedBrokerJournal(stateDir, original);
-  const replacementOwner = ownedIdleBrokerProcess(t);
+  const replacementOwner = ownedIdleBrokerProcess();
+  cleanup.owner(replacementOwner);
   const replacementDir = path.join(root, "new");
   fs.mkdirSync(replacementDir);
   const replacement = { endpoint: createBrokerEndpoint(replacementDir), generation: "new-generation", authMode: "browser", pid: replacementOwner.pid,
@@ -354,11 +411,9 @@ test("BD-2 SessionEnd preserves an unknown broker and a replacement generation",
     });
   });
   await new Promise((resolve) => server.listen(parseBrokerEndpoint(endpoint).path, resolve));
-  t.after(async () => {
+  cleanup.before.push(async () => {
     for (const socket of sockets) socket.destroy();
     await new Promise((resolve) => server.close(resolve));
-    removeTempFixture(root, { recursive: true, force: true });
-    removeTempFixture(sessionDir, { recursive: true, force: true });
   });
   for (behavior of ["unknown", "busy", "timeout", "mismatch", "replace", "idle"]) {
     writeConfirmedBrokerJournal(stateDir, original);
@@ -366,9 +421,11 @@ test("BD-2 SessionEnd preserves an unknown broker and a replacement generation",
     const child = spawn(process.execPath, [fileURLToPath(new URL("../plugins/grok/scripts/session-lifecycle-hook.mjs", import.meta.url)), "SessionEnd"], {
       cwd: root, env: { ...process.env, CLAUDE_PLUGIN_DATA: root }, windowsHide: true, stdio: ["pipe", "ignore", "pipe"]
     });
+    let stderr = "";
+    child.stderr.on("data", chunk => { stderr += chunk; });
     child.stdin.end(JSON.stringify({ cwd: root, session_id: "A" }));
     const code = await new Promise((resolve) => child.once("close", resolve));
-    assert.equal(code, 0);
+    assert.equal(code, 0, `${behavior}: ${stderr}`);
     assert.equal(methods.at(-1), "broker/shutdownIfIdle");
     assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, "utf8")), behavior === "replace" ? replacement : behavior === "idle" ? { ...original, shutdownAcceptedGeneration: original.generation } : original);
     assert.equal(owned.exitCode, null, "original owner must remain alive");
@@ -377,12 +434,15 @@ test("BD-2 SessionEnd preserves an unknown broker and a replacement generation",
   }
   const manualCwd = path.join(root, "manual-endpoint");
   fs.mkdirSync(manualCwd);
+  cleanup.state(prepareBrokerState(manualCwd, root));
   const count = methods.length;
   const child = spawn(process.execPath, [fileURLToPath(new URL("../plugins/grok/scripts/session-lifecycle-hook.mjs", import.meta.url)), "SessionEnd"], {
     cwd: manualCwd, env: { ...process.env, CLAUDE_PLUGIN_DATA: root, [BROKER_ENDPOINT_ENV]: endpoint }, windowsHide: true, stdio: ["pipe", "ignore", "pipe"]
   });
+  let manualStderr = "";
+  child.stderr.on("data", chunk => { manualStderr += chunk; });
   child.stdin.end(JSON.stringify({ cwd: manualCwd, session_id: "manual" }));
-  assert.equal(await new Promise((resolve) => child.once("close", resolve)), 0);
+  assert.equal(await new Promise((resolve) => child.once("close", resolve)), 0, manualStderr);
   assert.equal(methods.length, count, "an unowned manual endpoint must not receive shutdown");
 });
 
@@ -412,18 +472,22 @@ test("BD-2 SessionEnd cannot stop B's connected broker after an empty A snapshot
 test("BD-3 an old broker lock cannot be stolen from an unverified owner", async (t) => {
   const root = makeTempDir("broker-safe-lock-");
   let unexpectedClose;
-  t.after(async () => {
-    if (unexpectedClose && !(await Promise.race([unexpectedClose, new Promise(resolve => setTimeout(() => resolve(false), 5000))]))) {
-      t.diagnostic(`Unexpected broker did not close; fixture retained: ${root}`);
-      return;
-    }
-    removeTempFixture(root, { recursive: true, force: true });
+  const cleanup = fixtureCleanup(t, [root]);
+  cleanup.before.push(async () => {
+    if (unexpectedClose) assert.equal(await waitForExit(unexpectedClose), true, "unexpected broker did not close");
   });
   const previous = process.env.CLAUDE_PLUGIN_DATA;
   process.env.CLAUDE_PLUGIN_DATA = root;
   try {
+    // 非 repository の capability probe を競合期限に含めず、実 Git で workspace root を証明する。
+    const init = spawnSync("git", ["init", "--quiet", root], { encoding: "utf8", timeout: 10000 });
+    assert.equal(init.status, 0, init.stderr || init.error?.message);
+    const proof = spawnSync("git", ["-C", root, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: 10000 });
+    assert.equal(proof.status, 0, proof.stderr || proof.error?.message);
+    assert.equal(fs.realpathSync.native(proof.stdout.trim()), fs.realpathSync.native(root));
     migrateStateLock(root, { offlineConfirmed: true, localOnly: true, expectedStateDir: resolveStateDir(root) });
     const stateDir = resolveBrokerStateDir(root);
+    cleanup.state(stateDir);
     fs.mkdirSync(stateDir, { recursive: true });
     const lockFile = path.join(stateDir, "broker.lock");
     const token = `${process.pid}:retained-owner\n`;
@@ -434,16 +498,35 @@ test("BD-3 an old broker lock cannot be stolen from an unverified owner", async 
     let failure;
     const isolatedEnv = { ...process.env, GROK_BIN: path.join(root, "nonexistent-grok") };
     delete isolatedEnv.XAI_API_KEY;
+    // rival の最初の 50ms 待機だけ仮想時間を進め、最終検査の予算を確保する。
+    const realNow = performance.now.bind(performance), nowDescriptor = Object.getOwnPropertyDescriptor(performance, "now");
+    const originalSetTimeout = globalThis.setTimeout;
+    let offset = 0, advanced = false;
+    Object.defineProperty(performance, "now", { configurable: true, value: () => realNow() + offset });
+    globalThis.setTimeout = (callback, delay, ...args) => {
+      if (!advanced && delay > 0 && delay <= 50) {
+        advanced = true;
+        return originalSetTimeout(() => { offset += 1250; callback(...args); }, 0);
+      }
+      return originalSetTimeout(callback, delay, ...args);
+    };
     try {
       await ensureBrokerSession(root, { env: isolatedEnv, timeoutMs: 6000, onBrokerSpawn(child) {
         spawned = true;
         child.ref();
         unexpectedClose = new Promise(resolve => child.once("close", () => resolve(true)));
+        cleanup.pids.add(child.pid);
+        if (process.platform !== "win32") cleanup.groups.add(child.pid);
         child.kill("SIGTERM");
       } });
     } catch (error) {
       failure = error;
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      if (nowDescriptor) Object.defineProperty(performance, "now", nowDescriptor);
+      else delete performance.now;
     }
+    assert.equal(advanced, true, "rival wait was not exercised");
     assert.equal(fs.readFileSync(lockFile, "utf8"), token);
     assert.equal(spawned, false, "an unverified lock owner must not trigger a new broker");
     assert.equal(fs.existsSync(path.join(stateDir, "broker.json")), false);
@@ -457,25 +540,35 @@ test("BD-3 an old broker lock cannot be stolen from an unverified owner", async 
 test("BD-2 a freshly started idle broker closes naturally through SessionEnd", async (t) => {
   const root = makeTempDir("broker-safe-start-");
   const fake = installFakeGrok({});
+  const cleanup = fixtureCleanup(t, [root, fake.binDir]);
   const previous = process.env.CLAUDE_PLUGIN_DATA;
   process.env.CLAUDE_PLUGIN_DATA = root;
-  let session;
+  let session, brokerChild;
   let stateDir;
+  cleanup.before.push(async () => {
+    if (fake.readState()?.pid) cleanup.pids.add(fake.readState().pid);
+    if (brokerChild && brokerChild.exitCode === null && brokerChild.signalCode === null && session) await sendBrokerShutdown(session.endpoint, 2000);
+    if (brokerChild && brokerChild.exitCode === null && brokerChild.signalCode === null) {
+      await waitForExit(brokerChild.fixtureClosed);
+      if (brokerChild.exitCode === null && brokerChild.signalCode === null) brokerChild.kill("SIGTERM");
+    }
+  });
   try {
     migrateStateLock(root, { offlineConfirmed: true, localOnly: true, expectedStateDir: resolveStateDir(root) });
-    session = await ensureBrokerSession(root, { env: { ...fake.env, CLAUDE_PLUGIN_DATA: root }, timeoutMs: 3000 });
     stateDir = resolveBrokerStateDir(root);
+    cleanup.state(stateDir);
+    session = await ensureBrokerSession(root, { env: { ...fake.env, CLAUDE_PLUGIN_DATA: root }, timeoutMs: 3000, onBrokerSpawn(child) {
+      brokerChild = child;
+      child.ref();
+      child.fixtureClosed = new Promise(resolve => child.once("close", resolve));
+      cleanup.owner(child);
+    } });
+    if (session) cleanup.roots.push(session.sessionDir);
   } finally {
     if (previous === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
     else process.env.CLAUDE_PLUGIN_DATA = previous;
   }
   assert.ok(session?.generation);
-  t.after(async () => {
-    await sendBrokerShutdown(session.endpoint, 250);
-    removeTempFixture(root, { recursive: true, force: true });
-    removeTempFixture(fake.binDir, { recursive: true, force: true });
-    removeTempFixture(session.sessionDir, { recursive: true, force: true });
-  });
   const child = spawn(process.execPath, [fileURLToPath(new URL("../plugins/grok/scripts/session-lifecycle-hook.mjs", import.meta.url)), "SessionEnd"], {
     cwd: root, env: { ...fake.env, CLAUDE_PLUGIN_DATA: root }, windowsHide: true, stdio: ["pipe", "ignore", "pipe"]
   });
@@ -492,12 +585,15 @@ test("BD-2 a freshly started idle broker closes naturally through SessionEnd", a
 test("BD-2 SessionEnd manifest wrapper preserves a live broker within its host budget", async (t) => {
   const root = makeTempDir("broker-safe-live-cleanup-");
   const sessionDir = makeTempDir("gkc-");
+  const cleanup = fixtureCleanup(t, [root, sessionDir]);
   const stateDir = prepareBrokerState(root, root);
+  cleanup.state(stateDir);
   fs.mkdirSync(stateDir, { recursive: true });
-  const owned = ownedIdleBrokerProcess(t);
+  const owned = ownedIdleBrokerProcess();
+  cleanup.owner(owned);
   const record = { generation: "live-generation", endpoint: createBrokerEndpoint(sessionDir), pid: owned.pid,
     sessionDir, pidFile: path.join(sessionDir, "broker.pid"), logFile: path.join(sessionDir, "broker.log"),
-    ...brokerOwnership(owned.pid, "live-generation") };
+    ...brokerOwnership(owned.pid, "live-generation"), ...(process.platform === "linux" ? { epoch: path.basename(stateDir) } : {}) };
   fs.writeFileSync(record.pidFile, String(record.pid));
   fs.writeFileSync(record.logFile, "retained diagnostic\n");
   fs.writeFileSync(path.join(stateDir, "broker.json"), JSON.stringify(record));
@@ -517,11 +613,9 @@ test("BD-2 SessionEnd manifest wrapper preserves a live broker within its host b
     });
   });
   await new Promise((resolve) => server.listen(parseBrokerEndpoint(record.endpoint).path, resolve));
-  t.after(async () => {
+  cleanup.before.push(async () => {
     for (const socket of sockets) socket.destroy();
     await new Promise((resolve) => server.close(resolve));
-    removeTempFixture(root, { recursive: true, force: true });
-    removeTempFixture(sessionDir, { recursive: true, force: true });
   });
   const hook = JSON.parse(fs.readFileSync(new URL("../plugins/grok/hooks/hooks.json", import.meta.url), "utf8")).hooks.SessionEnd[0].hooks[0];
   const wrapper = hook.command.match(/^node -e "([\s\S]+)"$/);
@@ -661,8 +755,9 @@ test("BD-2 ACK budget accepts a virtual 450ms reply within the total cleanup bud
 test("BD-2 old cleanup cannot clear a concurrently published new broker", async (t) => {
   const fixture = await cleanupBrokerFixture(t);
   const nextDir = makeTempDir("gkc-");
-  t.after(() => removeTempFixture(nextDir, { recursive: true, force: true }));
-  const nextOwner = ownedIdleBrokerProcess(t);
+  fixture.cleanup.roots.push(nextDir);
+  const nextOwner = ownedIdleBrokerProcess();
+  fixture.cleanup.owner(nextOwner);
   const next = { ...fixture.record, generation: "next-generation", pid: nextOwner.pid, sessionDir: nextDir, endpoint: createBrokerEndpoint(nextDir),
     pidFile: path.join(nextDir, "broker.pid"), logFile: path.join(nextDir, "broker.log"), ...brokerOwnership(nextOwner.pid, "next-generation") };
   fs.writeFileSync(next.logFile, "new broker log\n");
@@ -681,7 +776,7 @@ test("BD-2 Windows open log is retained until its external reader closes", { ski
     env: { ...process.env, GROK_TEST_LOG: fixture.record.logFile }, windowsHide: true, stdio: ["pipe", "pipe", "pipe"]
   });
   const closed = new Promise((resolve) => reader.once("close", resolve));
-  t.after(async () => { reader.stdin.end("release\n"); await closed; });
+  fixture.cleanup.before.push(async () => { if (reader.exitCode === null && reader.signalCode === null) reader.stdin.end("release\n"); await closed; });
   let output = "";
   reader.stdout.on("data", (chunk) => { output += chunk; });
   await until(() => output.includes("READY"), "the Windows reader must hold its test log");

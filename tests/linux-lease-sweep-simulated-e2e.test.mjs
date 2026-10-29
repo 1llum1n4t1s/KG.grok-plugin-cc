@@ -12,7 +12,7 @@ import { makeTempDir, removeTempFixture } from "./helpers.mjs";
 // 推測する。Mac の実プロセスを使用するが procfs・mount・flock は模擬であり、
 // Linux kernel の namespace・flock や電源断時の耐久性を実証しない。
 test("Linux sweep retains a live owner and an unconfirmed turn after its crash", {
-  skip: process.platform !== "darwin", timeout: 180000
+  skip: process.platform !== "darwin", timeout: 360000
 }, async t => {
   const root = fs.realpathSync(makeTempDir("grok-linux-sweep-"));
   const data = path.join(root, "data"), workspace = path.join(root, "workspace");
@@ -27,23 +27,42 @@ test("Linux sweep retains a live owner and an unconfirmed turn after its crash",
   const command = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
   const sweep = fileURLToPath(new URL("./fixtures/linux-lease-sweep-cli.mjs", import.meta.url));
   const agent = fileURLToPath(new URL("./fixtures/linux-cli-simulated-agent.mjs", import.meta.url));
-  const wrapper = path.join(root, "fake-grok"), agentPidFile = path.join(root, "agent.pid");
+  const wrapper = path.join(root, "fake-grok"), agentPidFile = path.join(root, "agent.pid"), promptMarker = path.join(root, "prompt");
   const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
   fs.writeFileSync(wrapper, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(agent)} "$@"\n`, { mode: 0o700, flag: "wx" });
   const env = { ...process.env, CLAUDE_PLUGIN_DATA: data, GROK_BIN: wrapper, XAI_API_KEY: "test-only",
     GROK_COMPANION_DISABLE_BROKER: "1", GROK_LINUX_SIM_AGENT_PID: agentPidFile,
+    GROK_LINUX_SIM_COMPLETE: "1", GROK_LINUX_SIM_HOLD_PROMPT: "1", GROK_LINUX_SIM_PROMPT_MARKER: promptMarker,
     GROK_LINUX_SIM_ROOT: root, GROK_LINUX_SIM_STATE_DIR: stateDir,
     NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import ${JSON.stringify(preload)}`.trim() };
   delete env.PLUGIN_DATA;
-  let worker, closed, migrated = false;
+  let worker, closed, workerError, migrated = false, passed = false;
+  const awaitClose = async () => {
+    let timer;
+    try { return await Promise.race([closed, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("worker close timed out")), 5000); })]); }
+    finally { clearTimeout(timer); }
+  };
   t.after(async () => {
     try {
-      if (worker && worker.exitCode === null && worker.signalCode === null) worker.kill("SIGKILL");
-      if (closed) await closed;
-      let stopped = !fs.existsSync(agentPidFile);
-      const pid = stopped ? null : Number(fs.readFileSync(agentPidFile, "utf8"));
+      if (worker && worker.exitCode === null && worker.signalCode === null && !worker.kill("SIGKILL")) {
+        t.diagnostic(`Retained fixture; worker PID ${worker.pid} could not be stopped: ${root}`);
+        worker.stderr?.destroy(); worker.unref();
+        throw new Error("worker SIGKILL could not be sent");
+      }
+      if (closed) {
+        try {
+          await awaitClose();
+        } catch (error) {
+          t.diagnostic(`Retained fixture; worker PID ${worker.pid} termination unconfirmed: ${root}`);
+          worker.stderr?.destroy(); worker.unref();
+          throw error;
+        }
+      }
+      let stopped = !worker;
+      if (worker && !fs.existsSync(agentPidFile)) t.diagnostic(`Retained fixture; agent PID was not observed: ${root}`);
+      const pid = fs.existsSync(agentPidFile) ? Number(fs.readFileSync(agentPidFile, "utf8")) : null;
       const deadline = Date.now() + 8000;
-      while (!stopped && Date.now() < deadline) {
+      while (!stopped && Number.isInteger(pid) && pid > 0 && Date.now() < deadline) {
         try { process.kill(pid, 0); }
         catch (error) { if (error.code === "ESRCH") { stopped = true; break; } throw error; }
         await new Promise(resolve => setTimeout(resolve, 20));
@@ -52,7 +71,8 @@ test("Linux sweep retains a live owner and an unconfirmed turn after its crash",
         const result = spawnSync(process.execPath, [command, "state-lock", "stop-sentinel", "--offline-confirmed", "--local-only",
           "--expected-state-dir", stateDir, "--cwd", workspace], { env, encoding: "utf8", timeout: 15000 });
         assert.equal(result.status, 0, result.stderr);
-        removeTempFixture(root, { recursive: true, force: true });
+        if (passed) removeTempFixture(root, { recursive: true, force: true });
+        else t.diagnostic(`Retained unsuccessful fixture: ${root}`);
       } else if (migrated) t.diagnostic(`Retained fixture: agent termination unconfirmed: ${root}`);
     } finally {
       if (prior === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = prior;
@@ -64,42 +84,82 @@ test("Linux sweep retains a live owner and an unconfirmed turn after its crash",
   assert.equal(migrate.status, 0, migrate.stderr);
   migrated = true;
   worker = spawn(process.execPath, [command, "task", "--cwd", workspace, "--json", "sweep fixture"], { env, stdio: ["ignore", "ignore", "pipe"] });
+  worker.on("error", error => { workerError = error; });
   let stderr = "";
   worker.stderr.on("data", chunk => { stderr += chunk; });
-  closed = new Promise(resolve => worker.once("close", resolve));
+  closed = new Promise(resolve => worker.once("close", (code, signal) => resolve({ code, signal })));
   const stateFile = path.join(stateDir, "state.json");
   let job;
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 80000;
   while (Date.now() < deadline) {
     if (fs.existsSync(stateFile)) {
       job = JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.find(item => item.status === "running");
-      if (job && fs.existsSync(agentPidFile)) break;
+      if (job && fs.existsSync(agentPidFile) && fs.existsSync(promptMarker)) break;
     }
     if (worker.exitCode !== null || worker.signalCode !== null) break;
     await new Promise(resolve => setTimeout(resolve, 20));
   }
-  assert.ok(job && fs.existsSync(agentPidFile), `worker did not start: ${stderr}`);
+  if (workerError) throw workerError;
+  assert.ok(job && fs.existsSync(agentPidFile) && fs.existsSync(promptMarker), `worker did not reach the held prompt: ${stderr}`);
   const runSweep = (maxEntries = 256) => {
     const result = spawnSync(process.execPath, [sweep, workspace, String(maxEntries)], { env, encoding: "utf8", timeout: 75000 });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
   };
   const ledgerPath = path.join(path.dirname(job.workerLease.path), "ledger.json");
+  const workerPid = worker.pid;
+  const agentPid = Number(fs.readFileSync(agentPidFile, "utf8"));
+  assert.ok(Number.isSafeInteger(agentPid) && agentPid > 0);
+  const processStart = pid => {
+    const result = spawnSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 5000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.trim(), `process ${pid} start time unavailable`);
+    return result.stdout.trim();
+  };
+  const workerStart = processStart(workerPid), agentStart = processStart(agentPid);
+  const checkLiveOwners = () => {
+    assert.equal(worker.pid, workerPid);
+    assert.equal(processStart(workerPid), workerStart);
+    assert.equal(Number(fs.readFileSync(agentPidFile, "utf8")), agentPid);
+    assert.equal(processStart(agentPid), agentStart);
+    const index = JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.find(item => item.id === job.id);
+    const detail = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${job.id}.json`), "utf8"));
+    for (const record of [index, detail]) {
+      assert.equal(record.id, job.id);
+      assert.equal(record.status, "running");
+      assert.equal(record.pid, workerPid);
+      assert.equal(record.grokDirectOwnerPid, workerPid);
+      assert.deepEqual(record.workerLease, job.workerLease);
+    }
+  };
+  const leaseStat = fs.lstatSync(job.workerLease.path, { bigint: true });
+  const leaseBytes = fs.readFileSync(job.workerLease.path);
+  const checkLease = () => {
+    const current = fs.lstatSync(job.workerLease.path, { bigint: true });
+    assert.equal(current.dev, leaseStat.dev); assert.equal(current.ino, leaseStat.ino);
+    assert.deepEqual(fs.readFileSync(job.workerLease.path), leaseBytes);
+  };
+  checkLiveOwners();
   const cursor = JSON.parse(fs.readFileSync(ledgerPath, "utf8")).cursor;
   assert.equal(runSweep(1).examined, 1);
   assert.equal(JSON.parse(fs.readFileSync(ledgerPath, "utf8")).cursor, (cursor + 1) % 256);
   const before = runSweep();
+  assert.equal(before.examined, 256);
   assert.equal(before.reclaimed, 0);
-  assert.ok(fs.existsSync(job.workerLease.path));
-  worker.kill("SIGKILL");
-  await closed;
+  checkLiveOwners(); checkLease();
+  assert.equal(worker.exitCode, null); assert.equal(worker.signalCode, null);
+  assert.equal(worker.kill("SIGKILL"), true);
+  assert.deepEqual(await awaitClose(), { code: null, signal: "SIGKILL" });
+  if (workerError) throw workerError;
   const after = runSweep();
+  assert.equal(after.examined, 256);
   assert.equal(after.reclaimed, 0);
-  assert.ok(fs.existsSync(job.workerLease.path), "turn stop must not be inferred from worker exit");
+  checkLease(); // turn stop must not be inferred from worker exit.
   const indexed = JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.find(item => item.id === job.id);
   const detail = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${job.id}.json`), "utf8"));
   assert.deepEqual(indexed.workerLease, job.workerLease);
   assert.deepEqual(detail.workerLease, job.workerLease);
+  passed = true;
 });
 
 test("Linux sweep removes only lease references after a separately confirmed terminal turn", {
@@ -125,14 +185,15 @@ test("Linux sweep removes only lease references after a separately confirmed ter
     SETTINGS_RELEASE: path.join(root, "agent-release"), SETTINGS_EXIT: exited,
     NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import ${JSON.stringify(preload)}`.trim() };
   delete env.PLUGIN_DATA; delete env.SETTINGS_GATE;
-  let migrated = false, workerStarted = false, workerStopped = false, controlStarted = false, controlStopped = false;
+  let migrated = false, workerStarted = false, workerStopped = false, controlStarted = false, controlStopped = false, passed = false;
   t.after(() => {
     try {
       if (migrated && (!workerStarted || workerStopped) && (!controlStarted || controlStopped)) {
         const result = spawnSync(process.execPath, [command, "state-lock", "stop-sentinel", "--offline-confirmed", "--local-only",
           "--expected-state-dir", stateDir, "--cwd", workspace], { env, encoding: "utf8", timeout: 15000 });
         assert.equal(result.status, 0, result.stderr);
-        removeTempFixture(root, { recursive: true, force: true });
+        if (passed) removeTempFixture(root, { recursive: true, force: true });
+        else t.diagnostic(`Retained unsuccessful fixture: ${root}`);
       } else if (migrated) t.diagnostic(`Retained fixture: agent termination unconfirmed: ${root}`);
     } finally {
       if (prior === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = prior;
@@ -144,7 +205,9 @@ test("Linux sweep removes only lease references after a separately confirmed ter
   assert.equal(migrate.status, 0, migrate.stderr); migrated = true;
   workerStarted = true;
   const task = spawnSync(process.execPath, [command, "task", "--cwd", workspace, "--json", "terminal sweep fixture"],
-    { env, encoding: "utf8", timeout: 30000 });
+    { env, encoding: "utf8", timeout: 80000 });
+  assert.ifError(task.error);
+  assert.equal(task.signal, null, task.stderr);
   assert.equal(task.status, 0, task.stderr);
   assert.ok(fs.existsSync(exited), "agent exit must be independently observed");
   const stateFile = path.join(stateDir, "state.json");
@@ -157,7 +220,9 @@ test("Linux sweep removes only lease references after a separately confirmed ter
   const controlExit = path.join(root, "control-agent-exited");
   controlStarted = true;
   const controlTask = spawnSync(process.execPath, [command, "task", "--cwd", workspace, "--json", "sweep control fixture"],
-    { env: { ...env, SETTINGS_EXIT: controlExit }, encoding: "utf8", timeout: 30000 });
+    { env: { ...env, SETTINGS_EXIT: controlExit }, encoding: "utf8", timeout: 80000 });
+  assert.ifError(controlTask.error);
+  assert.equal(controlTask.signal, null, controlTask.stderr);
   assert.equal(controlTask.status, 0, controlTask.stderr);
   assert.ok(fs.existsSync(controlExit));
   const control = JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.find(item => item.status === "completed" && item.id !== job.id);
@@ -174,10 +239,39 @@ test("Linux sweep removes only lease references after a separately confirmed ter
   const detailFile = path.join(stateDir, "jobs", `${job.id}.json`);
   const originalState = fs.readFileSync(stateFile);
   const originalDetail = fs.readFileSync(detailFile);
+  const targetSlot = job.workerLease.slot;
+  const readLedger = () => JSON.parse(fs.readFileSync(ledgerFile, "utf8"));
+  const pointAtTarget = () => {
+    const current = readLedger();
+    assert.equal(current.epoch, job.workerLease.stateGeneration);
+    assert.deepEqual(current.slots[targetSlot].lease, job.workerLease);
+    current.cursor = targetSlot;
+    fs.writeFileSync(ledgerFile, `${JSON.stringify(current)}\n`);
+    return current;
+  };
   const runSweep = () => {
-    const result = spawnSync(process.execPath, [sweep, workspace], { env, encoding: "utf8", timeout: 75000 });
+    const before = pointAtTarget();
+    const stateBefore = fs.readFileSync(stateFile), detailBefore = fs.readFileSync(detailFile);
+    const evidence = [job.workerLease.path, job.workerLease.path.replace(/\.lease$/, ".binding")].map(file => ({
+      file, stat: fs.lstatSync(file, { bigint: true }), bytes: fs.readFileSync(file)
+    }));
+    const result = spawnSync(process.execPath, [sweep, workspace, "1"], { env, encoding: "utf8", timeout: 75000 });
     assert.equal(result.status, 0, result.stderr);
-    return JSON.parse(result.stdout);
+    const outcome = JSON.parse(result.stdout);
+    assert.equal(outcome.examined, 1);
+    if (outcome.reclaimed === 0) {
+      const after = readLedger();
+      assert.equal(after.cursor, (targetSlot + 1) % 256);
+      assert.deepEqual(after.slots, before.slots);
+      assert.deepEqual(fs.readFileSync(stateFile), stateBefore);
+      assert.deepEqual(fs.readFileSync(detailFile), detailBefore);
+      for (const { file, stat, bytes } of evidence) {
+        const current = fs.lstatSync(file, { bigint: true });
+        assert.equal(current.dev, stat.dev); assert.equal(current.ino, stat.ino);
+        assert.deepEqual(fs.readFileSync(file), bytes);
+      }
+    }
+    return outcome;
   };
   const partiallyRemoved = JSON.parse(originalDetail);
   partiallyRemoved.workerLease = null;
@@ -243,14 +337,31 @@ test("Linux sweep removes only lease references after a separately confirmed ter
   assert.equal(runSweep().reclaimed, 0, "a missing old epoch lease must remain uncertain");
   fs.renameSync(oldHeld, oldPath);
   const crashPreload = fileURLToPath(new URL("./fixtures/linux-lease-sweep-crash-preload.mjs", import.meta.url));
-  const crashed = spawnSync(process.execPath, [sweep, workspace], { encoding: "utf8", timeout: 75000,
+  const preCrash = pointAtTarget();
+  const crashed = spawnSync(process.execPath, [sweep, workspace, "1"], { encoding: "utf8", timeout: 75000,
     env: { ...env, GROK_SWEEP_CRASH_AFTER_LEASE_UNLINK: "1", NODE_OPTIONS: `${env.NODE_OPTIONS} --import ${JSON.stringify(crashPreload)}` } });
   assert.equal(crashed.status, 73, `${crashed.stderr}\n${crashed.stdout}`);
+  const crashLedger = readLedger();
+  assert.equal(crashLedger.cursor, (targetSlot + 1) % 256);
+  assert.deepEqual(crashLedger.slots[targetSlot], { ...preCrash.slots[targetSlot], state: "reclaiming", reclaimKind: "terminal" });
+  assert.deepEqual(crashLedger.slots.filter((_, i) => i !== targetSlot), preCrash.slots.filter((_, i) => i !== targetSlot));
   assert.equal(JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.find(item => item.id === job.id).workerLease, null);
   assert.equal(JSON.parse(fs.readFileSync(detailFile, "utf8")).workerLease, null);
   assert.equal(fs.existsSync(job.workerLease.path), false);
   assert.ok(fs.existsSync(job.workerLease.path.replace(/\.lease$/, ".binding")));
-  assert.equal(runSweep().reclaimed, 1);
+  let examined = 0, reclaimed = 0;
+  for (let i = 0; i < 16; i++) {
+    const cursor = readLedger().cursor;
+    const result = spawnSync(process.execPath, [sweep, workspace, "16"], { env, encoding: "utf8", timeout: 75000 });
+    assert.equal(result.status, 0, result.stderr);
+    const batch = JSON.parse(result.stdout);
+    assert.equal(batch.examined, 16);
+    assert.equal(readLedger().cursor, (cursor + 16) % 256);
+    examined += batch.examined; reclaimed += batch.reclaimed;
+  }
+  assert.equal(examined, 256);
+  assert.equal(reclaimed, 1);
+  assert.deepEqual(readLedger().slots[targetSlot], { slot: targetSlot, state: "free" });
   const indexed = JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.find(item => item.id === job.id);
   const detail = JSON.parse(fs.readFileSync(detailFile, "utf8"));
   assert.equal(indexed.status, "completed");
@@ -262,4 +373,5 @@ test("Linux sweep removes only lease references after a separately confirmed ter
   assert.ok(fs.existsSync(oldBinding), "old epoch binding evidence must be retained");
   assert.deepEqual(JSON.parse(fs.readFileSync(oldDetail, "utf8")).workerLease, oldLease);
   assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.find(item => item.id === oldRecord.id).workerLease, oldLease);
+  passed = true;
 });

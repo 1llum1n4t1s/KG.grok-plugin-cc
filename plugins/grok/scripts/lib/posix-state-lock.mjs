@@ -66,6 +66,9 @@ function withLinuxRootLock(stateDir, timeoutMs, run) {
         utility("/usr/bin/flock", ["-x", "-n", "3"], { stdio: ["ignore", "pipe", "pipe", lockFd], timeout: timeoutMs === 0 ? 5000 : Math.max(1, Math.ceil(budget)) });
         break;
       } catch (error) {
+        if (timeoutMs > 0 && error?.code === "ETIMEDOUT" && process.hrtime.bigint() >= deadline) {
+          throw new Error("Timed out acquiring Linux state root lock", { cause: error });
+        }
         if (error?.status !== 1 || error?.signal || error?.code) throw new Error("Linux state root lock utility failed", { cause: error });
         if (timeoutMs === 0) throw new Error("Timed out acquiring Linux state root lock");
         Atomics.wait(SLEEP, 0, 0, Math.min(10, remaining()));

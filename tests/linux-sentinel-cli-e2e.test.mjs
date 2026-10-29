@@ -29,6 +29,61 @@ test("state-lock stop-sentinel requires explicit offline scope", { skip: process
   });
   migrateStateLock(workspace, { offlineConfirmed: true, localOnly: true, expectedStateDir: stateDir });
   migrated = true;
+  // 同一 sentinel を別実行ファイルから検証し、argv[0] の偽装は拒否する。
+  const markerFile = path.join(stateDir, "state.lock", "protocol.json");
+  const markerBefore = fs.readFileSync(markerFile), markerStat = fs.lstatSync(markerFile, { bigint: true });
+  const marker = JSON.parse(markerBefore), alternateNode = path.join(root, "alternate-node");
+  fs.copyFileSync(process.execPath, alternateNode, fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(alternateNode, 0o700);
+  const originalExe = fs.statSync(process.execPath, { bigint: true });
+  const alternateExe = fs.statSync(alternateNode, { bigint: true });
+  assert.ok(originalExe.dev !== alternateExe.dev || originalExe.ino !== alternateExe.ino, "alternate Node must have a distinct file identity");
+  const stateApi = new URL("../plugins/grok/scripts/lib/state.mjs", import.meta.url).href;
+  const snapshotSource = `import { withStateSnapshot } from ${JSON.stringify(stateApi)};
+    withStateSnapshot(${JSON.stringify(workspace)}, (_state, context) => console.log(JSON.stringify({epoch:context.epoch})));`;
+  const env = { ...process.env, CLAUDE_PLUGIN_DATA: data, PLUGIN_DATA: data };
+  const alternate = spawnSync(alternateNode, ["--input-type=module", "-e", snapshotSource], {
+    cwd: workspace, env, encoding: "utf8", timeout: 15000
+  });
+  assert.ifError(alternate.error);
+  assert.equal(alternate.status, 0, alternate.stderr);
+  assert.equal(JSON.parse(alternate.stdout.trim()).epoch, marker.epoch);
+  const preload = path.join(root, "sentinel-cmdline-spoof.cjs"), observed = path.join(root, "spoof-observed");
+  fs.writeFileSync(preload, `const fs = require('node:fs'), mod = require('node:module');
+    const read = fs.readFileSync;
+    fs.readFileSync = function(name, ...args) {
+      const value = read.call(this, name, ...args);
+      if (String(name) !== process.env.SENTINEL_TEST_CMDLINE) return value;
+      const fields = value.toString('utf8').split('\\0');
+      fields[0] = process.env.SENTINEL_TEST_FAKE_EXE;
+      fs.writeFileSync(process.env.SENTINEL_TEST_OBSERVED, 'observed');
+      return Buffer.from(fields.join('\\0'));
+    };
+    mod.syncBuiltinESMExports();`, { mode: 0o600 });
+  const spoof = spawnSync(process.execPath, ["--require", preload, "--input-type=module", "-e", snapshotSource], {
+    cwd: workspace, env: { ...env, SENTINEL_TEST_CMDLINE: `/proc/${marker.sentinel.pid}/cmdline`,
+      SENTINEL_TEST_FAKE_EXE: alternateNode, SENTINEL_TEST_OBSERVED: observed }, encoding: "utf8", timeout: 15000
+  });
+  assert.ifError(spoof.error);
+  assert.equal(fs.existsSync(observed), true, "sentinel cmdline spoof was not exercised");
+  assert.notEqual(spoof.status, 0);
+  assert.match(spoof.stderr, /sentinel.*(?:unavailable|invalid)/i);
+  // 絶対 symlink も sentinel の root を基準に解決する。
+  const alias = path.join(root, "node-absolute-alias"), aliasObserved = path.join(root, "alias-observed");
+  fs.symlinkSync(process.execPath, alias);
+  const aliasResult = spawnSync(process.execPath, ["--require", preload, "--input-type=module", "-e", snapshotSource], {
+    cwd: workspace, env: { ...env, SENTINEL_TEST_CMDLINE: `/proc/${marker.sentinel.pid}/cmdline`,
+      SENTINEL_TEST_FAKE_EXE: alias, SENTINEL_TEST_OBSERVED: aliasObserved }, encoding: "utf8", timeout: 15000
+  });
+  assert.ifError(aliasResult.error);
+  assert.equal(fs.existsSync(aliasObserved), true, "absolute symlink argv was not exercised");
+  assert.equal(aliasResult.status, 0, aliasResult.stderr);
+  assert.equal(JSON.parse(aliasResult.stdout.trim()).epoch, marker.epoch);
+  assert.deepEqual(fs.readFileSync(markerFile), markerBefore);
+  const markerAfter = fs.lstatSync(markerFile, { bigint: true });
+  assert.equal(markerAfter.dev, markerStat.dev);
+  assert.equal(markerAfter.ino, markerStat.ino);
+  withStateSnapshot(workspace, (_state, context) => assert.equal(context.epoch, marker.epoch));
   const script = path.resolve("plugins/grok/scripts/grok-companion.mjs");
   const run = args => spawnSync(process.execPath, [script, "state-lock", "stop-sentinel", ...args, "--cwd", workspace, "--json"], {
     cwd: workspace, env: { ...process.env, CLAUDE_PLUGIN_DATA: data, PLUGIN_DATA: data }, encoding: "utf8", timeout: 15000
@@ -152,15 +207,33 @@ test("state-lock recover rejects an incorrect directory before touching the effe
   });
   migrateStateLock(workspace, { offlineConfirmed: true, localOnly: true, expectedStateDir: stateDir });
   migrated = true;
-  const before = fs.readdirSync(stateDir).sort();
-  assert.equal(fs.existsSync(path.join(stateDir, "jobs")), false);
+  // 名前だけでなく、既存記録の置換や上書きも検知する。
+  const snapshot = () => {
+    const entries = [];
+    const visit = (file, relative) => {
+      const stat = fs.lstatSync(file, { bigint: true });
+      const entry = { relative, dev: stat.dev, ino: stat.ino, mode: stat.mode, uid: stat.uid, gid: stat.gid, nlink: stat.nlink };
+      if (stat.isDirectory()) {
+        entry.children = fs.readdirSync(file).sort();
+        entries.push(entry);
+        for (const name of entry.children) visit(path.join(file, name), path.join(relative, name));
+      } else {
+        if (stat.isFile()) entry.content = fs.readFileSync(file);
+        else if (stat.isSymbolicLink()) entry.link = fs.readlinkSync(file);
+        entries.push(entry);
+      }
+    };
+    visit(stateDir, ".");
+    return entries;
+  };
+  const before = snapshot();
   const script = path.resolve("plugins/grok/scripts/grok-companion.mjs");
   const result = spawnSync(process.execPath, [script, "state-lock", "recover", "--offline-confirmed", "--local-only",
     "--all-old-processes-stopped", "--expected-state-dir", path.join(root, "wrong"), "--cwd", workspace], {
     cwd: workspace, env: { ...process.env, CLAUDE_PLUGIN_DATA: data, PLUGIN_DATA: data }, encoding: "utf8", timeout: 15000
   });
   if (result.status === null) childUnconfirmed = true;
+  assert.notEqual(result.status, null, "recovery CLI must exit");
   assert.notEqual(result.status, 0);
-  t.diagnostic(`state entries before=${JSON.stringify(before)} after=${JSON.stringify(fs.readdirSync(stateDir).sort())}`);
-  assert.deepEqual(fs.readdirSync(stateDir).sort(), before);
+  assert.deepEqual(snapshot(), before, "incorrect target must not alter the effective state tree");
 });

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { boundJsonDiagnostic, hasGenerationIdentity, sameDarwinLease, sameLinuxLease, sameTurnEvidence } from "../plugins/grok/scripts/lib/tracked-jobs.mjs";
 
 const grok = fs.readFileSync(new URL("../plugins/grok/scripts/lib/grok.mjs", import.meta.url), "utf8");
 const companion = fs.readFileSync(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url), "utf8");
@@ -80,15 +81,21 @@ for (const kind of ["transport", "broker-agent-transport", "rpc-terminal", "guar
     if (kind === "broker-agent-transport") error.data = { data: { turnStopConfirmed: false } };
     if (kind === "rpc-terminal") error.data = { data: { turnStopConfirmed: true } };
     const evidence = new WeakMap();
-    const context = vm.createContext({ Error, createTurnCollector: () => ({ state: {}, handle() {}, finalize() {} }),
+    const brokerRequests = new WeakMap();
+    const context = vm.createContext({ Error, brokerRequests, createTurnCollector: () => ({ state: {}, handle() {}, finalize() {} }),
       getAcpPromptFailureEvidence: (failure, client) => evidence.get(failure)?.client === client ? evidence.get(failure).value : null });
     vm.runInContext(functionSource(grok, "async function runPrompt", "function buildResultStatus"), context);
     const client = { transport: "broker", nextId: 1, setNotificationHandler() {}, request: async (method) => {
+      const tracker = brokerRequests.get(client);
+      if (tracker.sealed) throw new Error("Broker request was not sent because the connection is closing.");
+      tracker.sequence += 1;
+      if (method === "session/prompt") tracker.prompts += 1;
       const requestId = client.nextId++;
       if (kind !== "transport") evidence.set(error, { client, value: Object.freeze({ method, requestId,
         terminal: kind === "rpc-terminal" ? "confirmed" : "unconfirmed" }) });
       throw error;
     } };
+    brokerRequests.set(client, { sequence: 0, prompts: 0, rejection: null, sealed: false, lateEnqueue: false });
     const result = await context.runPrompt(client, "session", "prompt", kind === "guard-rejection" ? { enqueuePrompt: () => { throw error; } } : {});
     assert.equal(result.turnStopUnconfirmed, ["transport", "broker-agent-transport"].includes(kind));
   });
@@ -105,19 +112,20 @@ for (const executionState of ["accepted", "unknown", "terminal", "never-accepted
     vm.runInContext(interruptSource, context);
     const result = await context.interruptGrokTurn("mock", { sessionId: "session", executionId: "job", transport: "broker", brokerGeneration: "generation" });
     assert.equal(params.generation, "generation");
-    assert.equal(result.stopConfirmed, ["terminal", "never-accepted"].includes(executionState));
+    assert.equal(result.stopConfirmed, false, "a notification contradicts a stopped turn");
   });
 }
 
 for (const platform of ["win32", "linux", "darwin"]) {
 for (const [confirmed, notSent] of [[false, false], [true, false], [false, true]]) {
   test(`cancel stops only the worker and retains pending without turn evidence (${platform}, ${confirmed}, not sent ${notSent})`, async () => {
-    const epoch = "12345678-abcd-1234-abcd-123456789abc";
+    const epoch = "12345678-abcd-4234-abcd-123456789abc";
     const workerLease = { id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", slot: 0,
-      path: `/mock-state/worker-leases-v1/${epoch}/slot-000.lease`, dev: "1", ino: "2", stateGeneration: epoch };
+      path: platform === "linux" ? `/mock-state/worker-leases-v1/${epoch}/slot-000.lease` : "/mock-state/worker-leases/slot-000.lease",
+      dev: "1", ino: "2", stateGeneration: epoch, ...(platform === "darwin" ? { directoryDev: "1", directoryIno: "4" } : {}) };
     const job = { id: "job", createdAt: "2026-01-01T00:00:00.000Z", epoch, status: "running", pid: 42,
       processStartKey: platform === "linux" ? `${epoch}:12345` : "start", grokSessionId: "session", grokTransport: "broker", grokBrokerGeneration: "generation",
-      ...(platform === "linux" ? { claimToken: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff", workerLease } : {}),
+      ...(platform !== "win32" ? { claimToken: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff", workerLease } : {}),
       ...(notSent ? { grokPromptState: "not-sent" } : {}) };
     const indexed = { ...job };
     let stored = { ...job };
@@ -125,6 +133,13 @@ for (const [confirmed, notSent] of [[false, false], [true, false], [false, true]
     let leaseChecks = 0;
     let leaseAcquisitions = 0;
     let holdingLock = false;
+    const verifyLease = ({ context: scope, indexed: index, stored: detail, lease }) => {
+      assert.equal(scope.epoch, epoch); assert.equal(index.id, job.id); assert.equal(detail.id, job.id);
+      assert.equal(index.claimToken, job.claimToken); assert.equal(detail.claimToken, job.claimToken);
+      assert.equal(index.epoch, epoch); assert.equal(detail.epoch, epoch); assert.equal(index.status, detail.status);
+      assert.equal(index.createdAt, job.createdAt); assert.equal(detail.createdAt, job.createdAt);
+      assert.equal(index.workerLease, lease); assert.equal(detail.workerLease, lease); leaseChecks += 1;
+    };
     const context = vm.createContext({
       parseCommandInput: () => ({ options: {}, positionals: [] }), resolveCommandCwd: () => "mock", resolveCancelableJob: () => ({ workspaceRoot: "mock", job }),
       process: { platform, env: {}, stderr: { write() {} } },
@@ -132,15 +147,12 @@ for (const [confirmed, notSent] of [[false, false], [true, false], [false, true]
         const commit = () => fn(state, scope); return options?.aroundCommit ? options.aroundCommit(state, scope, commit) : commit(); }, isActiveJob: () => true,
       withStateSnapshot: (_root, fn) => { holdingLock = true; try { return fn({ jobs: [indexed] }, { epoch, check() {} }); } finally { holdingLock = false; } },
       readStoredJob: () => stored, nowIso: () => "now", writeJobFile: (_root, _id, value) => { stored = value; }, appendLogLine() {},
-      sameLinuxLease: (left, right) => Boolean(left && right && ["id", "slot", "path", "dev", "ino", "stateGeneration"].every(key => left[key] === right[key])),
-      verifyPublishedLinuxLeaseRecords: ({ context: scope, indexed: index, stored: detail, lease }) => {
-        assert.equal(scope.epoch, epoch); assert.equal(index.id, job.id); assert.equal(detail.id, job.id);
-        assert.equal(index.claimToken, job.claimToken); assert.equal(detail.claimToken, job.claimToken);
-        assert.equal(index.epoch, epoch); assert.equal(detail.epoch, epoch); assert.equal(index.status, detail.status);
-        assert.equal(index.createdAt, job.createdAt); assert.equal(detail.createdAt, job.createdAt);
-        assert.equal(index.workerLease, lease); assert.equal(detail.workerLease, lease); leaseChecks += 1;
-      },
+      sameLinuxLease, sameDarwinLease,
+      verifyPublishedLinuxLeaseRecords: verifyLease, verifyPublishedDarwinLeaseRecords: verifyLease,
       withAvailableLinuxLease: (lease, scope, callback) => { assert.equal(lease, workerLease); assert.equal(scope.epoch, epoch);
+        leaseAcquisitions += 1; return { status: "available", value: callback() }; },
+      darwinLeaseDirectory: () => ({ expectedDirectoryIdentity: { dev: "1", ino: "4" } }),
+      withAvailableDarwinLease: (lease, _scope, callback) => { assert.equal(lease, workerLease);
         leaseAcquisitions += 1; return { status: "available", value: callback() }; },
       interruptGrokTurn: async () => ({ stopConfirmed: confirmed, notificationSent: true }),
       setTimeout: () => ({ unref() {} }), createProcessLookupDiagnostics: () => ({}), inspectTrackedJobProcess: () => {
@@ -148,14 +160,15 @@ for (const [confirmed, notSent] of [[false, false], [true, false], [false, true]
       stopTrackedJobProcess: (_pid, _key, options) => { assert.equal(holdingLock, platform === "win32"); stopOptions = options; }, upsertJob: (_root, patch) => Object.assign(indexed, patch),
       outputCommandResult() {}, renderCancelReport: () => "report"
     });
+    Object.assign(context, { boundJsonDiagnostic, hasGenerationIdentity, sameTurnEvidence, performance });
     vm.runInContext(cancelSource, context);
     if (confirmed || notSent) await context.handleCancel([]);
     else await assert.rejects(context.handleCancel([]), /turn stop is unconfirmed/);
-    if (platform === "linux") {
+    if (platform !== "win32") {
       assert.equal(stopOptions, undefined);
-      assert.equal(leaseChecks, 2);
+      assert.equal(leaseChecks, 3);
       assert.equal(leaseAcquisitions, 1);
-      assert.equal(stored.workerStopProof, "linux-lease-released");
+      assert.equal(stored.workerStopProof, `${platform}-lease-released`);
       assert.equal(stored.workerStopLeaseId, workerLease.id);
     } else assert.equal(stopOptions.tree, false);
     assert.equal(stored.terminationPending, !(confirmed || notSent));
@@ -240,7 +253,7 @@ for (const transport of ["direct", "broker"]) {
         evidence.set(response, { client, value: Object.freeze({ method, requestId, stopReason: response.stopReason }) });
         return response;
       } };
-    const context = vm.createContext({ createTurnCollector: () => ({ state: {}, handle() {}, finalize() {} }),
+    const context = vm.createContext({ brokerRequests: new WeakMap(), createTurnCollector: () => ({ state: {}, handle() {}, finalize() {} }),
       getAcpPromptSuccessEvidence: (response, actualClient) => evidence.get(response)?.client === actualClient ? evidence.get(response).value : null });
     vm.runInContext(functionSource(grok, "async function runPrompt", "function buildResultStatus"), context);
     let metadata;

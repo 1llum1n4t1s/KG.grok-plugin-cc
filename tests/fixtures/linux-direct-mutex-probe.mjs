@@ -1,9 +1,10 @@
 import { once } from "node:events";
-import { withStateSnapshot } from "../../plugins/grok/scripts/lib/state.mjs";
+import { inspectPosixStateLockScope, withPosixStateLock } from "../../plugins/grok/scripts/lib/posix-state-lock.mjs";
 
-const [workspace] = await once(process, "message");
+const [{ stateDir, timeoutMs }] = await once(process, "message");
 try {
-  withStateSnapshot(workspace, () => {}, { timeoutMs: 0 });
+  const scope = inspectPosixStateLockScope(stateDir);
+  withPosixStateLock(stateDir, scope, () => {}, { timeoutMs });
   process.send({ acquired: true }, () => process.disconnect());
 } catch (error) {
   process.send({ acquired: false, message: error.message }, () => process.disconnect());

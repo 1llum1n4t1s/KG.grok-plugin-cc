@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { registerDirectAgentOwner, readDirectAgentStop, waitForDirectAgentStop } from "../plugins/grok/scripts/lib/direct-agent-control.mjs";
 
 function fixture(overrides = {}) {
-  const indexed = { id: "job", status: "running", epoch: "fixture-epoch", pid: 42, processStartKey: "worker-start",
-    claimToken: "fixture-claim", workerLease: { id: "lease", path: "/fixture/lease", dev: "1", ino: "2", stateGeneration: "fixture-epoch" } };
+  const indexed = { id: "job", status: "running", epoch: "fixture-epoch", pid: 42, processStartKey: "worker-start", createdAt: "fixture-created",
+    claimToken: "fixture-claim", workerLease: { id: "lease", slot: 0, path: "/fixture/lease", dev: "1", ino: "2", stateGeneration: "fixture-epoch" } };
   let stored = { ...indexed };
   let locked = false;
   let notify;
@@ -12,7 +12,17 @@ function fixture(overrides = {}) {
   let disposed = 0;
   let reads = 0;
   const deps = {
-    pid: 42, ownerToken: { epoch: "fixture-epoch", pid: 42, startKey: "worker-start" }, verifyDarwinTrackedOwner: () => true,
+    pid: 42, ownerToken: { epoch: "fixture-epoch", pid: 42, startKey: "worker-start", createdAt: indexed.createdAt, claimToken: indexed.claimToken, workerLease: indexed.workerLease, leaseOwner: {} },
+    verifyDarwinTrackedOwner: () => true,
+    verifyLinuxTrackedOwner: (index, record, id, owner, context) => Boolean(owner.leaseOwner) && context.epoch === owner.epoch &&
+      [index, record].every(job => job.id === id && job.epoch === owner.epoch && job.pid === owner.pid &&
+        job.processStartKey === owner.startKey && job.createdAt === owner.createdAt && job.claimToken === owner.claimToken && job.workerLease === owner.workerLease),
+    verifyPublishedLinuxLeaseRecords: ({ context, indexed: index, stored: record, lease }) => {
+      assert.equal(context.epoch, "fixture-epoch");
+      assert.equal(index.claimToken, record.claimToken);
+      assert.deepEqual(index.workerLease, lease);
+      assert.deepEqual(record.workerLease, lease);
+    },
     randomUUID: () => "generation-a", resolveStateDir: () => "mock-state",
     updateState: (_root, change) => { assert.equal(locked, false); locked = true; try { change({ jobs: [indexed] }, { epoch: "fixture-epoch" }); } finally { locked = false; } },
     withStateSnapshot: (_root, inspect) => { assert.equal(locked, false); locked = true; try { return inspect({ jobs: [indexed] }, { epoch: "fixture-epoch" }); } finally { locked = false; } },

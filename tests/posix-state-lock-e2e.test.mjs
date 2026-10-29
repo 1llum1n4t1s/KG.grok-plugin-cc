@@ -8,7 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
-import { linuxSentinelExited, sentinelScript } from "../plugins/grok/scripts/lib/linux-state-sentinel.mjs";
+import { linuxSentinelExited, openLinuxSentinelProcess, sentinelScript } from "../plugins/grok/scripts/lib/linux-state-sentinel.mjs";
 
 // 先行失敗条件: 明示確認/expected保存先の欠落・不一致、旧regular lockの破壊、
 // 未移行writerの副作用、並行RMW/aliasの排他漏れ、保持中timeout、owner SIGKILL、
@@ -52,6 +52,16 @@ fs.openSync=function(file,...args){
   const fd=open.call(this,file,...args);opened.set(fd,real(String(file))||String(file));return fd;
 };
 const fsync=fs.fsyncSync;let delayed=false,gated=false;
+const readFile=fs.readFileSync;
+fs.readFileSync=function(file,...args){
+  const match=typeof file==='string'&&/^\/proc\/self\/fdinfo\/(\d+)$/.exec(file);
+  if(!delayed&&process.platform==='linux'&&process.env.GROK_POSIX_LOCK_DELAY_MOUNT&&match&&
+      fdPath(Number(match[1]))===process.env.GROK_POSIX_LOCK_STATE_DIR){
+    delayed=true;fs.appendFileSync(process.env.GROK_POSIX_LOCK_DELAY_ATTEMPT,'delayed\n');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,Number(process.env.GROK_POSIX_LOCK_DELAY_MOUNT));
+  }
+  return readFile.call(this,file,...args);
+};
 fs.fsyncSync=function(fd){
   const kind=process.env.GROK_POSIX_LOCK_FAIL_DIR_FSYNC,state=process.env.GROK_POSIX_LOCK_STATE_DIR;
   const target=fdPath(fd),barrier=state?path.join(state,'state.lock'):null;
@@ -137,15 +147,20 @@ function fixture(t) {
   const f = { root, workspace, data, env, audit, sentinelAudit, children: new Set(), detached: [], uncertain: false, markerDamaged: false };
   t.diagnostic(`Isolated POSIX fixture: ${root}`);
   t.after(async () => {
+    try {
     for (const child of f.children) {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       await closed(child);
     }
     for (const detached of f.detached) {
-      assert.ok(detached.identity || process.platform !== "linux", `detached child ownership unconfirmed; retained ${root}`);
-      fs.writeFileSync(detached.release, "release");
-      await until(() => fs.existsSync(detached.ack), "detached child exit acknowledgement");
-      if (process.platform === "linux") await until(() => linuxSentinelExited(detached.identity), "detached child exit");
+      try {
+        assert.ok((detached.identity && Number.isInteger(detached.processFd)) || process.platform !== "linux", `detached child ownership unconfirmed; retained ${root}`);
+        fs.writeFileSync(detached.release, "release");
+        await until(() => fs.existsSync(detached.ack), "detached child exit acknowledgement");
+        if (process.platform === "linux") await until(() => linuxSentinelExited(detached.identity, detached.processFd), "detached child exit");
+      } finally {
+        if (Number.isInteger(detached.processFd)) { fs.closeSync(detached.processFd); detached.processFd = undefined; }
+      }
     }
     assert.equal(f.uncertain, false, `worker termination unconfirmed; retained ${root}`);
     if (process.platform === "linux" && fs.existsSync(sentinelAudit)) {
@@ -156,30 +171,40 @@ function fixture(t) {
       for (const sentinel of sentinels) {
         assert.ok(Number.isSafeInteger(sentinel.pid) && sentinel.pid > 0 && /^[1-9]\d*$/.test(sentinel.startTick) &&
           /^[0-9a-f-]{36}$/.test(sentinel.generation) && /^[0-9a-f]{32}$/.test(sentinel.nonce), `invalid owned sentinel identity; retained ${root}`);
-        if (linuxSentinelExited(sentinel)) continue;
-        if (!f.markerDamaged && !fs.existsSync(path.join(f.stateDir, "state.lock", "sentinel-ready.json"))) {
-          // 公開途中で bootstrap が失敗した場合、未 commit の sentinel は自ら終了する。
-          await until(() => linuxSentinelExited(sentinel), `uncommitted sentinel exit unconfirmed; retained ${root}`);
-          continue;
-        }
-        if (marker?.sentinel?.generation === sentinel.generation && marker.sentinel.nonce === sentinel.nonce) {
-          try {
-            assert.equal(shutdownPosixStateLockSentinel(f.stateDir, { offlineConfirmed: true, expectedStateDir: f.stateDir }).stopped, true);
+        const processFd = pinAuditedProcess(sentinel);
+        if (processFd === null) continue;
+        try {
+          if (linuxSentinelExited(sentinel, processFd)) continue;
+          if (!f.markerDamaged && !fs.existsSync(path.join(f.stateDir, "state.lock", "sentinel-ready.json"))) {
+            // 公開途中で bootstrap が失敗した場合、未 commit の sentinel は自ら終了する。
+            await until(() => linuxSentinelExited(sentinel, processFd), `uncommitted sentinel exit unconfirmed; retained ${root}`);
             continue;
-          } catch (error) {
-            if (!f.markerDamaged) throw error;
           }
-        }
-        assert.equal(f.markerDamaged, true, `sentinel marker unavailable; retained ${root}`);
-        // 破損・退避された marker のみ、fixture が公開前に保存した nonce で協調停止する。
-        const stopped = spawnSync(process.execPath, [sentinelScript, "stop", sentinel.generation, sentinel.nonce], { encoding: "utf8", timeout: 4000 });
-        assert.equal(stopped.status, 0, `owned sentinel stop unconfirmed; retained ${root}`);
-        await until(() => linuxSentinelExited(sentinel), `owned sentinel exit unconfirmed; retained ${root}`);
+          if (marker?.sentinel?.generation === sentinel.generation && marker.sentinel.nonce === sentinel.nonce) {
+            try {
+              assert.equal(shutdownPosixStateLockSentinel(f.stateDir, { offlineConfirmed: true, expectedStateDir: f.stateDir }).stopped, true);
+              await until(() => linuxSentinelExited(sentinel, processFd), `owned sentinel exit unconfirmed; retained ${root}`);
+              continue;
+            } catch (error) {
+              if (!f.markerDamaged) throw error;
+            }
+          }
+          assert.equal(f.markerDamaged, true, `sentinel marker unavailable; retained ${root}`);
+          // 破損・退避された marker のみ、fixture が公開前に保存した nonce で協調停止する。
+          const stopped = spawnSync(process.execPath, [sentinelScript, "stop", sentinel.generation, sentinel.nonce], { encoding: "utf8", timeout: 4000 });
+          assert.equal(stopped.status, 0, `owned sentinel stop unconfirmed; retained ${root}`);
+          await until(() => linuxSentinelExited(sentinel, processFd), `owned sentinel exit unconfirmed; retained ${root}`);
+        } finally { fs.closeSync(processFd); }
       }
     }
     // このmkdtemp rootだけ。symlink aliasも同じroot内を指す。
     assert.equal(path.dirname(root), parent);
     fs.rmSync(root, { recursive: true, force: true });
+    } finally {
+      for (const detached of f.detached) {
+        if (Number.isInteger(detached.processFd)) { fs.closeSync(detached.processFd); detached.processFd = undefined; }
+      }
+    }
   });
   f.stateDir = run(f, `console.log(JSON.stringify(resolveStateDir(workspace)));`);
   return f;
@@ -218,6 +243,15 @@ async function closed(child) { await child.closed; }
 async function until(check, label) {
   const deadline = Date.now() + 6000;
   while (!check()) { assert.ok(Date.now() < deadline, label); await delay(10); }
+}
+
+// 監査記録から既に消えた process は終了済み。存在する場合は同一 PID・開始時刻を fd で確認する。
+function pinAuditedProcess(identity) {
+  let fd;
+  try { fd = fs.openSync(`/proc/${identity.pid}/stat`, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW); }
+  catch (error) { if (error?.code === "ENOENT" || error?.code === "ESRCH") return null; throw error; }
+  try { linuxSentinelExited(identity, fd); return fd; }
+  catch (error) { fs.closeSync(fd); throw error; }
 }
 function migrateOnly(f) {
   const result = run(f, `console.log(JSON.stringify(migrateStateLock(workspace,{offlineConfirmed:true,localOnly:true,expectedStateDir:${JSON.stringify(f.stateDir)}})));`);
@@ -283,12 +317,13 @@ async function hold(f, { detached = false } = {}) {
     const startTick = stat[1].trim().split(/\s+/)[18];
     assert.match(startTick, /^[1-9]\d*$/, "detached child start time is unavailable");
     ownedDetached.identity = { pid: info.detachedPid, startTick };
+    ownedDetached.processFd = openLinuxSentinelProcess(ownedDetached.identity);
   }
   return { child, ownerRelease, ...info };
 }
 function rejectedUpdate(f, timeoutMs = 150, env = {}) {
   return run(f, `let entered=false,error;const begin=performance.now();try{updateState(workspace,()=>{entered=true;},{timeoutMs:${timeoutMs}});}catch(e){error=e.message;}
-    console.log(JSON.stringify({entered,error,elapsed:performance.now()-begin}));`, env);
+    console.log(JSON.stringify({pid:process.pid,entered,error,elapsed:performance.now()-begin}));`, env);
 }
 
 test("POSIX migration requires both offline confirmations and an exact expected state directory", posixOnly, t => {
@@ -374,10 +409,25 @@ for (const mismatch of ["host", "device"]) test(`offline POSIX recovery preserve
   const refused = rejectedUpdate(f); assert.equal(refused.entered, false); assert.match(refused.error, /host|identity|marker|migration|recovery/i);
   assert.deepEqual(tree(barrier), damaged); assert.deepEqual(metadata(path.join(f.stateDir, "state.json")), beforeState);
   assert.equal(f.children.size, 0, "no owner has ever been started for this isolated fixture");
-  const retained = path.join(f.stateDir, "state.lock.offline-backup"); fs.renameSync(barrier, retained);
+  let retainedLeaseTree;
+  const retainedLease = path.join(f.root, "darwin-lease-offline-backup");
+  if (process.platform === "darwin") {
+    const leaseDirectory = path.join(f.stateDir, "worker-leases"), ledgerFile = path.join(f.stateDir, "darwin-lease-ledger.json");
+    const ledger = JSON.parse(fs.readFileSync(ledgerFile, "utf8"));
+    assert.equal(ledger.protocol, "darwin-lease-ledger-v1");
+    assert.equal(ledger.slots.length, 256);
+    assert.ok(ledger.slots.every((slot, index) => slot.slot === index && slot.state === "free"));
+    assert.deepEqual(fs.readdirSync(leaseDirectory), []);
+    fs.mkdirSync(retainedLease, { mode: 0o700 });
+    fs.renameSync(leaseDirectory, path.join(retainedLease, "worker-leases"));
+    fs.renameSync(ledgerFile, path.join(retainedLease, "darwin-lease-ledger.json"));
+    retainedLeaseTree = tree(retainedLease);
+  }
+  const retained = path.join(process.platform === "darwin" ? f.root : f.stateDir, "state.lock.offline-backup"); fs.renameSync(barrier, retained);
   migrateOnly(f); assert.deepEqual(tree(retained), damaged); assert.deepEqual(metadata(path.join(f.stateDir, "state.json")), beforeState);
   const result = run(f, `updateState(workspace,s=>{s.config.afterRecovery=true;});console.log(JSON.stringify(loadState(workspace).config));`);
   assert.equal(result.afterRecovery, true); assert.equal(result.sentinel, "original"); assert.deepEqual(tree(retained), damaged);
+  if (retainedLeaseTree) assert.deepEqual(tree(retainedLease), retainedLeaseTree);
 });
 
 test("POSIX aliases of one state directory contend and a held lock has a bounded timeout", posixOnly, async t => {
@@ -484,6 +534,24 @@ for (const fault of ["missing-utility", "stalled-utility", "invalid-marker"]) te
   assert.deepEqual(metadata(path.join(f.stateDir, "state.json")), before);
 });
 
+for (const fault of ["stalled-utility", "missing-utility"]) {
+  test(`Linux root lock reports the cause of ${fault} without changing state`,
+    { skip: process.platform !== "linux" ? "Linux root lock only" : false, timeout: 30000 }, t => {
+      const f = fixture(t); migrate(f);
+      const stateFile = path.join(f.stateDir, "state.json"), before = metadata(stateFile);
+      const result = run(f, `let entered=false,caught;try{updateState(workspace,s=>{entered=true;s.config.counter=99;},{timeoutMs:500});}catch(e){caught=e;}
+        console.log(JSON.stringify({pid:process.pid,entered,error:caught?.message,causeCode:caught?.cause?.code}));`,
+        fault === "stalled-utility" ? { GROK_POSIX_LOCK_STALL_UTILITY: "1" } : { GROK_POSIX_LOCK_DENY_UTILITY: "1" });
+      assert.equal(result.entered, false);
+      assert.equal(result.causeCode, fault === "stalled-utility" ? "ETIMEDOUT" : "ENOENT");
+      assert.match(result.error, fault === "stalled-utility" ? /timed out|deadline/i : /root lock utility failed/i);
+      const rows = fs.readFileSync(f.audit, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      assert.ok(rows.some(row => row.pid === result.pid && row.utility === "flock" && row.lockPath === fs.realpathSync(f.stateDir)),
+        "the failing update must reach the state root flock");
+      assert.deepEqual(metadata(stateFile), before);
+    });
+}
+
 // callbackのstatus:1はutilityの競合exitと異なる。同じ例外を返し、callback副作用を再試行しない。
 test("a POSIX transaction callback with status 1 runs once and preserves its exact exception", posixOnly, t => {
   const f = fixture(t); migrate(f);
@@ -549,7 +617,11 @@ for (const stage of ["state-dir", "lock-dir-before-marker", "lock-dir-after-mark
     if (process.platform === "linux") {
       const sentinels = fs.readFileSync(f.sentinelAudit, "utf8").trim().split("\n").map(JSON.parse);
       assert.equal(sentinels.length, 1);
-      await until(() => linuxSentinelExited(sentinels[0]), "uncommitted bootstrap sentinel must exit before offline recovery");
+      const processFd = pinAuditedProcess(sentinels[0]);
+      if (processFd !== null) {
+        try { await until(() => linuxSentinelExited(sentinels[0], processFd), "uncommitted bootstrap sentinel must exit before offline recovery"); }
+        finally { fs.closeSync(processFd); }
+      }
       const retryWithoutFault = run(f, invoke);
       assert.equal(retryWithoutFault.result, undefined);
       assert.match(retryWithoutFault.error, /sentinel|offline recovery/i);
@@ -571,11 +643,14 @@ test("POSIX acquisition does not restart its deadline after synchronous validati
   const f = fixture(t); migrate(f); await hold(f);
   const attempted = path.join(f.root, "validation-delay-attempt");
   const result = run(f, `const dir=resolveStateDir(workspace),scope=inspectPosixStateLockScope(dir);let entered=false,error;
+    if(process.platform==='linux')process.env.GROK_POSIX_LOCK_DELAY_MOUNT='120';
     const started=performance.now();try{withPosixStateLock(dir,scope,()=>{entered=true;},{timeoutMs:100});}catch(e){error=e.message;}
     console.log(JSON.stringify({pid:process.pid,started,elapsed:performance.now()-started,entered,error}));`, {
-    GROK_POSIX_LOCK_STATE_DIR: f.stateDir, GROK_POSIX_LOCK_DELAY_DIR_FSYNC: "120", GROK_POSIX_LOCK_DELAY_ATTEMPT: attempted
+    GROK_POSIX_LOCK_STATE_DIR: f.stateDir, ...(process.platform === "darwin" ? { GROK_POSIX_LOCK_DELAY_DIR_FSYNC: "120" } : {}),
+    GROK_POSIX_LOCK_DELAY_ATTEMPT: attempted
   });
   assert.ok(fs.existsSync(attempted), "the synchronous validation must actually consume its budget");
+  assert.ok(result.elapsed >= 100, "the acquisition budget must have expired during validation");
   assert.equal(result.entered, false); assert.match(result.error, /timed out|deadline/i);
   const rows = fs.readFileSync(f.audit, "utf8").trim().split("\n").map(line => JSON.parse(line));
   assert.equal(rows.filter(row => row.pid === result.pid && row.at >= result.started + 100).length, 0,
@@ -776,12 +851,22 @@ test("a writer cannot adopt the marker while migration is paused before its dire
     GROK_POSIX_LOCK_FSYNC_ATTEMPTS: attempts };
   const blocked = rejectedUpdate(f, 1000, fault);
   assert.equal(blocked.entered, false); assert.match(blocked.error, /fsync|sync|EIO|durab|lock/i);
-  assert.ok(fs.existsSync(attempts), "writer must check synchronization before accepting a published marker");
+  if (process.platform === "linux") {
+    assert.match(blocked.error, /timed out|deadline/i);
+    const rows = fs.readFileSync(f.audit, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.ok(rows.some(row => row.pid === blocked.pid && row.utility === "flock" && row.lockPath === fs.realpathSync(f.stateDir)),
+      "writer must attempt the held state root lock before accepting the marker");
+    assert.equal(fs.existsSync(attempts), false, "writer cannot reach marker fsync while the root lock is held");
+  } else {
+    assert.ok(fs.existsSync(attempts), "writer must check synchronization before accepting a published marker");
+  }
   assert.deepEqual(metadata(stateFile), before);
   fs.writeFileSync(`${gate}.release`, "allow durable publication"); assert.equal(owner.kill("SIGCONT"), true);
   const migrated = await owner.result; assert.equal(migrated.code, 0, migrated.stderr);
   const stillBlocked = rejectedUpdate(f, 1000, fault);
-  assert.equal(stillBlocked.entered, false); assert.deepEqual(metadata(stateFile), before);
+  assert.equal(stillBlocked.entered, false); assert.match(stillBlocked.error, /fsync|sync|EIO|durab/i);
+  assert.ok(fs.existsSync(attempts), "writer must reject a directory fsync failure after the migration releases its lock");
+  assert.deepEqual(metadata(stateFile), before);
   const recovered = run(f, `updateState(workspace,s=>{s.config.afterPublication=true;},{timeoutMs:2000});console.log(JSON.stringify(loadState(workspace).config));`);
   assert.equal(recovered.afterPublication, true); assert.equal(recovered.sentinel, "before-publish");
 });

@@ -26,6 +26,33 @@ function fixture(t) {
   return { root, stateDir, jobs, log, detail, index, guard, closeGuard };
 }
 
+test("Darwin legacy preflight validates job identity and exact detail names", mac, t => {
+  for (const scenario of ["matched", "case-collision", "detail-case", "missing-detail", "extra-file"]) {
+    const f = fixture(t);
+    fs.writeFileSync(f.log, "log", { flag: "wx", mode: 0o600 });
+    if (scenario === "case-collision") {
+      const index = JSON.parse(fs.readFileSync(f.index, "utf8"));
+      index.jobs.push({ ...index.jobs[0], id: "OLD-JOB", logFile: null });
+      fs.writeFileSync(f.index, JSON.stringify(index), { mode: 0o600 });
+    } else if (scenario === "detail-case") {
+      fs.renameSync(f.detail, path.join(f.jobs, "OLD-JOB.json"));
+      assert.ok(fs.readdirSync(f.jobs).includes("OLD-JOB.json"));
+    } else if (scenario === "missing-detail") {
+      fs.renameSync(f.detail, path.join(f.root, "preserved-detail.json"));
+    } else if (scenario === "extra-file") {
+      fs.writeFileSync(path.join(f.jobs, "unexpected.json"), "{}", { flag: "wx", mode: 0o600 });
+    }
+    const beforeIndex = fs.readFileSync(f.index), beforeNames = fs.readdirSync(f.jobs).sort();
+    const run = () => verifyDarwinLegacyPreflight({ stateDir: f.stateDir, guardContext: f.guard.context });
+    if (scenario === "matched") assert.ok(run());
+    else assert.throws(run, scenario === "case-collision" ? /job identity, log or lease is unverified/i :
+      scenario === "extra-file" ? /unreferenced Darwin job files/i : /job detail is missing/i);
+    assert.deepEqual(fs.readFileSync(f.index), beforeIndex);
+    assert.deepEqual(fs.readdirSync(f.jobs).sort(), beforeNames);
+    assert.equal(fs.readFileSync(f.log, "utf8"), "log");
+  }
+});
+
 test("Darwin legacy preflight rejects an externally hardlinked job log", mac, t => {
   const f = fixture(t), outside = path.join(f.root, "outside-evidence");
   fs.writeFileSync(outside, "outside evidence\n", { flag: "wx", mode: 0o600 });

@@ -9,6 +9,9 @@ import { randomUUID, createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { getEventListeners } from "node:events";
+import { createRequire } from "node:module";
+import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
+import { removeTempFixture } from "./helpers.mjs";
 import { startFixtureBroker } from "./broker-fixture-helper.mjs";
 
 const root = process.env.GROK_TRANSPORT_ROOT ?? path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -34,6 +37,7 @@ log({ pid: process.pid });
 if (process.env.TRANSPORT_BROKER_FAILURE === "1") {
   process.on("exit", () => log({ agentExited: process.pid }));
   process.on("SIGTERM", () => process.exit(0));
+  if (process.env.TRANSPORT_EXIT_ON_STDIN_END === "1") process.stdin.once("end", () => process.exit(0));
   setTimeout(() => process.exit(0), Number(process.env.TRANSPORT_AGENT_LIFETIME_MS ?? 10000));
 }
 const pending = new Map();
@@ -82,9 +86,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
   if (m.method === "session/set_mode" && m.params.modeId === "hold-control") {
     log({ heldControl: m.id });
-    setTimeout(() => {
+    const gate = setInterval(() => {
+      if (!fs.existsSync(process.env.TRANSPORT_LOG + ".release-control")) return;
+      clearInterval(gate);
       send({ jsonrpc: "2.0", id: m.id, result: {} }).then(() => log({ controlFinished: m.id }));
-    }, 120);
+    }, 10);
     return;
   }
   if (m.method === "session/cancel") {
@@ -111,6 +117,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
   if (p.mode === "finish-cancelled") {
     finish(m.id, "cancelled");
+    return;
+  }
+  if (p.mode === "unknown-stop" || p.mode === "typed-stop") {
+    finish(m.id, p.mode === "unknown-stop" ? "unsupported-reason" : 123);
     return;
   }
   if (p.mode === "missing-stop" || p.mode === "missing-result") {
@@ -205,8 +215,109 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
+// Linux fixture ごとに起動した process を生成元で記録する。ほかの process の環境は走査しない。
+const ownedFixtures = [];
+const ownerTrackerSource = String.raw`
+const fs = require("node:fs");
+const childProcess = require("node:child_process");
+const { syncBuiltinESMExports } = require("node:module");
+function identity(pid) {
+  try {
+    const raw = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
+    const fields = raw.slice(raw.lastIndexOf(")") + 2).split(" ");
+    return { state: fields[0], group: Number(fields[2]), start: fields[19] };
+  } catch { return null; }
+}
+function log(file, value) { fs.appendFileSync(file, JSON.stringify(value) + "\n"); }
+if (process.env.GROK_TRANSPORT_OWNERSHIP) {
+  log(process.env.GROK_TRANSPORT_OWNERSHIP, { type: "ready", pid: process.pid, identity: identity(process.pid) });
+}
+if (!globalThis.__grokTransportOwnershipPatched) {
+  globalThis.__grokTransportOwnershipPatched = true;
+  const original = childProcess.spawn;
+  childProcess.spawn = function(file, args, options) {
+    const child = original.apply(this, arguments);
+    const opts = Array.isArray(args) ? options : args;
+    const env = opts?.env ?? process.env;
+    const logFile = env.GROK_TRANSPORT_OWNERSHIP;
+    if (logFile) {
+      const id = child.pid ? identity(child.pid) : null;
+      log(logFile, { type: "spawn", ownerPid: process.pid, pid: child.pid ?? null, identity: id, detached: opts?.detached === true,
+        expectReady: file === process.execPath || file === env.GROK_BIN });
+      child.once("close", (code, signal) => log(logFile, { type: "close", pid: child.pid ?? null, start: id?.start ?? null, code, signal }));
+    }
+    return child;
+  };
+  syncBuiltinESMExports();
+}
+`;
+const fixtureIdentity = file => {
+  const stat = fs.lstatSync(file, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Fixture directory is not verified: ${file}`);
+  return { dev: stat.dev, ino: stat.ino };
+};
+async function cleanupOwnedFixtures() {
+  const errors = [];
+  for (const f of ownedFixtures) {
+    try {
+      if (!f.complete || !f.stateDir || !f.marker?.epoch || !f.identity || !f.protocolIdentity) throw new Error("migration was not confirmed");
+      const records = fs.readFileSync(f.ownershipLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+      const spawned = records.filter(entry => entry.type === "spawn");
+      for (const entry of spawned) {
+        if (!Number.isSafeInteger(entry.pid) || entry.pid <= 0 || !entry.identity?.start || !Number.isInteger(entry.identity.group)) {
+          throw new Error("fixture child startup identity is unavailable");
+        }
+        if (entry.detached && entry.identity.group !== entry.pid) throw new Error("fixture child group identity is unavailable");
+        if (entry.expectReady && !records.some(item => item.type === "ready" && item.pid === entry.pid && item.identity?.start === entry.identity.start)) {
+          throw new Error(`fixture child startup was not confirmed: ${entry.pid}`);
+        }
+        await until(() => {
+          let live = false;
+          try {
+            const raw = fs.readFileSync(`/proc/${entry.pid}/stat`, "utf8");
+            const fields = raw.slice(raw.lastIndexOf(")") + 2).split(" ");
+            live = fields[19] === entry.identity.start && !["Z", "X", "x"].includes(fields[0]);
+          } catch (error) { if (error.code !== "ENOENT" && error.code !== "ESRCH") throw error; }
+          if (live) return false;
+          if (entry.detached) {
+            try { process.kill(-entry.pid, 0); return false; }
+            catch (error) { if (error.code !== "ESRCH") throw error; }
+          }
+          return true;
+        }, `fixture child and owned group stopped: ${entry.pid}`, 15000);
+        if (entry.ownerPid === process.pid) {
+          await until(() => fs.readFileSync(f.ownershipLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse)
+            .some(item => item.type === "close" && item.pid === entry.pid && item.start === entry.identity.start),
+          `fixture child close observed: ${entry.pid}`, 15000);
+        }
+      }
+      assert.deepEqual(fixtureIdentity(f.cwd), f.rootIdentity);
+      assert.deepEqual(fixtureIdentity(f.stateDir), f.identity);
+      const lockDir = path.join(f.stateDir, "state.lock");
+      assert.deepEqual(fixtureIdentity(lockDir), f.lockIdentity);
+      const markerFile = path.join(lockDir, "protocol.json"), stat = fs.lstatSync(markerFile, { bigint: true });
+      assert.ok(stat.isFile() && !stat.isSymbolicLink());
+      assert.deepEqual({ dev: stat.dev, ino: stat.ino }, f.protocolIdentity);
+      const current = JSON.parse(fs.readFileSync(markerFile, "utf8"));
+      assert.equal(current.epoch, f.marker.epoch);
+      assert.deepEqual(current.sentinel, f.marker.sentinel);
+      const stopped = shutdownPosixStateLockSentinel(f.stateDir, { offlineConfirmed: true, expectedStateDir: f.stateDir });
+      assert.equal(stopped.stopped, true);
+      assert.equal(stopped.stateDir, f.stateDir);
+      assert.equal(stopped.epoch, f.marker.epoch);
+      assert.deepEqual(fixtureIdentity(f.cwd), f.rootIdentity);
+      removeTempFixture(f.cwd, { recursive: true, force: true });
+    } catch (error) {
+      errors.push(new Error(`Fixture retained because owned process or sentinel termination was not confirmed: ${f.cwd}`, { cause: error }));
+    }
+  }
+  if (errors.length) throw new AggregateError(errors, "Transport fixture cleanup was not confirmed");
+}
+
 function fixture() {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-transport-e2e-"));
+  const tracked = process.platform === "linux" ? { cwd, rootIdentity: fixtureIdentity(cwd), complete: false } : null;
+  if (tracked) ownedFixtures.push(tracked);
   const script = path.join(cwd, "agent.mjs");
   fs.writeFileSync(script, fakeSource);
   const wrapper = path.join(cwd, process.platform === "win32" ? "grok.cmd" : "grok");
@@ -216,8 +327,28 @@ function fixture() {
   const logPath = path.join(cwd, "agent.jsonl");
   process.env.CLAUDE_PLUGIN_DATA = path.join(cwd, "data");
   process.env.PLUGIN_DATA = process.env.CLAUDE_PLUGIN_DATA;
-  stateApi.migrateStateLock(cwd, { offlineConfirmed: true, localOnly: true, expectedStateDir: stateApi.resolveStateDir(cwd) });
+  const stateDir = stateApi.resolveStateDir(cwd);
+  const marker = stateApi.migrateStateLock(cwd, { offlineConfirmed: true, localOnly: true, expectedStateDir: stateDir });
   const env = { ...process.env, GROK_BIN: wrapper, TRANSPORT_LOG: logPath, TMPDIR: cwd, TMP: cwd, TEMP: cwd };
+  if (tracked) {
+    assert.equal(marker.stateDir, stateDir);
+    assert.ok(marker.epoch && marker.sentinel);
+    tracked.stateDir = stateDir; tracked.marker = marker;
+    tracked.identity = fixtureIdentity(stateDir);
+    const lockDir = path.join(stateDir, "state.lock");
+    tracked.lockIdentity = fixtureIdentity(lockDir);
+    const stat = fs.lstatSync(path.join(lockDir, "protocol.json"), { bigint: true });
+    assert.ok(stat.isFile() && !stat.isSymbolicLink());
+    tracked.protocolIdentity = { dev: stat.dev, ino: stat.ino };
+    tracked.ownershipLog = path.join(cwd, "ownership.jsonl");
+    fs.writeFileSync(tracked.ownershipLog, "");
+    const preload = path.join(cwd, "ownership.cjs");
+    fs.writeFileSync(preload, ownerTrackerSource);
+    env.GROK_TRANSPORT_OWNERSHIP = tracked.ownershipLog;
+    env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ""} --require="${preload}"`.trim();
+    createRequire(import.meta.url)(preload);
+    tracked.complete = true;
+  }
   return { cwd, env, logs: () => fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [] };
 }
 
@@ -238,35 +369,73 @@ function socketPath(value) {
   return value.slice(5);
 }
 
-async function brokerFixture(onChild) {
+async function brokerFixture(onChild, configure) {
   const f = fixture();
+  configure?.(f);
   const address = endpoint();
-  const { child: proc, exited, session } = await startFixtureBroker(f.cwd, f.env, address, { state: stateApi, broker: brokerApi, onChild });
+  let proc, closed, exited, session;
+  const wait = async (promise, ms) => {
+    let timer;
+    try { return await Promise.race([promise, new Promise(resolve => { timer = setTimeout(() => resolve(null), ms); })]); }
+    finally { clearTimeout(timer); }
+  };
+  const stopOwned = async () => {
+    if (!proc) return;
+    // PIDを再照会して停止権限にせず、未終了の直子handleだけを停止する。
+    if (proc.exitCode === null && proc.signalCode === null && !proc.kill("SIGTERM")) throw new Error("Owned broker signal was not delivered");
+    if (!(await wait(closed, 5000))) throw new Error("Owned broker close was not confirmed");
+    if (process.platform === "linux" || process.platform === "darwin") {
+      if (!Number.isSafeInteger(proc.pid) || proc.pid <= 0) throw new Error("Owned broker group is unavailable");
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        try { process.kill(-proc.pid, 0); }
+        catch (error) { if (error?.code === "ESRCH") break; throw error; }
+        if (Date.now() >= deadline) throw new Error("Owned broker group exit was not confirmed");
+        await pause(50);
+      }
+    }
+  };
+  const retainFailure = async error => {
+    try { await stopOwned(); }
+    catch (stopError) { throw new AggregateError([error, stopError], `Fixture retained because broker termination was not confirmed: ${f.cwd}`); }
+    throw error;
+  };
+  try {
+    ({ child: proc, exited, session } = await startFixtureBroker(f.cwd, f.env, address, { state: stateApi, broker: brokerApi, onChild(child) {
+      // 起動受付が失敗しても、spawn時点から直子のcloseを追跡する。
+      proc = child;
+      closed = new Promise(resolve => child.once("close", (code, signal) => resolve({ code, signal })));
+      onChild?.(child);
+    } }));
+  } catch (error) { return await retainFailure(error); }
   const stderr = () => fs.existsSync(session.logFile) ? fs.readFileSync(session.logFile, "utf8") : "";
   return {
     ...f,
+    address,
     generation: session.generation,
     connect: (options = {}) => GrokAcpClient.connect(f.cwd, { ...options, brokerEndpoint: address, env: f.env }),
     close: async () => {
-      if (proc.exitCode === null) {
-        const client = await GrokAcpClient.connect(f.cwd, { brokerEndpoint: address, env: f.env });
-        try {
-          // client.closeの完了後もpeer側では切断処理とcancelのterminalが進行し得る。
-          // 共有brokerの占有保護を緩めず、fixture所有の要求がdrainするまで待つ。
-          await until(async () => {
-            try {
-              await client.request("broker/shutdown", {});
-              return true;
-            } catch (error) {
-              if (error.rpcCode !== -32001) throw error;
-              return false;
-            }
-          }, "broker disconnected requests drained before shutdown");
-        } finally { await client.close(); }
-      }
-      await exited;
-      assert.equal(proc.exitCode, 0, stderr());
-      assert.doesNotMatch(stderr(), /Unhandled|uncaught|ERR_STREAM_WRITE_AFTER_END/);
+      try {
+        if (proc.exitCode === null) {
+          const client = await GrokAcpClient.connect(f.cwd, { brokerEndpoint: address, env: f.env });
+          try {
+            // client.closeの完了後もpeer側では切断処理とcancelのterminalが進行し得る。
+            // 共有brokerの占有保護を緩めず、fixture所有の要求がdrainするまで待つ。
+            await until(async () => {
+              try {
+                await client.request("broker/shutdown", {});
+                return true;
+              } catch (error) {
+                if (error.rpcCode !== -32001) throw error;
+                return false;
+              }
+            }, "broker disconnected requests drained before shutdown");
+          } finally { await client.close(); }
+        }
+        if (!(await wait(exited, 5000))) throw new Error("Broker exit was not confirmed");
+        assert.equal(proc.exitCode, 0, stderr());
+        assert.doesNotMatch(stderr(), /Unhandled|uncaught|ERR_STREAM_WRITE_AFTER_END/);
+      } catch (error) { await retainFailure(error); }
     }
   };
 }
@@ -366,10 +535,25 @@ async function cancelDuringFrame(transport) {
   });
 }
 
+const transportChildMode = ["GROK_BROKER_FALLBACK_CHILD", "GROK_FALLBACK_START_FAILURE", "GROK_FALLBACK_CAUSE_CHILD",
+  "GROK_BROKER_NOTIFICATION_CHILD", "GROK_BROKER_FAILURE_CHILD", "GROK_TRANSPORT_BACKPRESSURE",
+  "GROK_TRANSPORT_FAILURE_CASE", "GROK_TRANSPORT_CANCEL", "GROK_TRANSPORT_MEASURE"].some(key => Boolean(process.env[key]));
+if (process.platform === "linux") {
+  if (transportChildMode) {
+    process.once("beforeExit", () => {
+      void cleanupOwnedFixtures().catch(error => {
+        process.stderr.write(`${error.stack ?? error}\n`);
+        for (const cause of error.errors ?? []) process.stderr.write(`${cause.stack ?? cause}\n`);
+        process.exitCode = 1;
+      });
+    });
+  } else test.after(cleanupOwnedFixtures);
+}
+
 if (process.env.GROK_BROKER_FALLBACK_CHILD) {
   const { cwd, scenario } = JSON.parse(process.env.GROK_BROKER_FALLBACK_CHILD);
   const { runGrokTurn, runGrokReview } = await import(pathToFileURL(path.join(root, "plugins/grok/scripts/lib/grok.mjs")));
-  if (scenario === "dispose-capacity" || scenario === "dispose-success" || scenario === "progress-completed") {
+  if (["dispose-capacity", "dispose-success", "progress-completed", "reentrant-capacity", "reentrant-throw"].includes(scenario)) {
     const originalWrite = net.Socket.prototype.write;
     net.Socket.prototype.write = function (chunk, ...args) {
       try {
@@ -729,16 +913,114 @@ if (process.env.GROK_BROKER_FALLBACK_CHILD) {
 } else if (process.env.GROK_TRANSPORT_MEASURE === "1") {
   await measure();
 } else {
-  for (const scenario of ["broker-capacity", "reentrant-capacity", "reentrant-throw", "dispose-capacity", "dispose-throw"]) test(`ACP real broker fallback: ${scenario} before the first prompt`, { timeout: 90000, skip: process.platform === "win32" }, async () => {
+  test("ACP broker keeps RPC error unconfirmed when its epoch check fails then recovers", { timeout: 60000, skip: process.platform !== "linux" }, async t => {
+    let injection;
+    const brokerSource = path.join(root, "plugins/grok/scripts/acp-broker.mjs");
+    const lines = fs.readFileSync(brokerSource, "utf8").split("\n");
+    const matches = lines.flatMap((line, index) => line.includes('error.rpcResponseReceived === true && epochValid()') ? [index + 1] : []);
+    assert.equal(matches.length, 1, "the real broker error-response epoch boundary must be unambiguous");
+    const f = await brokerFixture(undefined, configured => {
+      injection = path.join(configured.cwd, "error-epoch-injected");
+      const preload = path.join(configured.cwd, "error-epoch-injection.cjs");
+      const source = [
+        'const fs = require("node:fs"), mod = require("node:module");',
+        'if (process.argv[1]?.endsWith("acp-broker.mjs")) {',
+        '  Error.stackTraceLimit = 100; let fired = false;',
+        '  for (const method of ["lstatSync", "openSync"]) {',
+        '    const original = fs[method];',
+        '    fs[method] = function(...args) {',
+        '      if (!fired && typeof args[0] === "string" && args[0].endsWith("/state.lock")) {',
+        '        const stack = new Error().stack ?? "";',
+        '        if (stack.includes("verifyBrokerEpoch") && stack.includes(' + JSON.stringify('acp-broker.mjs:' + matches[0] + ':') + ')) {',
+        '          fired = true; fs.writeFileSync(process.env.TRANSPORT_EPOCH_INJECTED, "one error-boundary epoch failure");',
+        '          throw new Error("fixture epoch verification failure");',
+        '        }',
+        '      }',
+        '      return original.apply(this, args);',
+        '    };',
+        '  }',
+        '  mod.syncBuiltinESMExports();',
+        '}'
+      ].join("\n");
+      fs.writeFileSync(preload, source);
+      configured.env.TRANSPORT_EPOCH_INJECTED = injection;
+      configured.env.NODE_OPTIONS = (configured.env.NODE_OPTIONS ?? "") + " --require=" + JSON.stringify(preload);
+    });
+    let control;
+    try {
+      const { runGrokTurn } = await import(pathToFileURL(path.join(root, "plugins/grok/scripts/lib/grok.mjs")));
+      const executionId = "rpc-error-epoch-boundary";
+      const result = await runGrokTurn(f.cwd, { env: { ...f.env, GROK_COMPANION_ACP_ENDPOINT: f.address,
+        GROK_COMPANION_BROKER_GENERATION: f.generation }, executionId, prompt: JSON.stringify({ mode: "rpc-error" }),
+        enqueuePrompt: enqueue => enqueue() });
+      assert.ok(fs.existsSync(injection), "the broker error response must hit the injected epoch check");
+      const prompts = f.logs().filter(row => row.mode === "rpc-error");
+      assert.equal(prompts.length, 1, "the real agent receives exactly one prompt");
+      assert.equal(result.sessionId, prompts[0].sessionId);
+      control = await f.connect();
+      const ledger = await control.request("broker/cancelTurn", { sessionId: result.sessionId, executionId, generation: f.generation });
+      t.diagnostic(`ledger=${ledger.executionState}; clientStopUnconfirmed=${result.turnStopUnconfirmed}; error=${result.error?.message}`);
+      assert.equal(ledger.executionState, "unknown", "a failed epoch check must leave the broker ledger unconfirmed");
+      assert.equal(ledger.notificationSent, false);
+      assert.equal(result.status, "failed");
+      assert.equal(result.promptNotSent, false);
+      assert.equal(result.turnStopUnconfirmed, true, "the client must receive the same unconfirmed terminal evidence");
+    } finally {
+      if (control) await control.close();
+      await f.close();
+    }
+  });
+
+  for (const mode of ["missing-stop", "unknown-stop", "typed-stop"]) test(`ACP broker rejects resume after ${mode} response`,
+    { timeout: 60000, skip: process.platform !== "linux" }, async t => {
+      const f = await brokerFixture();
+      let control;
+      try {
+        const { runGrokTurn } = await import(pathToFileURL(path.join(root, "plugins/grok/scripts/lib/grok.mjs")));
+        const executionId = "invalid-reason-" + mode;
+        const result = await runGrokTurn(f.cwd, { env: { ...f.env, GROK_COMPANION_ACP_ENDPOINT: f.address,
+          GROK_COMPANION_BROKER_GENERATION: f.generation }, executionId, prompt: JSON.stringify({ mode }),
+          enqueuePrompt: enqueue => enqueue() });
+        const prompts = f.logs().filter(row => row.mode === mode);
+        assert.equal(prompts.length, 1, "the real agent receives exactly one prompt");
+        assert.equal(result.sessionId, prompts[0].sessionId);
+        control = await f.connect();
+        const ledger = await control.request("broker/cancelTurn", { sessionId: result.sessionId, executionId, generation: f.generation });
+        const inspection = await control.request("broker/inspectResumeSessions", { sessionIds: [result.sessionId], generation: f.generation });
+        const load = await control.request("session/load", { sessionId: result.sessionId, cwd: f.cwd, mcpServers: [] })
+          .then(() => ({ accepted: true }), error => ({ accepted: false, message: error.message }));
+        t.diagnostic(`mode=${mode}; ledger=${ledger.executionState}; inspect=${inspection.sessions[0]?.terminal}; loadAccepted=${load.accepted}`);
+        assert.equal(result.status, "failed");
+        assert.equal(result.turnStopUnconfirmed, true);
+        assert.equal(result.promptNotSent, false);
+        assert.equal(ledger.executionState, "unknown");
+        assert.equal(inspection.generation, f.generation);
+        assert.deepEqual(inspection.sessions, [{ sessionId: result.sessionId, terminal: false }]);
+        assert.equal(load.accepted, false, "a session with unconfirmed response must not load");
+      } finally {
+        if (control) await control.close();
+        await f.close();
+      }
+    });
+
+  for (const scenario of ["broker-capacity", "reentrant-capacity", "reentrant-throw", "dispose-capacity", "dispose-throw"]) test(`ACP real broker fallback: ${scenario} before the first prompt`, { timeout: process.platform === "linux" ? 900000 : 90000, skip: process.platform === "win32" }, async () => {
     const f = fixture();
     f.env.TRANSPORT_BROKER_FAILURE = "1";
-    f.env.TRANSPORT_AGENT_LIFETIME_MS = "30000";
+    f.env.TRANSPORT_AGENT_LIFETIME_MS = process.platform === "linux" ? "930000" : "30000";
+    if (process.platform === "linux") f.env.TRANSPORT_EXIT_ON_STDIN_END = "1";
     const address = endpoint();
     let broker, brokerClosed, worker, workerClosed, control;
+    let brokerCloseObserved = false, workerCloseObserved = false, timedOut = false;
+    const watchdog = process.platform === "linux" ? setTimeout(() => {
+      timedOut = true;
+      if (worker && worker.exitCode === null && worker.signalCode === null) worker.kill();
+      if (broker && broker.exitCode === null && broker.signalCode === null) broker.kill();
+      if (control) void control.close().catch(() => {});
+    }, 810000) : null;
     try {
       const started = await startFixtureBroker(f.cwd, f.env, address, { state: stateApi, broker: brokerApi, onChild(child) {
         broker = child;
-        brokerClosed = new Promise((resolve) => child.once("close", resolve));
+        brokerClosed = new Promise((resolve) => child.once("close", () => { brokerCloseObserved = true; resolve(); }));
       } });
       control = await GrokAcpClient.connect(f.cwd, { brokerEndpoint: address, brokerOnly: true, env: f.env });
       for (let index = 0; index < 4096; index += 1) {
@@ -750,7 +1032,7 @@ if (process.env.GROK_BROKER_FALLBACK_CHILD) {
       worker.stdout.on("data", (chunk) => { stdout += chunk; });
       worker.stderr.on("data", (chunk) => { stderr += chunk; });
       worker.once("error", (error) => { spawnError = error; });
-      workerClosed = new Promise((resolve) => worker.once("close", (code, signal) => resolve({ code, signal })));
+      workerClosed = new Promise((resolve) => worker.once("close", (code, signal) => { workerCloseObserved = true; resolve({ code, signal }); }));
       const gate = new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error("capacity gate timed out")), 10000);
         worker.once("message", (message) => { clearTimeout(timer); if (message === "capacity-ready") resolve(undefined); else reject(new Error("unexpected capacity gate message")); });
@@ -764,17 +1046,24 @@ if (process.env.GROK_BROKER_FALLBACK_CHILD) {
         worker.send("release");
         outcome = await workerClosed;
       } finally { clearTimeout(watchdog); }
+      assert.equal(timedOut, false, "capacity fixture watchdog expired");
       assert.equal(spawnError, undefined);
       assert.equal(outcome.code, 0, `signal=${outcome.signal}\n${stderr}`);
       const result = JSON.parse(stdout.trim());
       const logs = f.logs();
       const agents = logs.filter((entry) => entry.pid);
       const prompts = logs.filter((entry) => entry.mode === "input");
-      if (scenario === "broker-capacity" || scenario === "dispose-capacity") {
+      if (scenario === "broker-capacity" || scenario === "dispose-capacity" || scenario === "reentrant-capacity") {
         assert.equal(result.status, "completed", JSON.stringify(result));
+        assert.equal(result.turnStopUnconfirmed, false, "direct turn and agent stop must be confirmed");
         assert.equal(agents.length, 2, "a real capacity rejection starts one direct agent");
         assert.equal(prompts.length, 1);
         assert.equal(prompts[0].agentPid, agents[1].pid, "no prompt was forwarded to the broker-owned agent");
+        assert.ok(logs.some(entry => entry.agentExited === agents[1].pid), "the direct agent must have exited");
+        if (scenario === "reentrant-capacity") {
+          assert.match(stderr, /getter reentered broker enqueue/, "getter ran after the original broker response");
+          assert.equal((stderr.match(/broker prompt written/g) ?? []).length, 1, "getter reentry cannot write a second broker prompt");
+        }
         if (scenario === "dispose-capacity") {
           assert.match(stderr, /broker disposer invoked/);
           assert.equal((stderr.match(/broker prompt written/g) ?? []).length, 1, "disposer cannot send a second broker prompt");
@@ -787,30 +1076,61 @@ if (process.env.GROK_BROKER_FALLBACK_CHILD) {
         assert.equal(prompts.length, 0, "no prompt was forwarded");
       } else {
         assert.match(stderr, /getter reentered broker enqueue/, "getter ran after the original broker response");
-        if (scenario === "reentrant-capacity") assert.match(`${result.error ?? ""} ${result.cause ?? ""}`, /capacity/i, "the original capacity rejection remains visible as error or cause");
-        else {
-          assert.match(`${result.error ?? ""} ${result.cause ?? ""} ${(result.errors ?? []).join(" ")}`, /getter failed/i, "getter failure remains visible");
-          assert.match(`${result.error ?? ""} ${result.cause ?? ""} ${(result.errors ?? []).join(" ")}`, /capacity/i, "original capacity error remains visible");
-        }
-        assert.equal(result.turnStopUnconfirmed, true, "the extra prompt has no observed terminal or not-sent evidence");
-        assert.equal(agents.length, 1, "getter reentry must not cause a direct fallback");
+        assert.match(`${result.error ?? ""} ${result.cause ?? ""} ${(result.errors ?? []).join(" ")}`, /getter failed/i, "getter failure remains visible");
+        assert.match(`${result.error ?? ""} ${result.cause ?? ""} ${(result.errors ?? []).join(" ")}`, /capacity/i, "original capacity error remains visible");
+        assert.equal((stderr.match(/broker prompt written/g) ?? []).length, 1, "getter reentry cannot write a second broker prompt");
+        assert.equal(result.turnStopUnconfirmed, true, "the throwing getter must preserve the conservative result");
+        assert.equal(agents.length, 1, "getter failure must not cause a direct fallback");
         assert.equal(prompts.length, 0, "no direct prompt or broker prompt was sent");
       }
     } finally {
-      if (worker && worker.exitCode === null && worker.signalCode === null) worker.kill();
-      if (workerClosed) await workerClosed;
-      if (broker && broker.exitCode === null && broker.signalCode === null) {
-        try {
-          if (!control || control.closed) control = await GrokAcpClient.connect(f.cwd, { brokerEndpoint: address, brokerOnly: true, env: f.env });
-          await control.request("broker/shutdown", {});
-        } catch {
-          await until(() => { const logs = f.logs(); return logs.filter((entry) => entry.pid).every((entry) => logs.some((done) => done.agentExited === entry.pid)); }, "fake agents exited before broker cleanup", 35000);
-          if (broker.exitCode === null && broker.signalCode === null) broker.kill();
+      if (watchdog) clearTimeout(watchdog);
+      if (process.platform !== "linux") {
+        if (worker && worker.exitCode === null && worker.signalCode === null) worker.kill();
+        if (workerClosed) await workerClosed;
+        if (broker && broker.exitCode === null && broker.signalCode === null) {
+          try {
+            if (!control || control.closed) control = await GrokAcpClient.connect(f.cwd, { brokerEndpoint: address, brokerOnly: true, env: f.env });
+            await control.request("broker/shutdown", {});
+          } catch {
+            await until(() => { const logs = f.logs(); return logs.filter((entry) => entry.pid).every((entry) => logs.some((done) => done.agentExited === entry.pid)); }, "fake agents exited before broker cleanup", 35000);
+            if (broker.exitCode === null && broker.signalCode === null) broker.kill();
+          }
         }
+        if (control) await control.close();
+        if (brokerClosed) await brokerClosed;
+        await until(() => { const logs = f.logs(); return logs.filter((entry) => entry.pid).every((entry) => logs.some((done) => done.agentExited === entry.pid)); }, "owned fake agents exited", 35000);
+      } else {
+        const cleanupErrors = [];
+        if (worker && worker.exitCode === null && worker.signalCode === null) worker.kill();
+        if (workerClosed) {
+          try { await until(() => workerCloseObserved, "owned worker closed", 15000); await workerClosed; }
+          catch (error) { cleanupErrors.push(error); }
+        }
+        if (broker && broker.exitCode === null && broker.signalCode === null) {
+          try {
+            if (!control || control.closed) control = await GrokAcpClient.connect(f.cwd, { brokerEndpoint: address, brokerOnly: true, env: f.env });
+            await control.request("broker/shutdown", {});
+            await until(() => brokerCloseObserved, "owned broker closed after shutdown", 15000);
+          } catch {
+            if (broker.exitCode === null && broker.signalCode === null) broker.kill();
+          }
+        }
+        if (control) { try { await control.close(); } catch (error) { cleanupErrors.push(error); } }
+        if (brokerClosed) {
+          try { await until(() => brokerCloseObserved, "owned broker closed", 15000); await brokerClosed; }
+          catch (error) { cleanupErrors.push(error); }
+        }
+        try {
+          await until(() => {
+            const logs = f.logs();
+            if (!logs.filter((entry) => entry.pid).every((entry) => logs.some((done) => done.agentExited === entry.pid))) return false;
+            // 起動直後の未記録 agent も fixture ownership 側の spawn / group 検証で確認する。
+            return true;
+          }, "owned fake agents exited", 15000);
+        } catch (error) { cleanupErrors.push(error); }
+        if (cleanupErrors.length) throw new AggregateError(cleanupErrors, `Fixture retained at ${f.cwd}: owned process termination was not confirmed`);
       }
-      if (control) await control.close();
-      if (brokerClosed) await brokerClosed;
-      await until(() => { const logs = f.logs(); return logs.filter((entry) => entry.pid).every((entry) => logs.some((done) => done.agentExited === entry.pid)); }, "owned fake agents exited", 35000);
     }
   });
   for (const scenario of ["agent-busy", "callback-busy", "callback-capacity", "mutated-capacity", "mutated-unconfirmed", "erased-terminal-data", "fake-success", "falsy-zero", "falsy-false", "falsy-null", "mutated-success", "cancel-before", "dispose-success", "progress-completed", "missing-stop", "missing-result", "broker-busy", "review-busy"]) {
@@ -1262,15 +1582,27 @@ if (process.env.GROK_BROKER_FALLBACK_CHILD) {
         assert.equal(f.logs().some((m) => m.mode === "never-sent"), false);
 
         const previousRpcTimeoutMs = client.options.rpcTimeoutMs;
-        client.options.rpcTimeoutMs = 30;
+        client.options.rpcTimeoutMs = 3000;
         const timeout = new AbortController();
-        await assert.rejects(client.request("session/set_mode", { sessionId, modeId: "hold-control" }, { signal: timeout.signal }), /timed out/);
-        assert.equal(f.logs().some((m) => m.heldControl !== undefined), true, "timeout must follow forwarding to the agent");
-        assert.equal(getEventListeners(timeout.signal, "abort").length, 0);
-        assert.equal(client.pending.size, 0);
-        client.options.rpcTimeoutMs = previousRpcTimeoutMs;
+        let heldControl;
+        try {
+          const request = client.request("session/set_mode", { sessionId, modeId: "hold-control" }, { signal: timeout.signal });
+          const timedOut = assert.rejects(request, /timed out/);
+          void timedOut.catch(() => {});
+          await until(() => (heldControl = f.logs().find((m) => m.heldControl !== undefined)), "control request received by agent", 2500);
+          assert.equal(client.pending.size, 1, "request must still be pending after agent receipt");
+          assert.equal(getEventListeners(timeout.signal, "abort").length, 1);
+          assert.equal(f.logs().some((m) => m.controlFinished === heldControl.heldControl), false, "response must remain gated");
+          await timedOut;
+          assert.equal(f.logs().some((m) => m.controlFinished === heldControl.heldControl), false, "timeout must precede agent response");
+          assert.equal(getEventListeners(timeout.signal, "abort").length, 0);
+          assert.equal(client.pending.size, 0);
+        } finally {
+          client.options.rpcTimeoutMs = previousRpcTimeoutMs;
+          fs.writeFileSync(path.join(f.cwd, "agent.jsonl.release-control"), "release");
+        }
         // ローカルtimeout後の遅延terminalも読み切り、brokerに保留要求を残さない。
-        await until(() => f.logs().some((m) => m.controlFinished !== undefined), "timed out control response sent");
+        await until(() => f.logs().some((m) => m.controlFinished === heldControl.heldControl), "timed out control response sent");
         await client.request("session/new", { cwd: client.cwd, mcpServers: [] });
         assert.equal(client.pending.size, 0);
         assert.equal(getEventListeners(timeout.signal, "abort").length, 0);

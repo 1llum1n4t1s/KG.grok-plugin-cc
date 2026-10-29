@@ -622,6 +622,11 @@ async function withGrok(cwd, handler, options = {}) {
   const brokerDisabled =
     options.disableBroker || ["1", "true", "yes"].includes(String((options.env ?? process.env).GROK_COMPANION_DISABLE_BROKER ?? "").toLowerCase());
   const resuming = Boolean(options.resumeSessionId);
+  const trackedResume = options.resumeExecutionId != null;
+  if (trackedResume && (!resuming || typeof options.resumeExecutionId !== "string" || !options.resumeExecutionId.trim() ||
+      typeof options.resumeBrokerGeneration !== "string" || !options.resumeBrokerGeneration.trim())) {
+    throw new Error("Cannot resume: the tracked execution identity or broker generation is invalid.");
+  }
   if (resuming && brokerDisabled) {
     throw new Error("Cannot resume a Grok session with the broker disabled: the previous turn stop cannot be verified. Start a fresh session instead.");
   }
@@ -630,7 +635,8 @@ async function withGrok(cwd, handler, options = {}) {
   if (!resuming) options.prepareConnection?.();
   // session/loadを別agentへ逃がすと、切断後も続く同一sessionを二重実行する。
   const connectOptions = { ...options, disableBroker: brokerDisabled,
-    ...(resuming ? { brokerOnly: true, reuseExistingBroker: true } : {}) };
+    ...(resuming ? { brokerOnly: true, reuseExistingBroker: true,
+      ...(process.platform === "linux" || options.requireManagedBrokerForResume ? { requireManagedBroker: true } : {}) } : {}) };
   const connectionObservers = new Map();
   const trackBrokerRequests = connected => {
     if (connected.transport !== "broker" || typeof connected.request !== "function") return;
@@ -694,6 +700,16 @@ async function withGrok(cwd, handler, options = {}) {
   if (resuming && client.transport !== "broker") {
     await closeClient(client);
     throw new Error("Cannot resume a Grok session through a direct connection; the previous broker turn may still be running.");
+  }
+  if (resuming && options.resumeBrokerGeneration &&
+      client.initializeResult?._meta?.grokBrokerGeneration !== options.resumeBrokerGeneration) {
+    await closeClient(client);
+    throw new Error("Cannot resume: the broker generation changed after session selection.");
+  }
+
+  if (trackedResume && client.initializeResult?._meta?.grokResumeExecutionProof !== true) {
+    await closeClient(client);
+    throw new Error("Cannot resume: the broker cannot verify the tracked execution history.");
   }
 
   // 旧brokerは実行世代を識別できず、遅延cancelが次のresumeを止め得る。
@@ -800,6 +816,29 @@ async function withGrok(cwd, handler, options = {}) {
 
 function isBrokerUnsentPrompt(error, client) {
   return getBrokerUnsentRejection(error, client)?.method === "session/prompt";
+}
+
+function brokerInspectionFailure(error, inspectionError) {
+  let message = "unknown inspection error";
+  try { message = inspectionError instanceof Error ? inspectionError.message : String(inspectionError); } catch { /* 例外自体を保持する。 */ }
+  /** @type {AggregateError & {turnStopUnconfirmed?: boolean}} */
+  const failure = new AggregateError([error, inspectionError], `Turn stop evidence inspection failed: ${message}`, { cause: error });
+  failure.turnStopUnconfirmed = true;
+  return failure;
+}
+
+function throwBrokerUnsentForFallback(client, turnState) {
+  const error = turnState.error;
+  if (turnState.turnStopUnconfirmed || !error) return;
+  let unconfirmed;
+  try { unconfirmed = error.turnStopUnconfirmed === true; }
+  catch (inspectionError) { throw brokerInspectionFailure(error, inspectionError); }
+  if (unconfirmed) {
+    turnState.turnStopUnconfirmed = true;
+    turnState.promptNotSent = false;
+    return;
+  }
+  if (isBrokerUnsentPrompt(error, client)) throw error;
 }
 
 async function withDirectGrok(cwd, handler, options = {}) {
@@ -1019,8 +1058,11 @@ async function runPrompt(client, sessionId, promptText, options = {}) {
 
   let stopReason = null;
   let error = null;
+  let originalFailure;
   let promptAttempted = false;
   let promptRequestId = null;
+  let promptSequence = null;
+  let promptTrackerCount = null;
   let promptRequests = 0;
   let enqueueOpen = true;
   try {
@@ -1041,6 +1083,11 @@ async function runPrompt(client, sessionId, promptText, options = {}) {
       promptAttempted = true;
       promptRequests += 1;
       promptRequestId = client.nextId;
+      const tracker = brokerRequests.get(client);
+      if (tracker) {
+        promptSequence = tracker.sequence + 1;
+        promptTrackerCount = tracker.prompts + 1;
+      }
       return client.request("session/prompt", params);
     };
     // lock内では同期送信だけを行い、応答待ちはlock解放後に行う。
@@ -1057,6 +1104,7 @@ async function runPrompt(client, sessionId, promptText, options = {}) {
       throw Object.assign(new Error("The prompt response did not contain a recognized terminal reason."), { turnStopUnconfirmed: true });
     }
   } catch (caught) {
+    originalFailure = caught;
     error = caught instanceof Error ? caught : new Error("The prompt failed with a non-Error value.", { cause: caught });
   } finally {
     enqueueOpen = false;
@@ -1065,14 +1113,37 @@ async function runPrompt(client, sessionId, promptText, options = {}) {
 
   collector.state.stopReason = stopReason;
   collector.finalize();
-  // RPC error の公開 data は enqueue 側で書き換え可能なので、実際に送信した
-  // request と ACP 受信時の固定証拠が一致する場合だけ turn の停止を認める。
+  // 未送信になり得る場合、外部 error の getter が再入する前に送信口を閉じる。
+  // その後も固定された client/request と tracker の状態を再照合する。
   const evidence = error && promptAttempted ? getAcpPromptFailureEvidence(error, client) : null;
-  const verifiedTerminal = promptRequests === 1 && evidence && evidence.requestId === promptRequestId &&
-    evidence.method === "session/prompt" && (evidence.terminal === "confirmed" || evidence.terminal === "not-sent");
-  const turnStopUnconfirmed = Boolean(promptRequests > 1 || (error &&
-    ((!promptAttempted && client.transport === "direct") || (promptAttempted && !verifiedTerminal))));
-  return { ...collector.state, error, turnStopUnconfirmed };
+  const tracker = client.transport === "broker" ? brokerRequests.get(client) : null;
+  const matchingEvidence = promptRequests === 1 && evidence?.requestId === promptRequestId && evidence?.method === "session/prompt";
+  const initialStable = tracker && !tracker.sealed && !tracker.lateEnqueue &&
+    tracker.sequence === promptSequence && tracker.prompts === promptTrackerCount;
+  const candidateUnsent = Boolean(error && initialStable && matchingEvidence && evidence.terminal === "not-sent");
+  const candidateBeforePrompt = Boolean(error && !promptAttempted && tracker && !tracker.sealed &&
+    tracker.prompts === 0 && !tracker.lateEnqueue);
+  const beforePromptSequence = candidateBeforePrompt ? tracker.sequence : null;
+  if (candidateUnsent || candidateBeforePrompt) tracker.sealed = true;
+  let reportedUnconfirmed = false, inspectionFailed = false, inspectionError;
+  try {
+    reportedUnconfirmed = error?.turnStopUnconfirmed === true ||
+      (originalFailure != null && originalFailure !== error && originalFailure.turnStopUnconfirmed === true);
+  } catch (caught) { reportedUnconfirmed = true; inspectionFailed = true; inspectionError = caught; }
+  const trackerStable = !tracker || (!tracker.lateEnqueue && tracker.sequence === promptSequence &&
+    tracker.prompts === promptTrackerCount && (candidateUnsent ? tracker.sealed : !tracker.sealed));
+  const finalEvidence = error && promptAttempted ? getAcpPromptFailureEvidence(error, client) : null;
+  const matchingFinalEvidence = finalEvidence === evidence && promptRequests === 1 &&
+    finalEvidence?.requestId === promptRequestId && finalEvidence?.method === "session/prompt";
+  const verifiedUnsent = Boolean(candidateUnsent && matchingFinalEvidence && trackerStable && !reportedUnconfirmed);
+  const verifiedTerminal = matchingFinalEvidence && trackerStable && (finalEvidence.terminal === "confirmed" || verifiedUnsent);
+  const mayBeUnsent = Boolean(candidateBeforePrompt && tracker.sealed && !tracker.lateEnqueue &&
+    tracker.sequence === beforePromptSequence && tracker.prompts === 0 && !reportedUnconfirmed);
+  const promptNotSent = mayBeUnsent || verifiedUnsent;
+  const turnStopUnconfirmed = Boolean(promptRequests > 1 || reportedUnconfirmed ||
+    (error && (!promptAttempted ? !promptNotSent : !verifiedTerminal)));
+  if (inspectionFailed) error = brokerInspectionFailure(error, inspectionError);
+  return { ...collector.state, error, turnStopUnconfirmed, promptNotSent };
 }
 
 function buildResultStatus(turnState) {
@@ -1237,7 +1308,8 @@ export async function interruptGrokTurn(cwd, { sessionId, executionId, transport
     const notificationSent = result?.notificationSent === true;
     const reservationAccepted = result?.reservationAccepted === true;
     const executionState = result?.generation === brokerGeneration ? result?.executionState : "unknown";
-    const stopConfirmed = executionState === "terminal" || executionState === "never-accepted";
+    const stopConfirmed = result?.reservationAccepted === true && result?.notificationSent === false &&
+      (executionState === "terminal" || executionState === "never-accepted");
     return { attempted: true, interrupted: stopConfirmed, stopConfirmed, executionState, notificationSent, reservationAccepted,
       detail: stopConfirmed ? "broker confirmed execution is no longer running" : "Grok turn stop is unconfirmed", sessionId };
   } catch (error) {
@@ -1297,13 +1369,12 @@ export async function runGrokReview(cwd, options = {}) {
       const promptText = buildReviewPrompt(options);
       const promptOptions = { onProgress: options.onProgress, executionId, enqueuePrompt: options.enqueuePrompt };
       let turnState = await runPrompt(client, sessionId, promptText, promptOptions);
-      if (client.transport === "broker" && options.enqueuePrompt && !turnState.turnStopUnconfirmed &&
-          turnState.error?.turnStopUnconfirmed !== true && isBrokerUnsentPrompt(turnState.error, client)) throw turnState.error;
+      if (client.transport === "broker" && options.enqueuePrompt) throwBrokerUnsentForFallback(client, turnState);
       let repaired = false;
 
       // 正常に終了した最終応答だけを JSON として訂正する。拒否やキャンセル後の
       // 途中経過を再出力させると、未完了の調査が終わったように見えてしまう。
-      if (options.outputSchema && !turnState.error && turnState.stopReason === "end_turn" && turnState.agentMessage) {
+      if (options.outputSchema && !turnState.error && !turnState.turnStopUnconfirmed && turnState.stopReason === "end_turn" && turnState.agentMessage) {
         const attempt = parseStructuredOutput(turnState.agentMessage);
         if (attempt.parseError) {
           emitProgress(options.onProgress, "Grok returned malformed JSON; asking it to re-emit.", "running", {
@@ -1317,7 +1388,8 @@ export async function runGrokReview(cwd, options = {}) {
           );
           // 訂正に失敗しても最新の本文・終了理由・エラーを返す。
           // 監査自体の思考サマリは初回のものを残し、JSON訂正の成否とは分ける。
-          turnState = { ...retry, reasoning: turnState.reasoning };
+          // 初回 prompt は送信・終端済みなので、repair の未送信を job 全体の未送信にしない。
+          turnState = { ...retry, reasoning: turnState.reasoning, promptNotSent: false };
           repaired = !retry.error && retry.stopReason === "end_turn" && Boolean(retry.agentMessage) &&
             !parseStructuredOutput(retry.agentMessage).parseError;
         }
@@ -1336,6 +1408,7 @@ export async function runGrokReview(cwd, options = {}) {
         usage: turnState.usage,
         error: turnState.error,
         turnStopUnconfirmed: turnState.turnStopUnconfirmed,
+        promptNotSent: turnState.promptNotSent,
         stderr: cleanGrokStderr(client.stderr)
       };
     },
@@ -1450,11 +1523,7 @@ export async function runGrokTurn(cwd, options = {}) {
       const canLoadSession = client.initializeResult?.agentCapabilities?.loadSession === true;
 
       if (options.resumeSessionId && !canLoadSession) {
-        emitProgress(
-          options.onProgress,
-          "This Grok build cannot resume sessions; starting a fresh one instead.",
-          "starting"
-        );
+        throw new Error("Cannot resume: this Grok build does not support session/load.");
       }
 
       if (options.resumeSessionId && canLoadSession) {
@@ -1462,7 +1531,9 @@ export async function runGrokTurn(cwd, options = {}) {
         const request = () => client.request("session/load", {
           sessionId: options.resumeSessionId,
           cwd,
-          mcpServers: options.mcpServers ?? []
+          mcpServers: options.mcpServers ?? [],
+          ...(options.resumeExecutionId != null ? { grokResumeExecutionId: options.resumeExecutionId,
+            grokResumeGeneration: options.resumeBrokerGeneration } : {})
         });
         const loaded = await (options.enqueuePrompt?.guardOwnerEffect ? options.enqueuePrompt.guardOwnerEffect(request) : request());
         sessionId = options.resumeSessionId;
@@ -1502,8 +1573,7 @@ export async function runGrokTurn(cwd, options = {}) {
         : prompt;
 
       const turnState = await runPrompt(client, sessionId, promptText, { onProgress: options.onProgress, executionId, enqueuePrompt: options.enqueuePrompt });
-      if (client.transport === "broker" && options.enqueuePrompt && !turnState.turnStopUnconfirmed &&
-          turnState.error?.turnStopUnconfirmed !== true && isBrokerUnsentPrompt(turnState.error, client)) throw turnState.error;
+      if (!options.resumeSessionId && client.transport === "broker" && options.enqueuePrompt) throwBrokerUnsentForFallback(client, turnState);
 
       emitLogEvent(options.onProgress, {
         phase: "completed",
@@ -1522,12 +1592,15 @@ export async function runGrokTurn(cwd, options = {}) {
         usage: turnState.usage,
         error: turnState.error,
         turnStopUnconfirmed: turnState.turnStopUnconfirmed,
+        promptNotSent: turnState.promptNotSent,
         stderr: cleanGrokStderr(client.stderr),
         touchedFiles: [...turnState.touchedFiles],
         commandExecutions: turnState.commandExecutions
       };
     },
     { grokBin: availability.bin, env, readOnly: Boolean(options.readOnly), resumeSessionId: options.resumeSessionId,
+      resumeBrokerGeneration: options.resumeBrokerGeneration, resumeExecutionId: options.resumeExecutionId,
+      requireManagedBrokerForResume: options.requireManagedBrokerForResume,
       requireScopedCancellation: true, prepareConnection: options.enqueuePrompt?.prepareConnection,
       connectionEstablished: options.enqueuePrompt?.connectionEstablished,
       directAgentStarting: options.enqueuePrompt?.directAgentStarting,
@@ -1549,23 +1622,49 @@ export async function findLatestTaskSession(cwd, options = {}) {
   return withGrok(
     cwd,
     async (client) => {
+      const meta = client.initializeResult?._meta;
+      if (options.requireManagedBroker && (client.transport !== "broker" || meta?.grokExecutionLedger !== true ||
+          meta?.grokScopedCancellation !== true || meta?.grokResumeSessionProof !== true ||
+          typeof meta?.grokBrokerGeneration !== "string" || !meta.grokBrokerGeneration.trim())) {
+        throw new Error("Cannot resume: the managed broker cannot verify session history.");
+      }
       if (!client.initializeResult?.agentCapabilities?.sessionCapabilities?.list) {
         return null;
       }
       const response = await client.request("session/list", { cwd, limit: 20 });
       const sessions = response?.sessions ?? [];
+      if (options.requireManagedBroker && (!Array.isArray(sessions) || sessions.length > 20)) {
+        throw new Error("Cannot resume: the broker session list is invalid.");
+      }
       // ACPのsessionIdを正本とし、従来のid形式も呼び出し元のidへそろえる。
       const normalized = sessions.flatMap((session) => {
         const id = [session?.sessionId, session?.id].find((value) => typeof value === "string" && value.trim());
         return id ? [{ ...session, id }] : [];
       });
-      return (
-        normalized.find((session) => typeof session.title === "string" && session.title.startsWith(TASK_SESSION_PREFIX) &&
-          !excluded.has(session.id)) ??
-        null
-      );
+      const candidates = normalized.filter((session) => typeof session.title === "string" &&
+        session.title.startsWith(TASK_SESSION_PREFIX) && !excluded.has(session.id));
+      if (!options.requireManagedBroker) return candidates[0] ?? null;
+      if (!candidates.length) return null;
+      const sessionIds = [...new Set(candidates.map(session => session.id))];
+      const proof = await client.request("broker/inspectResumeSessions", { sessionIds, generation: meta.grokBrokerGeneration });
+      if (proof?.generation !== meta.grokBrokerGeneration || !Array.isArray(proof?.sessions) ||
+          proof.sessions.length !== sessionIds.length) {
+        throw new Error("Cannot resume: the broker session history proof is incomplete or has a different generation.");
+      }
+      const expected = new Set(sessionIds), terminal = new Map();
+      for (const item of proof.sessions) {
+        if (!item || typeof item.sessionId !== "string" || !expected.has(item.sessionId) ||
+            typeof item.terminal !== "boolean" || terminal.has(item.sessionId)) {
+          throw new Error("Cannot resume: the broker session history proof is invalid or duplicated.");
+        }
+        terminal.set(item.sessionId, item.terminal);
+      }
+      const selected = candidates.find(session => terminal.get(session.id) === true);
+      if (!selected) return null;
+      return { ...selected, brokerGeneration: meta.grokBrokerGeneration };
     },
-    { grokBin: availability.bin, reuseExistingBroker: true }
+    { grokBin: availability.bin, reuseExistingBroker: true,
+      ...(options.requireManagedBroker ? { brokerOnly: true, requireManagedBroker: true } : {}) }
   );
 }
 

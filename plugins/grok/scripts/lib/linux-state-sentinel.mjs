@@ -147,8 +147,50 @@ export function linuxSentinelExited(sentinel, fd) {
     throw error;
   }
 }
-function expectedArgs(lockDir, sentinel) {
-  return [process.execPath, sentinelScript, "sentinel", lockDir, sentinel.generation, sentinel.nonce];
+function expectedArgs(executable, lockDir, sentinel) {
+  return [executable, sentinelScript, "sentinel", lockDir, sentinel.generation, sentinel.nonce];
+}
+
+// 絶対 symlink を呼出元の root へ逃がさず、sentinel の root view 内で解決する。
+function resolveSentinelExecutable(prefix, executable) {
+  if (!path.isAbsolute(executable)) throw new Error("sentinel executable path is not absolute");
+  const pending = executable.split("/"), resolved = [];
+  let links = 0, steps = 0;
+  while (pending.length) {
+    if (++steps > 4096) throw new Error("sentinel executable path is too complex");
+    const component = pending.shift();
+    if (!component || component === ".") continue;
+    if (component === "..") { resolved.pop(); continue; }
+    const candidate = `${prefix}/root/${[...resolved, component].join("/")}`;
+    const stat = fs.lstatSync(candidate, { bigint: true });
+    if (stat.isSymbolicLink()) {
+      if (++links > 40) throw new Error("sentinel executable has too many symbolic links");
+      const target = fs.readlinkSync(candidate);
+      if (!target) throw new Error("sentinel executable symbolic link is empty");
+      if (target.startsWith("/")) resolved.length = 0;
+      pending.unshift(...target.split("/"));
+    } else {
+      if (pending.length && !stat.isDirectory()) throw new Error("sentinel executable path contains a non-directory");
+      resolved.push(component);
+    }
+  }
+  if (!resolved.length) throw new Error("sentinel executable path is invalid");
+  return `${prefix}/root/${resolved.join("/")}`;
+}
+
+function sentinelExecutableIdentity(prefix, executable) {
+  const root = fs.statSync(`${prefix}/root`, { bigint: true });
+  const mountNamespace = fs.readlinkSync(`${prefix}/ns/mnt`);
+  if (!root.isDirectory() || root.dev <= 0n || root.ino <= 0n || !/^mnt:\[[1-9]\d*\]$/.test(mountNamespace)) {
+    throw new Error("sentinel root or mount namespace identity is invalid");
+  }
+  const named = fs.statSync(resolveSentinelExecutable(prefix, executable), { bigint: true });
+  const running = fs.statSync(`${prefix}/exe`, { bigint: true });
+  if (!named.isFile() || !running.isFile() || named.dev <= 0n || named.ino <= 0n ||
+      running.dev <= 0n || running.ino <= 0n || !same(identity(named), identity(running))) {
+    throw new Error("sentinel executable identity differs");
+  }
+  return { executable: identity(running), root: identity(root), mountNamespace };
 }
 export function verifyLinuxSentinel(lockDir, marker, scope, mount) {
   try {
@@ -200,8 +242,9 @@ export function verifyLinuxSentinel(lockDir, marker, scope, mount) {
     const actual = fs.readFileSync(`${prefix}/cmdline`);
     const args = actual.toString("utf8").split("\0");
     if (args.length !== 7 || args[6] !== "" || !Buffer.from(args.join("\0")).equals(actual)
-        || !path.isAbsolute(args[3])) throw new Error("sentinel command is invalid");
-    const expected = Buffer.from(`${expectedArgs(args[3], s).join("\0")}\0`);
+        || !path.isAbsolute(args[0]) || !path.isAbsolute(args[3])) throw new Error("sentinel command is invalid");
+    const executableIdentity = sentinelExecutableIdentity(prefix, args[0]);
+    const expected = Buffer.from(`${expectedArgs(args[0], args[3], s).join("\0")}\0`);
     if (!actual.equals(expected) || !same(identity(checked(lockDir, true)), marker.barrierIdentity)) {
       throw new Error("sentinel command or barrier identity differs");
     }
@@ -215,7 +258,15 @@ export function verifyLinuxSentinel(lockDir, marker, scope, mount) {
     } else if (!same(identity(checked(args[3], true)), marker.barrierIdentity)) {
       throw new Error("legacy sentinel barrier identity differs");
     }
-    if (processStat(s.pid) !== s.startTick) throw new Error("sentinel process identity differs");
+    const executableAfter = sentinelExecutableIdentity(prefix, args[0]);
+    if (!same(executableAfter.executable, executableIdentity.executable) ||
+        !same(executableAfter.root, executableIdentity.root) ||
+        executableAfter.mountNamespace !== executableIdentity.mountNamespace ||
+        !fs.readFileSync(`${prefix}/cmdline`).equals(actual) ||
+        fs.readlinkSync(`${prefix}/ns/pid`) !== scope.pidNamespace ||
+        fs.readlinkSync(`${prefix}/ns/time`) !== scope.timeNamespace ||
+        fs.readlinkSync(`${prefix}/ns/net`) !== scope.netNamespace ||
+        processStat(s.pid) !== s.startTick) throw new Error("sentinel process identity differs");
     return s;
   } catch (error) {
     if (/mount/i.test(error?.message ?? "")) throw new Error("Linux state sentinel mount inspection failed", { cause: error });

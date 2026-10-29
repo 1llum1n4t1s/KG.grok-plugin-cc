@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
@@ -9,23 +10,56 @@ import {
   resolveResultJob
 } from "../plugins/grok/scripts/lib/job-control.mjs";
 import { migrateStateLock, resolveStateDir, saveState } from "../plugins/grok/scripts/lib/state.mjs";
-import { makeTempDir } from "./helpers.mjs";
+import { makeTempDir, removeTempFixture } from "./helpers.mjs";
+import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
 
 function seedJobs(t, workspace, jobs) {
   const keys = ["CLAUDE_PLUGIN_DATA", "PLUGIN_DATA"];
   const previous = keys.map(key => process.env[key]);
+  const rootIdentity = fs.lstatSync(workspace, { bigint: true });
+  assert.ok(rootIdentity.isDirectory() && !rootIdentity.isSymbolicLink());
+  assert.ok(jobs.every(job => job.pid == null && job.workerLease == null), "seed records must not own worker processes or leases");
+  const data = path.join(workspace, "plugin-data");
+  let stateDir, stateIdentity, epoch, migrationAttempted = false;
   t.after(() => {
-    keys.forEach((key, index) => {
-      if (previous[index] === undefined) delete process.env[key];
-      else process.env[key] = previous[index];
-    });
+    try {
+      const current = fs.lstatSync(workspace, { bigint: true });
+      assert.ok(current.isDirectory() && !current.isSymbolicLink() && current.dev === rootIdentity.dev && current.ino === rootIdentity.ino);
+      if (process.platform === "linux" && migrationAttempted) {
+        assert.ok(stateDir && stateIdentity && epoch, "migration identity is unconfirmed");
+        assert.equal(resolveStateDir(workspace), stateDir);
+        const stateStat = fs.lstatSync(stateDir, { bigint: true });
+        assert.ok(stateStat.isDirectory() && !stateStat.isSymbolicLink() && stateStat.dev === stateIdentity.dev && stateStat.ino === stateIdentity.ino);
+        const protocol = JSON.parse(fs.readFileSync(path.join(stateDir, "state.lock", "protocol.json"), "utf8"));
+        assert.equal(protocol.epoch, epoch);
+        const stopped = shutdownPosixStateLockSentinel(stateDir, { offlineConfirmed: true, expectedStateDir: stateDir });
+        assert.equal(stopped.epoch, epoch);
+        assert.equal(stopped.stopped, true);
+      }
+      removeTempFixture(workspace, { recursive: true, force: true });
+    } catch (error) {
+      t.diagnostic(`Fixture retained because cleanup could not be confirmed: ${workspace}`);
+      throw error;
+    } finally {
+      keys.forEach((key, index) => {
+        if (previous[index] === undefined) delete process.env[key];
+        else process.env[key] = previous[index];
+      });
+    }
   });
-  process.env.CLAUDE_PLUGIN_DATA = path.join(workspace, "plugin-data");
+  process.env.CLAUDE_PLUGIN_DATA = data;
   delete process.env.PLUGIN_DATA;
   if (["win32", "linux", "darwin"].includes(process.platform)) {
-    migrateStateLock(workspace, {
-      offlineConfirmed: true, localOnly: true, expectedStateDir: resolveStateDir(workspace)
-    });
+    stateDir = resolveStateDir(workspace);
+    assert.ok(path.isAbsolute(stateDir) && stateDir.startsWith(data + path.sep), "state must belong to this fixture");
+    assert.equal(fs.existsSync(data), false, "fixture data must be unused before migration");
+    migrationAttempted = true;
+    migrateStateLock(workspace, { offlineConfirmed: true, localOnly: true, expectedStateDir: stateDir });
+    if (process.platform === "linux") {
+      stateIdentity = fs.lstatSync(stateDir, { bigint: true });
+      epoch = JSON.parse(fs.readFileSync(path.join(stateDir, "state.lock", "protocol.json"), "utf8")).epoch;
+      assert.ok(epoch, "migration must establish a state epoch");
+    }
   }
   saveState(workspace, {
     version: 1,

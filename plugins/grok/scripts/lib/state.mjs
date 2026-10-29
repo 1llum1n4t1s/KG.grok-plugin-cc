@@ -23,6 +23,7 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "grok-companion");
 export function stateFallbackTempDir() { return path.dirname(FALLBACK_STATE_ROOT_DIR); }
 const STATE_FILE_NAME = "state.json";
 const STATE_LOCK_FILE_NAME = "state.lock";
+export const STATE_LOCK_MIGRATION_REQUIRED = "GROK_STATE_LOCK_MIGRATION_REQUIRED";
 const NATIVE_STATE_LOCK_PROTOCOL = "native-local-v2";
 const STATE_LOCK_PROTOCOL_FILE_NAME = "protocol.json";
 // 同期callbackの間だけ再利用する。別transactionへfilesystem検証を持ち越さない。
@@ -448,6 +449,7 @@ export function loadState(cwd, stateDir = resolveStateDir(cwd)) {
   const stateFile = resolveStateFile(cwd, stateDir);
   const strictDarwin = isDarwinStrictState(stateDir);
   const strictRecord = strictDarwin || process.platform === "linux";
+  if (process.platform === "linux") requireStateLockMigration(stateDir);
   if (!fs.existsSync(stateFile)) {
     if (strictRecord) throw new Error(`Grok state is missing and was left untouched: ${stateFile}`);
     return defaultState();
@@ -456,7 +458,6 @@ export function loadState(cwd, stateDir = resolveStateDir(cwd)) {
   try {
     let text;
     if (process.platform === "linux") {
-      requireStateLockMigration(stateDir);
       text = withLinuxRoot(stateDir, root => { assertNoLinuxIndexTemp(root); return linuxReadRecord(root, STATE_FILE_NAME); });
     } else if (strictDarwin) {
       const before = fs.lstatSync(stateFile, { bigint: true });
@@ -635,18 +636,21 @@ function verifyDarwinMigrationInventory(stateDir, { allowVerifiedLegacyArtifacts
   const parsed = readLegacy(stateFile);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Array.isArray(parsed.jobs)) throw new Error("Old Darwin state jobs are invalid");
   const jobs = new Map();
+  const foldedIds = new Set();
   for (const job of parsed.jobs) {
     checkDeadline();
     if (jobs.size >= 4096) throw new Error("Darwin migration inventory job limit exceeded");
     if (!job || typeof job.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(job.id) || jobs.has(job.id) ||
-        !validJobLogReference(job, jobsDir) || [...jobs.keys()].some(id => id.toLowerCase() === job.id.toLowerCase()) ||
+        !validJobLogReference(job, jobsDir) || foldedIds.has(job.id.toLowerCase()) ||
         ["workerLease", "claimToken", "epoch"].some(key => Object.hasOwn(job, key))) throw new Error("Old Darwin job identity, log or lease is unverified");
     jobs.set(job.id, job);
+    foldedIds.add(job.id.toLowerCase());
   }
   const expected = new Set();
+  const availableNames = new Set(names);
   for (const [id, job] of jobs) {
     const detailName = `${id}.json`;
-    if (!names.includes(detailName)) throw new Error("Old Darwin job detail is missing");
+    if (!availableNames.has(detailName)) throw new Error("Old Darwin job detail is missing");
     const detail = readLegacy(path.join(jobsDir, detailName));
     if (!detail || !sameDarwinJobEvidence(job, detail) || !validJobLogReference(detail, jobsDir) ||
         (job.logFile ?? null) !== (detail.logFile ?? null) ||
@@ -999,12 +1003,10 @@ export function compareUpdatedAtNewestFirst(left, right) {
   return String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
 }
 
-function pruneJobs(jobs, cwd, stateDir, epoch, previousJobs = jobs) {
+function pruneJobs(jobs, cwd, stateDir, previousJobs = jobs) {
   // Linux では旧 unleased job と回収途中の record を推測して捨てない。
   if (process.platform === "linux") return jobs;
   let finishedJobs = 0;
-  const protectedJobs = process.platform === "darwin" && epoch
-    ? getProtectedDarwinJobIds({ stateDir: stateDir ?? resolveStateDir(cwd), epoch }) : null;
   return [...jobs]
     .sort(compareUpdatedAtNewestFirst)
     .filter((job) => {
@@ -1013,24 +1015,6 @@ function pruneJobs(jobs, cwd, stateDir, epoch, previousJobs = jobs) {
       if (!validJobLogReference(job, resolveJobsDir(cwd, stateDir))) return true;
       const previous = previousJobs.find(entry => entry.id === job.id);
       if (previous && !validJobLogReference(previous, resolveJobsDir(cwd, stateDir))) return true;
-      // lease の保全・回収を確認できない間は、履歴整理で所有中の記録を消さない。
-      if (process.platform === "darwin" && job.workerLease) return true;
-      if (process.platform === "darwin") {
-        if (!epoch || protectedJobs?.has(job.id)) return true;
-        try {
-          const detail = readJobFile(path.join(resolveJobsDir(cwd, stateDir), `${job.id}.json`));
-          if (!previous || !verifiedDarwinJobForRemoval(job, detail, resolveJobsDir(cwd, stateDir), jobs, epoch) ||
-              !verifiedDarwinJobForRemoval(previous, detail, resolveJobsDir(cwd, stateDir), previousJobs, epoch)) return true;
-        } catch { return true; }
-      }
-      if (process.platform === "linux") {
-        // 旧世代や片側だけの記録を通常の履歴整理で失わない。
-        if (!epoch || job.epoch !== epoch) return true;
-        try {
-          const detail = readJobFile(path.join(resolveJobsDir(cwd, stateDir), `${job.id}.json`));
-          if (detail?.id !== job.id || detail.epoch !== epoch) return true;
-        } catch { return true; }
-      }
       finishedJobs += 1;
       return finishedJobs <= MAX_FINISHED_JOBS;
     });
@@ -1088,7 +1072,7 @@ function saveStateWithPreviousJobs(cwd, state, previousJobs, stateDir = undefine
       }
     }
   }
-  const nextJobs = process.platform === "darwin" ? (state.jobs ?? []) : pruneJobs(state.jobs ?? [], cwd, stateDir, epoch, previousJobs);
+  const nextJobs = process.platform === "darwin" ? (state.jobs ?? []) : pruneJobs(state.jobs ?? [], cwd, stateDir, previousJobs);
   const nextState = {
     version: STATE_VERSION,
     config: {
@@ -1607,7 +1591,47 @@ function assertStateLockBarrier(stateDir, guardHeld = false) {
     if (error?.code !== "ENOENT") throw error;
   }
   if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error(`Grok state lock requires explicit offline migration; existing state and legacy locks were left untouched.\nState directory (data): ${stateDir}\nRun state-lock migrate --offline-confirmed --local-only --expected-state-dir <absolute-state-directory> after stopping every old runtime and keeping it stopped.\nReplace the placeholder with the state directory above, quoted appropriately for your shell.`);
+    if (!stat && process.platform === "linux") {
+      let rootExists = true;
+      try { fs.lstatSync(stateDir, { bigint: true }); }
+      catch (error) { if (error?.code === "ENOENT") rootExists = false; else throw error; }
+      if (rootExists) withLinuxRoot(stateDir, root => {
+        try {
+          fs.lstatSync(linuxAt(root.fd, STATE_LOCK_FILE_NAME));
+        } catch (error) {
+          if (error?.code === "ENOENT") return;
+          throw error;
+        }
+        throw new Error("Linux state lock changed during migration inspection");
+      });
+    }
+    if (!stat && process.platform === "darwin") {
+      let before;
+      try { before = fs.lstatSync(stateDir, { bigint: true }); }
+      catch (error) { if (error?.code !== "ENOENT") throw error; }
+      if (before) {
+        const valid = value => typeof process.getuid === "function" && value.isDirectory() && !value.isSymbolicLink() &&
+          value.uid === BigInt(process.getuid()) && (value.mode & 0o077n) === 0n && value.dev > 0n && value.ino > 0n;
+        if (!valid(before)) throw new Error("Darwin state directory identity or permissions are invalid");
+        if (!Number.isInteger(fs.constants.O_NOFOLLOW) || fs.constants.O_NOFOLLOW <= 0 ||
+            !Number.isInteger(fs.constants.O_NONBLOCK) || fs.constants.O_NONBLOCK <= 0) {
+          throw new Error("Darwin state directory cannot be inspected safely on this host");
+        }
+        const fd = fs.openSync(stateDir, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_DIRECTORY | fs.constants.O_NONBLOCK);
+        try {
+          const opened = fs.fstatSync(fd, { bigint: true });
+          if (!valid(opened) || opened.dev !== before.dev || opened.ino !== before.ino) throw new Error("Darwin state directory changed before migration inspection");
+          try { fs.lstatSync(lockDir); throw new Error("Darwin state lock changed during migration inspection"); }
+          catch (error) { if (error?.code !== "ENOENT") throw error; }
+          const after = fs.lstatSync(stateDir, { bigint: true });
+          if (!valid(after) || after.dev !== before.dev || after.ino !== before.ino) throw new Error("Darwin state directory changed during migration inspection");
+        } finally { fs.closeSync(fd); }
+      }
+    }
+    /** @type {Error & {code?: string}} */
+    const error = new Error(`Grok state lock requires explicit offline migration; existing state and legacy locks were left untouched.\nState directory (data): ${stateDir}\nRun state-lock migrate --offline-confirmed --local-only --expected-state-dir <absolute-state-directory> after stopping every old runtime and keeping it stopped.\nReplace the placeholder with the state directory above, quoted appropriately for your shell.`);
+    if (!stat) error.code = STATE_LOCK_MIGRATION_REQUIRED;
+    throw error;
   }
   return lockDir;
 }

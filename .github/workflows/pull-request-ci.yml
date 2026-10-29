@@ -11,7 +11,8 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 容量境界の実機テストに加え、依存関係の導入とビルドの時間を確保する。
+    timeout-minutes: 90
 
     steps:
       - name: Check out repository

@@ -136,6 +136,11 @@ async function main() {
   const legacySessions = new Set();
   const maxExecutionRecords = 4096;
   const executionKey = (sessionId, executionId) => JSON.stringify([sessionId, executionId]);
+  const hasSafeTerminalSession = (sessionId) => {
+    const executions = [...executionLedger.values()].filter(record => record.sessionId === sessionId);
+    return executions.length > 0 && executions.every(record => record.state === "terminal") &&
+      !legacySessions.has(sessionId) && !disconnectedSessions.has(sessionId);
+  };
   const scopedActive = (sessionId) => [...inFlight].some((request) =>
     request.method === "session/prompt" && request.sessionId === sessionId && request.executionId);
 
@@ -293,7 +298,7 @@ async function main() {
         send(socket, { jsonrpc: "2.0", id: message.id, result: { ...agent.initializeResult,
           _meta: { ...agent.initializeResult?._meta, grokScopedCancellation: true,
             grokExecutionLedger: true, grokBrokerGeneration: generation,
-            grokPromptAdmission: !cancellationCapacityReached } } });
+            grokResumeExecutionProof: true, grokResumeSessionProof: true, grokPromptAdmission: !cancellationCapacityReached } } });
         return;
       }
 
@@ -345,6 +350,19 @@ async function main() {
             error: buildJsonRpcError(-32002, "Broker readiness is not confirmed.") });
           return;
         }
+      }
+      if (message.method === "broker/inspectResumeSessions") {
+        if (message.id === undefined) return;
+        const ids = message.params?.sessionIds;
+        if (!Array.isArray(ids) || ids.length > 20 ||
+            ids.some(id => typeof id !== "string" || !id.trim()) || new Set(ids).size !== ids.length ||
+            typeof message.params?.generation !== "string" || !message.params.generation.trim() || message.params.generation !== generation) {
+          send(socket, { jsonrpc: "2.0", id: message.id, error: buildJsonRpcError(-32602, "Invalid resume session inspection request.") });
+          return;
+        }
+        send(socket, { jsonrpc: "2.0", id: message.id, result: { generation,
+          sessions: ids.map(sessionId => ({ sessionId, terminal: hasSafeTerminalSession(sessionId) })) } });
+        return;
       }
       if (message.id !== undefined && message.method === "broker/shutdownIfIdle") {
         if (!generation || message.params?.generation !== generation) {
@@ -406,9 +424,21 @@ async function main() {
       const promptKey = executionKey(message.params?.sessionId, message.params?.executionId);
       if (message.method === "session/load") {
         const sessionId = message.params?.sessionId;
-        const executions = [...executionLedger.values()].filter((record) => record.sessionId === sessionId);
-        const knownTerminal = executions.length > 0 && executions.every((record) => record.state === "terminal");
-        if (!knownTerminal || legacySessions.has(sessionId) || disconnectedSessions.has(sessionId)) {
+        const hasExecution = Object.hasOwn(message.params ?? {}, "grokResumeExecutionId");
+        const hasGeneration = Object.hasOwn(message.params ?? {}, "grokResumeGeneration");
+        if (hasExecution || hasGeneration) {
+          const executionId = message.params?.grokResumeExecutionId;
+          const resumeGeneration = message.params?.grokResumeGeneration;
+          const valid = hasExecution && hasGeneration && typeof executionId === "string" && executionId.trim() &&
+            typeof resumeGeneration === "string" && resumeGeneration.trim() && resumeGeneration === generation &&
+            executionLedger.get(executionKey(sessionId, executionId))?.state === "terminal";
+          if (!valid) {
+            send(socket, { jsonrpc: "2.0", id: message.id, error: buildJsonRpcError(-32002,
+              "Cannot resume this session: the selected execution has no terminal in this broker generation.") });
+            return;
+          }
+        }
+        if (!hasSafeTerminalSession(sessionId)) {
           send(socket, { jsonrpc: "2.0", id: message.id, error: buildJsonRpcError(-32002,
             "Cannot resume this session: this broker has no safe terminal execution history. Direct, disconnected, and previous-broker sessions require a fresh session.") });
           return;
@@ -470,16 +500,23 @@ async function main() {
       try {
         const params = { ...message.params };
         delete params.executionId;
+        delete params.grokResumeExecutionId;
+        delete params.grokResumeGeneration;
         const result = await agent.request(message.method, params, { signal: request.controller.signal });
         if (!epochValid()) throw new Error("Broker state epoch is no longer valid.");
-        if (message.method === "session/prompt" && executionLedger.has(promptKey)) {
-          executionLedger.get(promptKey).state = "terminal";
+        if (message.method === "session/prompt") {
+          const terminal = typeof result?.stopReason === "string" &&
+            ["end_turn", "cancelled", "refusal", "max_tokens", "max_turn_requests"].includes(result.stopReason);
+          if (executionLedger.has(promptKey)) executionLedger.get(promptKey).state = terminal ? "terminal" : "unknown";
+          if (!terminal) disconnectedSessions.add(message.params?.sessionId);
         }
         send(socket, { jsonrpc: "2.0", id: message.id, result });
       } catch (error) {
+        // RPC error は同じ epoch 確認結果を ledger と client の両方に使う。
+        const turnStopConfirmed = message.method === "session/prompt" && error.rpcResponseReceived === true && epochValid();
         if (message.method === "session/prompt") {
-          // RPC errorもagent自身の終了応答。切断・送信失敗は停止の証拠にならない。
-          const state = error.rpcResponseReceived === true && epochValid() ? "terminal" : "unknown";
+          // 切断・送信失敗・epoch 未確認は停止の証拠にならない。
+          const state = turnStopConfirmed ? "terminal" : "unknown";
           if (executionLedger.has(promptKey)) executionLedger.get(promptKey).state = state;
           if (state === "unknown") disconnectedSessions.add(message.params?.sessionId);
         }
@@ -488,7 +525,7 @@ async function main() {
           id: message.id,
           // agentがbroker専用code/dataを返しても未送信証拠として扱わせない。
           error: buildJsonRpcError([BROKER_BUSY_RPC_CODE, BROKER_CAPACITY_RPC_CODE].includes(error.rpcCode) ? -32000 : (error.rpcCode ?? -32000), error.message,
-            message.method === "session/prompt" ? { source: "grok-broker", turnStopConfirmed: error.rpcResponseReceived === true } : undefined)
+            message.method === "session/prompt" ? { source: "grok-broker", turnStopConfirmed } : undefined)
         });
       } finally {
         if (claimed) {

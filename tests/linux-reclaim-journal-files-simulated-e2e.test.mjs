@@ -14,7 +14,7 @@ for (const mode of ["old", "detail-post", "both-post", "digest", "source-changed
   "symlink", "hardlink", "mode", "mount", "named-jobs-mount", "named-journal-mount",
   "post-named-jobs-mount", "post-named-journal-mount", "post-named-namespace-mount",
   "flag-O_DIRECTORY-missing", "flag-O_DIRECTORY-zero", "flag-O_NOFOLLOW-missing", "flag-O_NOFOLLOW-zero",
-  "flag-O_NONBLOCK-missing", "flag-O_NONBLOCK-zero",
+  "flag-O_NONBLOCK-missing", "flag-O_NONBLOCK-zero", "flag-O_DIRECTORY-overflow", "flag-O_NOFOLLOW-overflow", "flag-O_NONBLOCK-overflow",
   "budget", "deadline", "journal-not-directory", "index-post-first"]) {
   test(`Linux reclaim snapshot files: ${mode}`, {
     skip: process.platform !== "darwin" || (mode.startsWith("flag-") && typeof nodeModule.registerHooks !== "function"), timeout: 30000

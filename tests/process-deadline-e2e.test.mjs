@@ -5,6 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import process from "node:process";
+import { withStateSnapshot, readJobFile, resolveJobFile } from "../plugins/grok/scripts/lib/state.mjs";
+import { withAvailableLinuxLease } from "../plugins/grok/scripts/lib/linux-worker-lease.mjs";
+import { verifyPublishedLinuxLeaseRecords } from "../plugins/grok/scripts/lib/linux-lease-ledger.mjs";
+import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
 
 const processModule = new URL("../plugins/grok/scripts/lib/process.mjs", import.meta.url).href;
 const trackedJobsModule = new URL("../plugins/grok/scripts/lib/tracked-jobs.mjs", import.meta.url).href;
@@ -30,7 +34,7 @@ const stalledCommand = `
     const begin = performance.now();
     const result = runCommand(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], options);
     calls.push({ command, timeout: options.timeout, elapsed: performance.now() - begin,
-      error: result.error?.code ?? null });
+      error: result.error?.code ?? null, signal: result.signal });
     return result;
   }
 `;
@@ -124,7 +128,40 @@ test("tracked startup refuses to start a job after three bounded real lookup fai
   const created = fs.lstatSync(root);
   const workspace = path.join(root, "workspace"), data = path.join(root, "data");
   fs.mkdirSync(workspace); fs.mkdirSync(data);
+  let workerStarted = false, effect;
   t.after(() => {
+    if (process.platform === "linux") {
+      if (!workerStarted || !effect) throw new Error(`Worker or migration completion unconfirmed; fixture retained: ${root}`);
+      const previous = { claude: process.env.CLAUDE_PLUGIN_DATA, plugin: process.env.PLUGIN_DATA };
+      process.env.CLAUDE_PLUGIN_DATA = data; process.env.PLUGIN_DATA = "";
+      try {
+        assert.equal(effect.calls.length, 3);
+        for (const call of effect.calls) assert.ok(call.error === "ETIMEDOUT" && call.signal, "stalled child exit is unconfirmed");
+        assert.equal(path.resolve(effect.stateDir), effect.stateDir);
+        assert.match(effect.epoch, /^[0-9a-f-]{36}$/i);
+        const marker = JSON.parse(fs.readFileSync(path.join(effect.stateDir, "state.lock", "protocol.json"), "utf8"));
+        assert.equal(marker.epoch, effect.epoch);
+        withStateSnapshot(workspace, (state, context) => {
+          assert.equal(context.stateDir, effect.stateDir);
+          assert.equal(context.epoch, effect.epoch);
+          const indexed = state.jobs.find(job => job.id === "deadline-fixture");
+          const stored = readJobFile(resolveJobFile(workspace, "deadline-fixture", context.stateDir));
+          assert.ok(indexed?.workerLease && stored?.workerLease, "worker lease records are unavailable");
+          verifyPublishedLinuxLeaseRecords({ context, indexed, stored, lease: indexed.workerLease });
+          const observed = withAvailableLinuxLease(indexed.workerLease, context, () => {
+            verifyPublishedLinuxLeaseRecords({ context, indexed, stored, lease: indexed.workerLease });
+            return true;
+          });
+          assert.equal(observed.status, "available", "worker lease release is unconfirmed");
+        });
+        const stopped = shutdownPosixStateLockSentinel(effect.stateDir, { offlineConfirmed: true, expectedStateDir: effect.stateDir });
+        assert.equal(stopped.stopped, true); assert.equal(stopped.epoch, effect.epoch); assert.equal(stopped.stateDir, effect.stateDir);
+      } catch (error) { throw new Error(`Worker or sentinel termination unconfirmed; fixture retained: ${root}`, { cause: error }); }
+      finally {
+        if (previous.claude === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = previous.claude;
+        if (previous.plugin === undefined) delete process.env.PLUGIN_DATA; else process.env.PLUGIN_DATA = previous.plugin;
+      }
+    }
     const current = fs.lstatSync(root);
     assert.equal(path.dirname(root), parent);
     assert.equal(fs.realpathSync.native(root), root);
@@ -132,12 +169,14 @@ test("tracked startup refuses to start a job after three bounded real lookup fai
     assert.equal(current.dev, created.dev); assert.equal(current.ino, created.ino);
     fs.rmSync(root, { recursive: true, force: true });
   });
-  const effect = runWorker(`${stalledCommand}
+  workerStarted = true;
+  effect = runWorker(`${stalledCommand}
     const { runTrackedJob } = await import(${JSON.stringify(trackedJobsModule)});
     const { migrateStateLock, resolveStateDir, resolveJobFile, readJobFile } = await import(${JSON.stringify(stateModule)});
     const workspaceRoot = process.cwd();
-    migrateStateLock(workspaceRoot, { offlineConfirmed: true, localOnly: true,
-      expectedStateDir: resolveStateDir(workspaceRoot) });
+    const stateDir = resolveStateDir(workspaceRoot);
+    const migration = migrateStateLock(workspaceRoot, { offlineConfirmed: true, localOnly: true,
+      expectedStateDir: stateDir });
     const job = { id: "deadline-fixture", workspaceRoot, jobClass: "review", title: "Review" };
     const begin = performance.now();
     let error;
@@ -150,7 +189,7 @@ test("tracked startup refuses to start a job after three bounded real lookup fai
     } catch (failure) { error = failure.message; }
     const elapsed = performance.now() - begin;
     const status = process.platform === "win32" ? null : readJobFile(resolveJobFile(workspaceRoot, job.id)).status;
-    console.log(JSON.stringify({ error, elapsed, calls, status }));
+    console.log(JSON.stringify({ error, elapsed, calls, status, stateDir, epoch: migration.epoch }));
   `, 20000, { cwd: workspace, env: { ...process.env, CLAUDE_PLUGIN_DATA: data, PLUGIN_DATA: "" } });
   assert.match(effect.error, /Cannot verify the Grok job process identity/);
   if (process.platform !== "win32") assert.equal(effect.status, "queued");
@@ -168,33 +207,44 @@ test("real Windows CIM preserves process identity and retries a transient comman
       const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 15000)",
         "grok-companion.mjs", "日本語の照会"], { windowsHide: true, stdio: "ignore" });
       await once(child, "spawn");
-      let effect;
+      let effect, startKey;
       try {
         const begin = performance.now();
-        const snapshot = getProcessSnapshot(child.pid);
+        const timings = {};
+        const measure = (name, operation) => {
+          const started = performance.now();
+          try { return operation(); } finally { timings[name] = performance.now() - started; }
+        };
+        const snapshot = measure("snapshot", () => getProcessSnapshot(child.pid));
         assert.ok(snapshot?.startKey);
         assert.ok(snapshot.commandLine.includes("日本語の照会"));
-        const match = inspectTrackedJobProcess(child.pid, snapshot.startKey);
-        const mismatch = inspectTrackedJobProcess(child.pid, snapshot.startKey + "-reused");
+        startKey = snapshot.startKey;
+        const differentKey = "win32-filetime:" + (BigInt(startKey.slice("win32-filetime:".length)) + 1n).toString();
+        const match = measure("match", () => inspectTrackedJobProcess(child.pid, startKey));
+        const mismatch = measure("mismatch", () => inspectTrackedJobProcess(child.pid, differentKey));
+        const invalid = inspectTrackedJobProcess(child.pid, startKey + "-reused");
         let calls = 0;
-        const transient = inspectTrackedJobProcess(child.pid, snapshot.startKey, {
+        const transient = measure("transient", () => inspectTrackedJobProcess(child.pid, startKey, {
           runCommandImpl(command, args, options) {
             calls += 1;
             return calls === 1
               ? runCommand(process.execPath, ["-e", "process.exit(1)"], options)
               : runCommand(command, args, options);
           }
-        });
-        effect = { match, mismatch, transient, calls, elapsed: performance.now() - begin };
+        }));
+        effect = { match, mismatch, invalid, transient, calls, elapsed: performance.now() - begin, timings, childPid: child.pid };
       } finally {
         child.kill();
         await once(child, "exit");
       }
-      effect.exited = waitForTrackedJobExit(child.pid, "former-start");
+      const exitStarted = performance.now();
+      effect.exited = waitForTrackedJobExit(child.pid, startKey);
+      effect.timings.exit = performance.now() - exitStarted;
       console.log(JSON.stringify(effect));
     `, 12000);
     assert.equal(effect.match, "match");
     assert.equal(effect.mismatch, "mismatch");
+    assert.equal(effect.invalid, "unavailable");
     assert.equal(effect.transient, "match");
     assert.equal(effect.calls, 2);
     assert.equal(effect.exited, true);

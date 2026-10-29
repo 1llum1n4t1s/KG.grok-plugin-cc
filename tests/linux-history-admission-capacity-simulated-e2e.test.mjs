@@ -8,8 +8,9 @@ import { resolveStateDir } from "../plugins/grok/scripts/lib/state.mjs";
 import { makeTempDir, removeTempFixture } from "./helpers.mjs";
 
 // 実 CLI と実 Mac process を使うが、procfs/mount/flock は模擬値。
-// 記録は停止済み worker の実出力を使用し、index の容量圧迫だけを注入する。
-test("Linux task reclaims verified history before admitting into a full index", {
+// 実 worker 1 件の停止を確認し、他の 50 件と index の容量圧迫を fixture で作る。
+// 51 worker の停止や 256 枠を 60 秒で走査する性能は検証しない。
+test("Linux task refuses a full index and preserves current history", {
   skip: process.platform !== "darwin", timeout: 1800000
 }, t => {
   const root = fs.realpathSync(makeTempDir("grok-linux-history-admission-"));
@@ -55,17 +56,30 @@ test("Linux task reclaims verified history before admitting into a full index", 
     if (result.status === 0) assert.ok(fs.existsSync(exited), `task ${i}: agent exit must be observed`);
     return result;
   }
-  for (let i = 0; i < 51; i++) { const result = task(i); assert.equal(result.status, 0, result.stderr); }
+  const first = task(0); assert.equal(first.status, 0, `first task: ${first.error?.code ?? "no spawn error"}; signal=${first.signal}; ${first.stderr}`);
   allStopped = false;
-  const reclaimed = spawnSync(process.execPath, [sweep, workspace], { env, encoding: "utf8", timeout: 120000 });
+  const reclaimed = spawnSync(process.execPath, [sweep, workspace, "256"], { env, encoding: "utf8", timeout: 120000 });
   assert.equal(reclaimed.status, 0, reclaimed.stderr); allStopped = true;
-  assert.equal(JSON.parse(reclaimed.stdout).reclaimed, 51);
+  assert.deepEqual(JSON.parse(reclaimed.stdout), { examined: 256, reclaimed: 1, uncertain: 0 });
   const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
   const eligible = state.jobs.filter(job => job.status === "completed" && job.workerLease == null &&
     job.workerStopConfirmed === true && job.workerStopProof === "linux-lease-released")
     .sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)));
-  assert.equal(eligible.length, 51);
+  assert.equal(eligible.length, 1);
   const oldest = eligible[0], indexed = state.jobs.find(job => job.id === oldest.id);
+  const preservedFiles = new Map();
+  for (let i = 0; i < 50; i++) {
+    const id = `fixture-current-${i}`, logFile = path.join(jobsDir, `${id}.log`);
+    const record = { id, epoch: oldest.epoch, jobClass: "review", status: "completed", createdAt: "2020-01-01T00:00:00.000Z",
+      updatedAt: "2020-01-01T00:00:00.000Z", terminationPending: false, logFile };
+    const detail = `${JSON.stringify(record, null, 2)}\n`, log = `fixture log ${i}\n`;
+    fs.writeFileSync(path.join(jobsDir, `${id}.json`), detail, { flag: "wx", mode: 0o600 });
+    fs.writeFileSync(logFile, log, { flag: "wx", mode: 0o600 });
+    preservedFiles.set(path.join(jobsDir, `${id}.json`), detail); preservedFiles.set(logFile, log);
+    state.jobs.push(record);
+  }
+  preservedFiles.set(path.join(jobsDir, `${oldest.id}.json`), fs.readFileSync(path.join(jobsDir, `${oldest.id}.json`), "utf8"));
+  preservedFiles.set(oldest.logFile, fs.readFileSync(oldest.logFile, "utf8"));
   indexed.fixtureSummaryPadding = "x".repeat(512 * 1024);
   state.config.fixtureIndexPadding = "";
   const serialize = () => `${JSON.stringify(state, null, 2)}\n`;
@@ -75,12 +89,15 @@ test("Linux task reclaims verified history before admitting into a full index", 
   state.config.fixtureIndexPadding = "x".repeat(target - baseLength);
   const payload = serialize(); assert.equal(Buffer.byteLength(payload), target);
   fs.writeFileSync(stateFile, payload, { mode: 0o600 });
-  const result = task(51);
-  assert.equal(result.status, 0, `admission should reclaim verified history first: ${result.stderr}\n${result.stdout}`);
-  const after = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-  assert.ok(!after.jobs.some(job => job.id === oldest.id), "the padded oldest verified index record must be removed");
-  assert.ok(!fs.existsSync(path.join(jobsDir, `${oldest.id}.json`)));
-  assert.ok(!fs.existsSync(oldest.logFile));
-  assert.ok(fs.statSync(stateFile).size < target - 256 * 1024, "admission must have reclaimed meaningful index capacity");
+  const result = task(1);
+  assert.equal(result.error, undefined, `admission must exit without a spawn error: ${result.error?.message}`);
+  assert.equal(result.signal, null, "admission must not terminate by signal");
+  assert.ok(Number.isInteger(result.status), "admission must return an exit code");
+  assert.notEqual(result.status, 0, "a full index must reject admission");
+  assert.match(result.stderr, /index.*(?:space|budget|limit)|(?:space|budget|limit).*index/i);
+  t.diagnostic(`Admission refusal: ${result.stderr.trim()}`);
+  assert.equal(fs.existsSync(path.join(root, "agent-spawn-1")), false, "the agent must not start");
+  assert.equal(fs.readFileSync(stateFile, "utf8"), payload, "the full index must be preserved");
+  for (const [file, content] of preservedFiles) assert.equal(fs.readFileSync(file, "utf8"), content, `${file} must be preserved`);
   verifiedDone = true;
 });

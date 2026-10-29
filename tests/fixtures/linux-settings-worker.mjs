@@ -1,12 +1,16 @@
 import fs from "node:fs";
 import { once } from "node:events";
 import { runGrokTurn } from "../../plugins/grok/scripts/lib/grok.mjs";
+import { withStateSnapshot } from "../../plugins/grok/scripts/lib/state.mjs";
 
 const [{ workspace, variant, revoked }] = await once(process, "message");
 const enqueuePrompt = Object.assign(enqueue => enqueue(), {
   guardOwnerEffect(effect) {
-    if (fs.existsSync(revoked)) throw Object.assign(new Error("owner changed"), { code: "GROK_JOB_OWNER_CHANGED" });
-    return effect();
+    return withStateSnapshot(workspace, (state, context) => {
+      context.check();
+      if (fs.existsSync(revoked)) throw Object.assign(new Error("owner changed"), { code: "GROK_JOB_OWNER_CHANGED" });
+      return effect(state, context);
+    });
   }
 });
 try {

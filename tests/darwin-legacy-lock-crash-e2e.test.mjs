@@ -107,18 +107,20 @@ function admissions(f) {
   const directBytes = Buffer.from(direct.map(item => JSON.stringify(item)).join("\n") + "\n");
   fs.writeFileSync(brokerFile, brokerBytes, { mode: 0o600 });
   fs.writeFileSync(directFile, directBytes, { mode: 0o600 });
-  return { brokerFile, brokerBytes, directFile, directBytes,
+  return { brokerFile, brokerBytes, directFile, directBytes, brokerStat: fs.lstatSync(brokerFile, { bigint: true }), directStat: fs.lstatSync(directFile, { bigint: true }),
     preservedBroker: path.join(f.stateDir, ".darwin-legacy-migration", "broker-admission-preserved.jsonl"),
     preservedDirect: path.join(f.stateDir, ".darwin-legacy-migration", "direct-start-v1-preserved", `${generation}.jsonl`) };
 }
 
 function assertAdmissions(records) {
-  assert.deepEqual(fs.readFileSync(records.brokerFile), records.brokerBytes);
-  assert.deepEqual(fs.readFileSync(records.directFile), records.directBytes);
-  assert.deepEqual(fs.readFileSync(records.preservedBroker), records.brokerBytes);
-  assert.deepEqual(fs.readFileSync(records.preservedDirect), records.directBytes);
-  assert.notEqual(fs.lstatSync(records.brokerFile, { bigint: true }).ino, fs.lstatSync(records.preservedBroker, { bigint: true }).ino);
-  assert.notEqual(fs.lstatSync(records.directFile, { bigint: true }).ino, fs.lstatSync(records.preservedDirect, { bigint: true }).ino);
+  for (const [file, bytes, before] of [[records.brokerFile, records.brokerBytes, records.brokerStat], [records.directFile, records.directBytes, records.directStat]]) {
+    const after = fs.lstatSync(file, { bigint: true });
+    assert.equal(after.dev, before.dev);
+    assert.equal(after.ino, before.ino);
+    assert.deepEqual(fs.readFileSync(file), bytes);
+  }
+  assert.equal(fs.existsSync(records.preservedBroker), false);
+  assert.equal(fs.existsSync(records.preservedDirect), false);
 }
 
 function migrationArgs(f) {
@@ -145,52 +147,31 @@ moduleApi.syncBuiltinESMExports();`, { mode: 0o600 });
     MIGRATION_GATE_MARKER: marker, MIGRATION_GATE_STAGE: stage } };
 }
 
-function assertBackup(f, old) {
-  const backup = path.join(f.stateDir, ".darwin-legacy-migration", "legacy-state.lock");
-  const stat = fs.lstatSync(backup, { bigint: true });
-  assert.equal(stat.dev, old.stat.dev);
-  assert.equal(stat.ino, old.stat.ino);
-  assert.deepEqual(fs.readFileSync(backup), old.bytes);
+function assertUnchanged(f, old, records) {
+  const after = fs.lstatSync(f.lock, { bigint: true });
+  assert.equal(after.dev, old.stat.dev);
+  assert.equal(after.ino, old.stat.ino);
+  assert.deepEqual(fs.readFileSync(f.lock), old.bytes);
   assert.deepEqual(fs.readFileSync(f.stateFile), f.state);
+  assert.equal(fs.existsSync(path.join(f.stateDir, ".darwin-legacy-migration")), false);
+  assertAdmissions(records);
 }
 
 for (const stage of ["before", "after"]) {
-  test(`old lock migration safely handles process death ${stage} exclusive barrier mkdir`, darwin, async t => {
+  test(`old lock migration refuses before the ${stage} barrier mkdir crash gate`, darwin, async t => {
     const f = fixture(t), old = await oldLock(f), records = admissions(f), point = gate(f, stage);
     const owner = start(f, migrationArgs(f), point.env);
-    await waitFor(owner, () => fs.existsSync(point.marker), `${stage} barrier mkdir`);
-    owner.child.kill("SIGKILL");
-    assert.equal((await owner.child.closed).signal, "SIGKILL");
-    assertBackup(f, old);
-    assertAdmissions(records);
-    let partial;
-    if (stage === "before") assert.equal(fs.existsSync(f.lock), false);
-    else {
-      partial = fs.lstatSync(f.lock, { bigint: true });
-      assert.ok(partial.isDirectory());
-    }
-    const retry = await start(f, migrationArgs(f)).child.closed;
-    if (stage === "before") {
-      assert.equal(retry.code, 0, retry.errors + retry.output);
-      assert.ok(fs.lstatSync(f.lock).isDirectory());
-      assert.equal(JSON.parse(fs.readFileSync(path.join(f.lock, "protocol.json"), "utf8")).protocol, "posix-local-v4");
-    } else {
-      assert.notEqual(retry.code, 0, retry.output);
-      const after = fs.lstatSync(f.lock, { bigint: true });
-      assert.equal(after.dev, partial.dev);
-      assert.equal(after.ino, partial.ino, "unverified partial barrier was replaced");
-      const source = `import {withStateSnapshot} from ${JSON.stringify(stateApi)}; try { withStateSnapshot(${JSON.stringify(f.cwd)},()=>{}); } catch(e) {console.error(e.message);process.exitCode=1;}`;
-      const runtime = await start(f, ["--input-type=module", "-e", source]).child.closed;
-      assert.notEqual(runtime.code, 0, runtime.output);
-    }
-    assertBackup(f, old);
-    assertAdmissions(records);
+    const result = await owner.child.closed;
+    assert.notEqual(result.code, 0, result.errors + result.output);
+    assert.match(result.errors + result.output, /completion evidence is unavailable/i);
+    assert.equal(fs.existsSync(point.marker), false, "unintegrated crash gate was reached");
+    assertUnchanged(f, old, records);
   });
 }
 
-// 各破壊的境界の直後に停止しても、旧 inode と保全コピーを使って再開できる。
+// 未統合のため旧 crash gate は到達しない。注入コードは復旧実装の検証用に残す。
 for (const stage of ["backup-linked", "old-name-unlinked"]) {
-  test(`old lock migration resumes after process death at ${stage}`, darwin, async t => {
+  test(`old lock migration refuses before the ${stage} crash gate`, darwin, async t => {
     const f = fixture(t), old = await oldLock(f), records = admissions(f);
     const preload = path.join(f.root, `gate-${stage}.cjs`), marker = path.join(f.root, `reached-${stage}`);
     fs.writeFileSync(preload, String.raw`
@@ -211,27 +192,21 @@ moduleApi.syncBuiltinESMExports();`, { mode: 0o600 });
     const backup = path.join(f.stateDir, ".darwin-legacy-migration", "legacy-state.lock");
     const owner = start(f, migrationArgs(f), { NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
       MIGRATION_GATE_MARKER: marker, MIGRATION_GATE_STAGE: stage, MIGRATION_GATE_LOCK: f.lock, MIGRATION_GATE_BACKUP: backup });
-    await waitFor(owner, () => fs.existsSync(marker), stage);
-    owner.child.kill("SIGKILL");
-    assert.equal((await owner.child.closed).signal, "SIGKILL");
-    assertBackup(f, old);
-    assertAdmissions(records);
-    if (stage === "backup-linked") assert.equal(fs.lstatSync(f.lock, { bigint: true }).ino, old.stat.ino);
-    else assert.equal(fs.existsSync(f.lock), false);
-    const retry = await start(f, migrationArgs(f)).child.closed;
-    assert.equal(retry.code, 0, retry.errors + retry.output);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(f.lock, "protocol.json"), "utf8")).protocol, "posix-local-v4");
-    assertBackup(f, old);
-    assertAdmissions(records);
+    const result = await owner.child.closed;
+    assert.notEqual(result.code, 0, result.errors + result.output);
+    assert.match(result.errors + result.output, /completion evidence is unavailable/i);
+    assert.equal(fs.existsSync(marker), false, "unintegrated crash gate was reached");
+    assertUnchanged(f, old, records);
   });
 }
 
-test("old lock migration resumes after death between independent admission copies", darwin, async t => {
+test("old lock migration refuses before copying independent admissions", darwin, async t => {
   const f = fixture(t), old = await oldLock(f), records = admissions(f);
   const secondName = "fa8ba920-9786-4c20-a12c-00434a4186ae.jsonl";
   const secondSource = path.join(path.dirname(records.directFile), secondName);
   const secondBytes = Buffer.from(records.directBytes.toString("utf8").replaceAll("ea8ba920-9786-4c20-a12c-00434a4186ae", secondName.slice(0, -6)));
   fs.writeFileSync(secondSource, secondBytes, { mode: 0o600 });
+  const secondStat = fs.lstatSync(secondSource, { bigint: true });
   const secondCopy = path.join(path.dirname(records.preservedDirect), secondName);
   const preload = path.join(f.root, "gate-copy.cjs"), marker = path.join(f.root, "reached-copy");
   fs.writeFileSync(preload, String.raw`
@@ -245,19 +220,16 @@ fs.openSync=function(target,...args){
 moduleApi.syncBuiltinESMExports();`, { mode: 0o600 });
   const owner = start(f, migrationArgs(f), { NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
     MIGRATION_GATE_COPY: secondCopy, MIGRATION_GATE_MARKER: marker });
-  await waitFor(owner, () => fs.existsSync(marker), "second admission copy");
-  owner.child.kill("SIGKILL");
-  assert.equal((await owner.child.closed).signal, "SIGKILL");
-  const first = fs.lstatSync(records.preservedDirect, { bigint: true });
-  assert.deepEqual(fs.readFileSync(records.preservedDirect), records.directBytes);
-  assert.deepEqual(fs.readFileSync(secondSource), secondBytes);
+  const result = await owner.child.closed;
+  assert.notEqual(result.code, 0, result.errors + result.output);
+  assert.match(result.errors + result.output, /completion evidence is unavailable/i);
+  assert.equal(fs.existsSync(marker), false, "unintegrated admission copy gate was reached");
   assert.equal(fs.existsSync(secondCopy), false);
-  const retry = await start(f, migrationArgs(f)).child.closed;
-  assert.equal(retry.code, 0, retry.errors + retry.output);
-  assert.equal(fs.lstatSync(records.preservedDirect, { bigint: true }).ino, first.ino);
-  assert.deepEqual(fs.readFileSync(secondCopy), secondBytes);
-  assertBackup(f, old);
-  assertAdmissions(records);
+  const after = fs.lstatSync(secondSource, { bigint: true });
+  assert.equal(after.dev, secondStat.dev);
+  assert.equal(after.ino, secondStat.ino);
+  assert.deepEqual(fs.readFileSync(secondSource), secondBytes);
+  assertUnchanged(f, old, records);
 });
 
 test("unknown preserved broker evidence is retained and blocks migration", darwin, async t => {
@@ -274,4 +246,5 @@ test("unknown preserved broker evidence is retained and blocks migration", darwi
   assert.deepEqual(fs.readFileSync(unknown), bytes);
   assert.equal(fs.lstatSync(f.lock, { bigint: true }).ino, old.stat.ino);
   assert.deepEqual(fs.readFileSync(f.lock), old.bytes);
+  assert.deepEqual(fs.readFileSync(f.stateFile), f.state);
 });

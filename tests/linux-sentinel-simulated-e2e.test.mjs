@@ -156,6 +156,8 @@ test("simulated Mac direct sentinel commits and holds its barrier and ready desc
         [{ fd3: "absent" }, false, /fixture fd 3 absent/],
         [{ fd3: "file" }, false, /held barrier identity/],
         [{ fd3: "other" }, false, /held barrier identity/],
+        [{ imageMismatch: true }, false, /sentinel executable identity differs/],
+        [{ generationMismatch: true }, false, /sentinel process identity differs/],
         [{ invalidFd: true }, false, /invalid sentinel barrier descriptor marker/]
       ];
       for (const [scenario, expected, reason] of cases) {

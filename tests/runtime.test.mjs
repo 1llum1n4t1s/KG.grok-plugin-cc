@@ -10,12 +10,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
-import { makeTempDir, initGitRepo, run } from "./helpers.mjs";
-import { listJobs, migrateStateLock, readJobFile, resolveJobFile, resolveStateDir, saveState, updateState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
+import { makeTempDir, initGitRepo, removeTempFixture, run } from "./helpers.mjs";
+import { listJobs, migrateStateLock, readJobFile, resolveJobFile, resolveStateDir, updateState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
 import { createBrokerEndpoint } from "../plugins/grok/scripts/lib/broker-endpoint.mjs";
 import { reserveLinuxTrackedJob } from "../plugins/grok/scripts/lib/tracked-jobs.mjs";
+import { releaseLinuxWorkerLease } from "../plugins/grok/scripts/lib/linux-worker-lease.mjs";
 import { sendBrokerShutdown } from "../plugins/grok/scripts/lib/broker-lifecycle.mjs";
 import { startFixtureBroker } from "./broker-fixture-helper.mjs";
+import { GrokAcpClient } from "../plugins/grok/scripts/lib/acp.mjs";
+import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "grok", "scripts", "grok-companion.mjs");
@@ -39,33 +42,276 @@ const REVIEW_JSON = JSON.stringify({
   next_steps: ["Parameterize the query."]
 });
 
+const runtimeFixtures = [];
+const runtimePreload = String.raw`
+const fs = require("node:fs");
+const childProcess = require("node:child_process");
+const { syncBuiltinESMExports } = require("node:module");
+const log = record => fs.appendFileSync(process.env.RUNTIME_PROCESS_LOG, JSON.stringify(record) + "\n");
+function identity(pid) {
+  try {
+    const stat = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return { state: fields[0], group: Number(fields[2]), start: fields[19] };
+  } catch { return null; }
+}
+log({ type: "ready", pid: process.pid, identity: identity(process.pid) });
+const realSpawn = childProcess.spawn, realSpawnSync = childProcess.spawnSync;
+childProcess.spawn = function(file, args, options) {
+  const child = realSpawn.apply(this, arguments);
+  const opts = Array.isArray(args) ? options : args;
+  log({ type: "spawn", pid: child.pid ?? null, identity: child.pid ? identity(child.pid) : null, detached: opts?.detached === true });
+  child.once("close", (code, signal) => log({ type: "close", pid: child.pid ?? null, code, signal }));
+  return child;
+};
+childProcess.spawnSync = function(file) {
+  const result = realSpawnSync.apply(this, arguments);
+  if (file === process.env.RUNTIME_FAKE_BIN) {
+    log({ type: "sync", pid: result.pid ?? null, status: result.status, signal: result.signal, error: Boolean(result.error) });
+  }
+  return result;
+};
+syncBuiltinESMExports();
+`;
+
+function fixtureIdentity(file) {
+  const stat = fs.lstatSync(file, { bigint: true });
+  assert.equal(stat.isSymbolicLink(), false, "fixture root must not be a link");
+  return { dev: stat.dev, ino: stat.ino };
+}
+function assertFixtureIdentity(file, identity) {
+  assert.deepEqual(fixtureIdentity(file), identity, "fixture root identity changed: " + file);
+}
+function recordSyncOwner(repo, result) {
+  if (process.platform !== "linux") return;
+  const f = runtimeFixtures.find(item => item.repo === repo);
+  assert.ok(f, "fixture owner is not registered");
+  f.owners.push({ pid: result.pid, closed: result.status !== null || result.signal !== null, error: Boolean(result.error) });
+}
+function recordChildOwner(f, child) {
+  const owner = { pid: child.pid, closed: false, error: false, child };
+  f.owners.push(owner);
+  owner.close = new Promise(resolve => child.once("close", () => { owner.closed = true; resolve(); }));
+  child.once("error", () => { owner.error = true; });
+}
+// startFixtureBroker が返る前の失敗も含め、spawn 時点から直子を所有する。
+function managedRuntimeBroker(fixture, endpoint, fake) {
+  let child, closed, session, spawnError;
+  const retained = () => [fixture?.repo, fixture?.dataDir, fake.binDir].filter(Boolean).join("; ");
+  const withDeadline = async (promise, ms) => {
+    let timer;
+    try { return await Promise.race([promise, new Promise(resolve => { timer = setTimeout(() => resolve(null), ms); })]); }
+    finally { clearTimeout(timer); }
+  };
+  return {
+    onChild(value) {
+      if (child) throw new Error("A second fixture broker was spawned");
+      child = value;
+      closed = new Promise(resolve => {
+        value.once("error", error => { spawnError = error; });
+        value.once("close", (code, signal) => resolve({ code, signal }));
+      });
+      if (fixture) { fixture.broker = value; fixture.endpoint = endpoint; recordChildOwner(fixture, value); }
+    },
+    started(value) { session = value; },
+    async stop() {
+      if (!child) {
+        if (fixture) fixture.leaseUncertain = true;
+        throw new Error("Fixture retained because broker spawn ownership was not confirmed: " + retained());
+      }
+      let outcome, signalled = false;
+      try {
+        if (child.exitCode === null && child.signalCode === null) {
+          // ACK や timeout は終了の証拠ではない。必ず所有 child の close を待つ。
+          try { await withDeadline(sendBrokerShutdown(endpoint, 1000), 1500); } catch { /* 後続の所有 child 停止を試みる。 */ }
+        }
+        outcome = await withDeadline(closed, 2500);
+        if (!outcome) {
+          // 同期区間で未終了の直子だけに送る。PID の再利用後には送らない。
+          if (child.exitCode === null && child.signalCode === null) {
+            if (!child.kill("SIGTERM")) throw new Error("Owned fixture broker SIGTERM was not delivered");
+            signalled = true;
+          }
+          outcome = await withDeadline(closed, 5000);
+        }
+        if (!outcome) throw new Error("Owned fixture broker close was not confirmed");
+        if (spawnError) throw new Error("Owned fixture broker spawn failed", { cause: spawnError });
+        if (process.platform === "linux" || process.platform === "darwin") {
+          // broker は detached、agent は同じ process group を継承する。
+          if (!Number.isSafeInteger(child.pid) || child.pid <= 0) throw new Error("Fixture broker group identity is unavailable");
+          const deadline = Date.now() + 5000;
+          for (;;) {
+            let exists = true;
+            try { process.kill(-child.pid, 0); }
+            catch (error) { if (error?.code === "ESRCH") exists = false; else throw error; }
+            if (!exists) break;
+            if (Date.now() >= deadline) throw new Error("Fixture broker and fake agent group exit was not confirmed");
+            await new Promise(resolve => setTimeout(resolve, 50));
+          }
+        }
+      } catch (error) {
+        if (fixture) fixture.leaseUncertain = true;
+        throw new Error("Fixture retained because broker or agent exit was not confirmed: " + retained(), { cause: error });
+      }
+      if (session) {
+        const stderr = fs.existsSync(session.logFile) ? fs.readFileSync(session.logFile, "utf8") : "";
+        assert.equal(outcome.code, 0, `Broker exit (${outcome.signal}): ${stderr}`);
+      }
+      return { outcome, signalled };
+    }
+  };
+}
+
+async function closeRuntimeFixture(f) {
+  const paths = [f.repo, f.dataDir, f.fake?.binDir].filter(Boolean).join("; ");
+  if (f.migrationStarted && !f.migrationComplete) throw new Error("Incomplete migration; retained: " + paths);
+  if (f.leaseUncertain || f.leases.some(lease => !lease.released)) throw new Error("Worker lease release unconfirmed; retained: " + paths);
+  try {
+    if (f.broker && f.broker.exitCode === null && f.broker.signalCode === null) {
+      await sendBrokerShutdown(f.endpoint, 1000);
+    }
+    for (const owner of f.owners) {
+      if (owner.close && !owner.closed) {
+        let timer;
+        try {
+          await Promise.race([owner.close, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("fixture owner did not close")), 15000); })]);
+        } finally { clearTimeout(timer); }
+      }
+    }
+    const records = f.trackingLog && fs.existsSync(f.trackingLog)
+      ? fs.readFileSync(f.trackingLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
+    for (const owner of f.owners) {
+      assert.ok(Number.isSafeInteger(owner.pid) && owner.pid > 0 && owner.closed && !owner.error, "fixture owner close was not confirmed");
+      const ready = records.filter(record => record.type === "ready" && record.pid === owner.pid);
+      assert.equal(ready.length, 1, "fixture owner tracking was not confirmed");
+      assert.ok(ready[0].identity?.start, "fixture owner start identity is missing");
+    }
+    for (const record of records.filter(record => record.type === "sync")) {
+      assert.ok(record.pid > 0 && !record.error && (record.status !== null || record.signal !== null), "synchronous fake process exit was not confirmed");
+    }
+    for (const record of records.filter(record => record.type === "spawn")) {
+      assert.ok(Number.isSafeInteger(record.pid) && record.pid > 0 && record.identity?.start, "fixture child start identity is missing");
+      if (record.detached) assert.equal(record.identity.group, record.pid, "detached child group was not identified");
+      else assert.equal(records.filter(entry => entry.type === "close" && entry.pid === record.pid).length, 1, "non-detached child close was not confirmed");
+      const deadline = Date.now() + 15000;
+      for (;;) {
+        let live = false;
+        try {
+          const raw = fs.readFileSync("/proc/" + record.pid + "/stat", "utf8");
+          const fields = raw.slice(raw.lastIndexOf(")") + 2).split(" ");
+          live = fields[19] === record.identity.start && !["Z", "X", "x"].includes(fields[0]);
+        } catch (error) { if (error.code !== "ENOENT" && error.code !== "ESRCH") throw error; }
+        let groupLive = false;
+        if (record.detached) {
+          try { process.kill(-record.pid, 0); groupLive = true; }
+          catch (error) { if (error.code !== "ESRCH") throw error; }
+        }
+        if (!live && !groupLive) break;
+        if (Date.now() >= deadline) throw new Error("fixture child or owned group did not exit: " + record.pid);
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+    if (f.migrationComplete) {
+      assertFixtureIdentity(f.stateDir, f.stateIdentity);
+      const markerPath = path.join(f.stateDir, "state.lock", "protocol.json");
+      const markerStat = fs.lstatSync(markerPath);
+      assert.ok(markerStat.isFile() && !markerStat.isSymbolicLink(), "fixture sentinel marker is not a regular file");
+      const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+      assert.equal(marker.epoch, f.epoch, "fixture epoch changed");
+      assert.deepEqual(marker.sentinel, f.sentinel, "fixture sentinel identity changed");
+      const stopped = shutdownPosixStateLockSentinel(f.stateDir, { offlineConfirmed: true, expectedStateDir: f.stateDir });
+      assert.equal(stopped.stopped, true);
+      assert.equal(stopped.stateDir, f.stateDir);
+      assert.equal(stopped.epoch, f.epoch);
+    }
+    for (const item of f.roots) assertFixtureIdentity(item.file, item.identity);
+    for (const link of f.links) {
+      const stat = fs.lstatSync(link.file, { bigint: true });
+      assert.ok(stat.isSymbolicLink() && stat.dev === link.dev && stat.ino === link.ino, "fixture link identity changed");
+      assert.equal(fs.readlinkSync(link.file), link.target, "fixture link target changed");
+      fs.unlinkSync(link.file);
+    }
+    for (const item of f.roots) {
+      assertFixtureIdentity(item.file, item.identity);
+      removeTempFixture(item.file, { recursive: true, force: true });
+    }
+  } catch (error) {
+    throw new Error("Fixture retained because ownership or shutdown could not be confirmed: " + paths, { cause: error });
+  }
+}
+
+test.afterEach(async () => {
+  if (process.platform !== "linux") return;
+  const fixtures = runtimeFixtures.splice(0);
+  const failures = [];
+  for (const f of fixtures) {
+    try { await closeRuntimeFixture(f); } catch (error) { failures.push(error); }
+  }
+  if (failures.length) throw new AggregateError(failures, "Runtime fixture cleanup could not be confirmed");
+});
+
 /** 偽 grok と使い捨ての git リポジトリを用意する。 */
 function setupWorkspace(scenario) {
+  const f = { roots: [], links: [], owners: [], leases: [], migrationStarted: false, migrationComplete: false };
+  if (process.platform === "linux") runtimeFixtures.push(f);
   const fake = installFakeGrok(scenario);
+  f.fake = fake;
+  if (process.platform === "linux") { const root = { file: fake.binDir }; f.roots.push(root); root.identity = fixtureIdentity(root.file); }
   const repo = makeTempDir("grok-plugin-repo-");
+  f.repo = repo;
+  if (process.platform === "linux") { const root = { file: repo }; f.roots.push(root); root.identity = fixtureIdentity(root.file); }
   initGitRepo(repo);
   fs.writeFileSync(path.join(repo, "auth.js"), "export const a = 1;\n", "utf8");
   run("git", ["add", "-A"], { cwd: repo });
   run("git", ["commit", "-m", "初期化"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "auth.js"), "export const a = 2;\n", "utf8");
-
-  // ジョブの状態を実ユーザーの領域へ書かないよう隔離する。
   const dataDir = makeTempDir("grok-plugin-data-");
+  f.dataDir = dataDir;
+  if (process.platform === "linux") { const root = { file: dataDir }; f.roots.push(root); root.identity = fixtureIdentity(root.file); }
+  const env = { ...fake.env, CLAUDE_PLUGIN_DATA: dataDir };
+  if (process.platform === "linux") {
+    f.trackingLog = path.join(dataDir, "process-ownership.jsonl");
+    const preload = path.join(dataDir, "process-ownership.cjs");
+    fs.writeFileSync(preload, runtimePreload);
+    env.RUNTIME_PROCESS_LOG = f.trackingLog;
+    env.RUNTIME_FAKE_BIN = fake.env.GROK_BIN;
+    env.NODE_OPTIONS = (env.NODE_OPTIONS ?? "") + " --require=" + JSON.stringify(preload);
+  }
   if (["win32", "linux", "darwin"].includes(process.platform)) {
     const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
     process.env.CLAUDE_PLUGIN_DATA = dataDir;
     try {
-      migrateStateLock(repo, { offlineConfirmed: true, localOnly: true, expectedStateDir: resolveStateDir(repo) });
+      const stateDir = resolveStateDir(repo);
+      f.stateDir = stateDir;
+      f.migrationStarted = true;
+      const migrated = migrateStateLock(repo, { offlineConfirmed: true, localOnly: true, expectedStateDir: stateDir });
+      if (process.platform === "linux") {
+        f.epoch = migrated.epoch;
+        assert.ok(f.epoch, "fixture migration epoch is unavailable");
+        f.stateIdentity = fixtureIdentity(stateDir);
+        const marker = JSON.parse(fs.readFileSync(path.join(stateDir, "state.lock", "protocol.json"), "utf8"));
+        assert.equal(marker.epoch, f.epoch);
+        f.sentinel = marker.sentinel;
+        assert.ok(f.sentinel, "fixture sentinel identity is unavailable");
+      }
+      f.migrationComplete = true;
     } finally {
       if (previousPluginData == null) delete process.env.CLAUDE_PLUGIN_DATA;
       else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
     }
   }
-  return { fake, repo, env: { ...fake.env, CLAUDE_PLUGIN_DATA: dataDir } };
+  return { fake, repo, env, registerLink(file) {
+    if (process.platform !== "linux") return;
+    const stat = fs.lstatSync(file, { bigint: true });
+    assert.ok(stat.isSymbolicLink());
+    f.links.push({ file, dev: stat.dev, ino: stat.ino, target: fs.readlinkSync(file) });
+  } };
 }
 
 function companion(args, { repo, env }) {
-  return run(process.execPath, [SCRIPT, ...args], { cwd: repo, env });
+  const result = run(process.execPath, [SCRIPT, ...args], { cwd: repo, env });
+  recordSyncOwner(repo, result);
+  return result;
 }
 
 // POSIX では実際の branch 差分を使い、Windows の dirty working-tree 経路は維持する。
@@ -170,6 +416,7 @@ for (const mode of ["cancel", "session-end"]) {
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true
     });
+    if (process.platform === "linux") recordChildOwner(runtimeFixtures.find(f => f.repo === repo), child);
     child.stdout.resume();
     child.stderr.resume();
     try {
@@ -184,16 +431,18 @@ for (const mode of ["cancel", "session-end"]) {
           env,
           input: JSON.stringify({ cwd: repo, session_id: "held-session", hook_event_name: "SessionEnd" })
         });
+        recordSyncOwner(repo, result);
         assert.equal(result.status, 0, result.stderr);
       }
       await waitForChildExit(child);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill();
+      await waitForChildExit(child);
     }
   });
 }
 
-test("cancel retains an unverifiable process as a retryable pending cancellation", () => {
+test("cancel preserves an unverifiable process and blocks task resume", () => {
   const { repo, env } = setupWorkspace({ replies: [] });
   env.GROK_COMPANION_SESSION_ID = "test-session";
   const job = {
@@ -207,10 +456,18 @@ test("cancel retains an unverifiable process as a retryable pending cancellation
     pid: process.pid
   };
   const previous = process.env.CLAUDE_PLUGIN_DATA;
+  let reservation, leaseRecord;
+  const leaseFixture = process.platform === "linux" ? runtimeFixtures.find(f => f.repo === repo) : null;
   process.env.CLAUDE_PLUGIN_DATA = env.CLAUDE_PLUGIN_DATA;
   try {
     // Linux は実際の lease と epoch がない旧レコードの取消を拒否する。
-    if (process.platform === "linux") reserveLinuxTrackedJob(job);
+    if (process.platform === "linux") {
+      leaseFixture.leaseUncertain = true;
+      reservation = reserveLinuxTrackedJob(job);
+      leaseRecord = { released: false };
+      leaseFixture.leases.push(leaseRecord);
+      leaseFixture.leaseUncertain = false;
+    }
     updateState(repo, state => {
       const indexed = state.jobs.find(candidate => candidate.id === job.id);
       const record = indexed ? { ...indexed, ...job, grokPromptState: "pending" } : job;
@@ -218,12 +475,19 @@ test("cancel retains an unverifiable process as a retryable pending cancellation
       if (indexed) Object.assign(indexed, record);
       else state.jobs.push(record);
     });
+    const indexFile = path.join(resolveStateDir(repo), "state.json");
+    const detailFile = resolveJobFile(repo, job.id);
+    const indexBefore = fs.readFileSync(indexFile, "utf8"), detailBefore = fs.readFileSync(detailFile, "utf8");
     const result = companion(["cancel", "--json", job.id], { repo, env });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /cancellation remains pending/i);
     const pending = listJobs(repo).find((candidate) => candidate.id === job.id);
-    assert.equal(pending.status, "cancelled");
-    assert.equal(pending.terminationPending, true);
+    assert.equal(pending.status, process.platform === "darwin" ? "running" : "cancelled");
+    if (process.platform === "darwin") {
+      assert.match(result.stderr, /no verified current worker lease/i);
+      assert.equal(fs.readFileSync(indexFile, "utf8"), indexBefore);
+      assert.equal(fs.readFileSync(detailFile, "utf8"), detailBefore);
+    } else assert.equal(pending.terminationPending, true);
     assert.equal(pending.pid, process.pid);
     const waited = companion(["status", "--json", "--wait", "--timeout-ms", "1", job.id], { repo, env });
     assert.equal(waited.status, 0, waited.stderr);
@@ -233,10 +497,17 @@ test("cancel retains an unverifiable process as a retryable pending cancellation
     assert.match(candidate.stderr, /termination is pending; resume is unavailable/i);
     const resume = companion(["task", "--resume-last", "continue"], { repo, env });
     assert.notEqual(resume.status, 0);
-    assert.match(resume.stderr, /needs process termination/i);
+    assert.match(resume.stderr, process.platform === "darwin" ? /still running/i : /needs process termination/i);
   } finally {
-    if (previous == null) delete process.env.CLAUDE_PLUGIN_DATA;
-    else process.env.CLAUDE_PLUGIN_DATA = previous;
+    try {
+      if (reservation) {
+        leaseRecord.released = releaseLinuxWorkerLease(reservation.owner);
+        assert.equal(leaseRecord.released, true, "fixture worker lease must be released");
+      }
+    } finally {
+      if (previous == null) delete process.env.CLAUDE_PLUGIN_DATA;
+      else process.env.CLAUDE_PLUGIN_DATA = previous;
+    }
   }
 });
 
@@ -930,6 +1201,63 @@ ${result.stderr}`);
 // --- task（/grok:rescue の実体）---------------------------------------
 // ここは書き込みを許しうる唯一の経路なので、権限分岐を実プロセスで確かめる。
 
+for (const mode of ["split stdin", "empty stdin", "positional priority", "prompt file priority"]) {
+  test(`task reads piped input and preserves prompt priority: ${mode}`, { timeout: 45000 }, async () => {
+    const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+    const piped = "日本語🌸の依頼";
+    const positional = "positional request";
+    const filePrompt = "prompt file request";
+    const promptFile = path.join(repo, "prompt.txt");
+    if (mode === "prompt file priority") fs.writeFileSync(promptFile, filePrompt, "utf8");
+    const args = [SCRIPT, "task", "--json", "--fresh"];
+    if (mode === "prompt file priority") args.push("--prompt-file", promptFile);
+    if (mode === "positional priority" || mode === "prompt file priority") args.push(positional);
+    const child = spawn(process.execPath, args, { cwd: repo, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    if (process.platform === "linux") recordChildOwner(runtimeFixtures.find(f => f.repo === repo), child);
+    let stdout = "", stderr = "", inputError;
+    child.stdout.on("data", chunk => { stdout += chunk; });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    child.stdin.on("error", error => { if (error.code !== "EPIPE") inputError = error; });
+    const closed = new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    let timer;
+    try {
+      if (mode === "split stdin") {
+        const bytes = Buffer.from(piped, "utf8");
+        // 3-byte と 4-byte UTF-8 のそれぞれ途中で区切り、EOF より前には task を開始しない。
+        const emoji = bytes.indexOf(Buffer.from("🌸"));
+        await new Promise(resolve => setTimeout(resolve, 300));
+        for (const chunk of [bytes.subarray(0, 1), bytes.subarray(1, emoji + 2), bytes.subarray(emoji + 2)]) {
+          child.stdin.write(chunk);
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        assert.equal(child.exitCode, null, "task must wait for stdin EOF");
+        assert.equal(fake.readState()?.prompts?.length ?? 0, 0, "prompt must not be sent before EOF");
+        child.stdin.end();
+      } else child.stdin.end(mode === "empty stdin" ? "" : piped);
+      const outcome = await Promise.race([closed, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("task did not exit after stdin EOF")), 30000);
+      })]);
+      assert.equal(inputError, undefined);
+      if (mode === "empty stdin") {
+        assert.equal(outcome.code, 1, stderr);
+        assert.match(stderr, /Provide a prompt.*or use --resume-last/i);
+        assert.equal(fake.readState()?.prompts?.length ?? 0, 0);
+      } else {
+        assert.equal(outcome.code, 0, `signal=${outcome.signal} stdout=${stdout} stderr=${stderr}`);
+        const expected = mode === "split stdin" ? piped : mode === "positional priority" ? positional : filePrompt;
+        assert.deepEqual(fake.readState().prompts, [expected], "exactly one complete prompt must reach the fake agent");
+      }
+    } finally {
+      clearTimeout(timer);
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await closed;
+    }
+  });
+}
+
 test("task rejects an omitted rescue request without recording a failed job", () => {
   const workspace = setupWorkspace({ replies: [{ text: "should not run" }] });
 
@@ -1024,6 +1352,7 @@ test("read-only task confines Test-Path to its repository", () => {
     const linkPath = path.join(workspace.repo, "linked-outside");
     if (scenario === "linked-outside") {
       fs.symlinkSync(outsideDir, linkPath, process.platform === "win32" ? "junction" : "dir");
+      workspace.registerLink(linkPath);
     }
     const target = scenario === "outside"
       ? path.join(outsideDir, "candidate")
@@ -1216,7 +1545,37 @@ test("task falls back to set_config_option when session/set_model is gone", () =
   assert.deepEqual(state.configs, [{ configId: "model", value: "grok-4.5" }]);
 });
 
-test("resuming a task reloads the previous session and reapplies --effort", { timeout: 30000 }, async () => {
+test("managed broker fixture stops its owned broker and agent after a busy shutdown", { timeout: 60000,
+  skip: !["linux", "darwin"].includes(process.platform) ? "POSIX broker group only" : false }, async () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+  const endpoint = createBrokerEndpoint(fake.binDir);
+  const brokerEnv = { ...env, GROK_COMPANION_DISABLE_BROKER: "0",
+    GROK_COMPANION_ACP_ENDPOINT: endpoint, TMPDIR: fake.binDir, TMP: fake.binDir, TEMP: fake.binDir };
+  const fixture = process.platform === "linux" ? runtimeFixtures.find(f => f.repo === repo) : null;
+  const ownedBroker = managedRuntimeBroker(fixture, endpoint, fake);
+  let holder, probe, stopPromise;
+  try {
+    const { session } = await startFixtureBroker(repo, brokerEnv, endpoint, { onChild: ownedBroker.onChild });
+    ownedBroker.started(session);
+    holder = await GrokAcpClient.connect(repo, { env: brokerEnv, brokerEndpoint: endpoint, brokerOnly: true });
+    probe = await GrokAcpClient.connect(repo, { env: brokerEnv, brokerEndpoint: endpoint, brokerOnly: true });
+    assert.equal(holder.initializeResult?._meta?.grokBrokerGeneration, session.generation);
+    assert.ok(fake.readState()?.pid, "the fake agent must have started");
+    await assert.rejects(probe.request("broker/shutdown", {}), /busy|attached/i);
+    await probe.close(); probe = null;
+    const started = Date.now();
+    stopPromise = ownedBroker.stop();
+    const stopped = await stopPromise;
+    assert.equal(stopped.signalled, true, "the attached client must force the bounded SIGTERM fallback");
+    assert.equal(stopped.outcome.code, 0, "the broker must finish its graceful shutdown");
+    assert.ok(Date.now() - started < 15000, "busy shutdown must not wait indefinitely");
+  } finally {
+    try { await (stopPromise ?? ownedBroker.stop()); }
+    finally { await probe?.close(); await holder?.close(); }
+  }
+});
+
+test("resuming a task reloads the previous session and reapplies --effort", { timeout: 60000 }, async () => {
   const { fake, repo, env } = setupWorkspace({
     replies: [{ text: "carrying on" }],
     configOptions: [THOUGHT_LEVEL_OPTION]
@@ -1226,10 +1585,12 @@ test("resuming a task reloads the previous session and reapplies --effort", { ti
   const endpoint = createBrokerEndpoint(fake.binDir);
   const brokerEnv = { ...env, GROK_COMPANION_DISABLE_BROKER: "0",
     GROK_COMPANION_ACP_ENDPOINT: endpoint, TMPDIR: fake.binDir, TMP: fake.binDir, TEMP: fake.binDir };
-  const { child: broker, exited, session } = await startFixtureBroker(repo, brokerEnv, endpoint);
-  brokerEnv.GROK_COMPANION_BROKER_GENERATION = session.generation;
-  const brokerStderr = () => fs.existsSync(session.logFile) ? fs.readFileSync(session.logFile, "utf8") : "";
+  const fixture = process.platform === "linux" ? runtimeFixtures.find(f => f.repo === repo) : null;
+  const ownedBroker = managedRuntimeBroker(fixture, endpoint, fake);
   try {
+    const { session } = await startFixtureBroker(repo, brokerEnv, endpoint, { onChild: ownedBroker.onChild });
+    ownedBroker.started(session);
+    brokerEnv.GROK_COMPANION_BROKER_GENERATION = session.generation;
     const first = companion(["task", "start the work"], { repo, env: brokerEnv });
     assert.equal(first.status, 0, first.stderr);
     const initialState = fake.readState();
@@ -1252,32 +1613,54 @@ ${resumed.stderr}`);
     // 再開でも --effort が当たる（以前は startSession を通らず無視されていた）。
     assert.deepEqual(state.configs, [{ configId: "thought-level", value: "medium" }]);
   } finally {
-    if (broker.exitCode === null && broker.signalCode === null) await sendBrokerShutdown(endpoint);
-    const { code, signal } = await exited;
-    assert.equal(code, 0, `Broker exit (${signal}): ${brokerStderr()}`);
+    await ownedBroker.stop();
   }
 });
 
-test("stop-gate reviews never replace the latest resumable rescue task", () => {
-  const { repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+test("stop-gate reviews never replace the latest resumable rescue task", { timeout: 60000 }, async () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+  const endpoint = createBrokerEndpoint(fake.binDir);
+  const brokerEnv = { ...env, GROK_COMPANION_DISABLE_BROKER: "0",
+    GROK_COMPANION_ACP_ENDPOINT: endpoint, TMPDIR: fake.binDir, TMP: fake.binDir, TEMP: fake.binDir };
+  const fixture = process.platform === "linux" ? runtimeFixtures.find(f => f.repo === repo) : null;
+  const ownedBroker = managedRuntimeBroker(fixture, endpoint, fake);
+  try {
+    const { session } = await startFixtureBroker(repo, brokerEnv, endpoint, { onChild: ownedBroker.onChild });
+    ownedBroker.started(session);
+    brokerEnv.GROK_COMPANION_BROKER_GENERATION = session.generation;
+    const rescue = companion(["task", "--json", "start the rescue work"], { repo, env: brokerEnv });
+    assert.equal(rescue.status, 0, rescue.stderr);
+    const rescuePayload = JSON.parse(rescue.stdout);
 
-  const rescue = companion(["task", "--json", "start the rescue work"], { repo, env });
-  assert.equal(rescue.status, 0, rescue.stderr);
-  const rescuePayload = JSON.parse(rescue.stdout);
+    const stopGate = companion(["task", "--json", "--stop-gate", "review the previous turn"], { repo, env: brokerEnv });
+    assert.equal(stopGate.status, 0, stopGate.stderr);
+    const stopGatePayload = JSON.parse(stopGate.stdout);
 
-  const stopGate = companion(["task", "--json", "--stop-gate", "review the previous turn"], { repo, env });
-  assert.equal(stopGate.status, 0, stopGate.stderr);
-  const stopGatePayload = JSON.parse(stopGate.stdout);
+    const candidate = companion(["task-resume-candidate", "--json"], { repo, env: brokerEnv });
+    assert.equal(candidate.status, 0, candidate.stderr);
+    const candidatePayload = JSON.parse(candidate.stdout);
+    assert.equal(candidatePayload.candidate.id, rescuePayload.jobId);
+    assert.notEqual(candidatePayload.candidate.id, stopGatePayload.jobId);
 
-  const candidate = companion(["task-resume-candidate", "--json"], { repo, env });
-  assert.equal(candidate.status, 0, candidate.stderr);
-  const candidatePayload = JSON.parse(candidate.stdout);
-  assert.equal(candidatePayload.candidate.id, rescuePayload.jobId);
-  assert.notEqual(candidatePayload.candidate.id, stopGatePayload.jobId);
-
-  const status = companion(["status", "--json", "--all"], { repo, env });
-  const stopGateJob = JSON.parse(status.stdout).latestFinished;
-  assert.equal(stopGateJob.id, stopGatePayload.jobId);
-  assert.equal(stopGateJob.jobClass, "review");
-  assert.equal(stopGateJob.kind, "stop-gate-review");
+    const status = companion(["status", "--json", "--all"], { repo, env: brokerEnv });
+    assert.equal(status.status, 0, status.stderr);
+    const stopGateJob = JSON.parse(status.stdout).latestFinished;
+    assert.equal(stopGateJob.id, stopGatePayload.jobId);
+    assert.equal(stopGateJob.jobClass, "review");
+    assert.equal(stopGateJob.kind, "stop-gate-review");
+    for (const id of [rescuePayload.jobId, stopGatePayload.jobId]) {
+      const result = companion(["result", "--json", id], { repo, env: brokerEnv });
+      assert.equal(result.status, 0, result.stderr);
+      const records = JSON.parse(result.stdout);
+      for (const job of [records.job, records.storedJob]) {
+        assert.equal(job.grokTransport, "broker");
+        assert.equal(job.grokBrokerGeneration, session.generation);
+        assert.equal(job.grokPromptState, "terminal");
+      }
+      if (id === rescuePayload.jobId) assert.equal(candidatePayload.candidate.grokSessionId, records.job.grokSessionId);
+    }
+    assert.deepEqual(fake.readState().prompts, ["start the rescue work", "review the previous turn"]);
+  } finally {
+    await ownedBroker.stop();
+  }
 });

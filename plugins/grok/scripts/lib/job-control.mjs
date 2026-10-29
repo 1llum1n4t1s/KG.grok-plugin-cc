@@ -240,6 +240,10 @@ function reconcileOrphanedJobs(workspaceRoot) {
   const now = Date.now();
   const candidates = listJobs(workspaceRoot).filter(candidate => candidate.status === "queued" || candidate.status === "running");
   if (!candidates.length) return;
+  const turnEvidenceFields = ["grokPromptState", "grokSessionId", "grokTransport", "grokBrokerGeneration",
+    "grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey"];
+  const sameOrphanTurnEvidence = (indexed, stored) =>
+    turnEvidenceFields.every(key => (indexed[key] ?? null) === (stored[key] ?? null));
   withStateLockMigrationScope(resolveStateDir(workspaceRoot), check => {
     for (const candidate of candidates) {
       check();
@@ -253,9 +257,7 @@ function reconcileOrphanedJobs(workspaceRoot) {
           updateState(workspaceRoot, (state, context) => {
             const indexed = state.jobs.find(entry => entry.id === candidate.id);
             const stored = readStoredJob(workspaceRoot, candidate.id, context);
-            const matchingTurnEvidence = ["grokPromptState", "grokSessionId", "grokTransport", "grokBrokerGeneration",
-              "grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey"]
-              .every(key => (indexed[key] ?? null) === (stored[key] ?? null));
+            const matchingTurnEvidence = sameOrphanTurnEvidence(indexed, stored);
             const terminationPending = !matchingTurnEvidence || indexed.terminationPending === true || stored.terminationPending === true ||
               (indexed.grokPromptState !== "not-sent" && indexed.grokPromptState !== "terminal");
             const patch = { status: "failed", phase: terminationPending ? "termination-pending" : "failed", terminationPending,
@@ -304,39 +306,25 @@ function reconcileOrphanedJobs(workspaceRoot) {
       }
       // 旧世代の lease 不在は停止の証拠にならない。
       if (["linux", "darwin"].includes(process.platform)) continue;
-      if (process.platform === "darwin" && (!candidateDetail || candidateDetail.id !== candidate.id ||
-          candidate.createdAt !== candidateDetail.createdAt || candidate.startedAt !== candidateDetail.startedAt ||
-          candidate.status !== candidateDetail.status || candidate.pid !== candidateDetail.pid ||
-          candidate.processStartKey !== candidateDetail.processStartKey)) continue;
       const observed = { ...candidate, ...candidateDetail };
-      const queuedCandidate = process.platform !== "darwin" && observed.status === "queued" && now - Date.parse(observed.createdAt ?? observed.updatedAt ?? "") > STALE_QUEUED_JOB_MS;
+      const queuedCandidate = observed.status === "queued" && now - Date.parse(observed.createdAt ?? observed.updatedAt ?? "") > STALE_QUEUED_JOB_MS;
       let exited = false;
       if (observed.status === "running" && Number.isInteger(observed.pid) && validProcessStartKey(observed.processStartKey)) {
-        if (process.platform === "darwin") {
-          try { process.kill(observed.pid, 0); } catch (error) { exited = error?.code === "ESRCH"; }
-        } else {
-          const identity = inspectTrackedJobProcess(observed.pid, observed.processStartKey, { getProcessSnapshotImpl: (pid, options) => {
-            check();
-            const snapshot = getProcessSnapshot(pid, options);
-            return validProcessStartKey(snapshot?.startKey) ? snapshot : null;
-          } });
-          exited = identity === "absent" || identity === "mismatch";
-        }
+        const identity = inspectTrackedJobProcess(observed.pid, observed.processStartKey, { getProcessSnapshotImpl: (pid, options) => {
+          check();
+          const snapshot = getProcessSnapshot(pid, options);
+          return validProcessStartKey(snapshot?.startKey) ? snapshot : null;
+        } });
+        exited = identity === "absent" || identity === "mismatch";
       }
       if (!queuedCandidate && !exited) continue;
       check();
-      const staleEpoch = {};
-      try { updateState(workspaceRoot, (state, context) => {
+      updateState(workspaceRoot, (state, context) => {
         const indexed = state.jobs.find((entry) => entry.id === candidate.id);
         if (!indexed) return;
         const stored = readStoredJob(workspaceRoot, candidate.id, context);
-        if (process.platform === "linux" && (context.epoch !== check.epoch || indexed.epoch !== context.epoch ||
-            !stored || stored.id !== indexed.id || stored.epoch !== context.epoch)) throw staleEpoch;
-        if (process.platform === "darwin" && (context.epoch !== check.epoch || !stored || indexed.workerLease || stored.workerLease ||
-            indexed.id !== stored.id || indexed.createdAt !== stored.createdAt || indexed.startedAt !== stored.startedAt ||
-            indexed.status !== stored.status || indexed.pid !== stored.pid || indexed.processStartKey !== stored.processStartKey)) throw staleEpoch;
         const job = { ...indexed, ...stored };
-        const queuedTooLong = process.platform !== "darwin" && job.status === "queued" && now - Date.parse(job.createdAt ?? job.updatedAt ?? "") > STALE_QUEUED_JOB_MS;
+        const queuedTooLong = job.status === "queued" && now - Date.parse(job.createdAt ?? job.updatedAt ?? "") > STALE_QUEUED_JOB_MS;
         // ロック外の照会と確定の間に、別世代や完了状態が記録された場合は触らない。
         const sameWorker = record => record && record.id === observed.id && record.createdAt === observed.createdAt &&
           record.status === "running" && record.pid === observed.pid && record.processStartKey === observed.processStartKey;
@@ -349,18 +337,14 @@ function reconcileOrphanedJobs(workspaceRoot) {
           : "Job process exited without recording a final result.";
         // 索引と詳細のどちらかだけを採用すると、送信済みの turn を未送信と誤認し得る。
         // 欠落・矛盾があるときは各原本を保ち、終了証拠が揃うまで保留する。
-        const matchingTurnEvidence = stored && ["grokPromptState", "grokSessionId", "grokTransport", "grokBrokerGeneration",
-          "grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey"]
-          .every(key => (indexed[key] ?? null) === (stored[key] ?? null));
+        const matchingTurnEvidence = stored && sameOrphanTurnEvidence(indexed, stored);
         const terminationPending = !matchingTurnEvidence || indexed.terminationPending === true || stored?.terminationPending === true ||
           (job.grokPromptState !== "not-sent" && job.grokPromptState !== "terminal");
         const patch = { status: "failed", phase: terminationPending ? "termination-pending" : "failed",
           terminationPending, pid: null, completedAt, errorMessage };
         if (stored) writeJobFile(workspaceRoot, job.id, { ...stored, ...patch }, context);
         Object.assign(indexed, patch);
-      }); } catch (error) {
-        if (error !== staleEpoch) throw error;
-      }
+      });
     }
   });
 }

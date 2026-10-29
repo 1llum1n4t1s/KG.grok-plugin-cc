@@ -98,15 +98,21 @@ mod.syncBuiltinESMExports();`;
   return file;
 }
 
-test("helper preserves the original inode and accepts repeated migration", darwin, async t => {
-  const f = fixture(t), first = launch(f);
-  const result = await first.child.closed;
-  assert.equal(result.code, 0, result.errors + result.output);
-  assertBackup(f);
-  assert.ok(fs.lstatSync(f.lock).isDirectory());
-  const again = await launch(f).child.closed;
-  assert.equal(again.code, 0, again.errors + again.output);
-  assertBackup(f);
+function assertDisabled(f, result) {
+  assert.notEqual(result.code, 0, result.output);
+  assert.match(result.output, /requires the fixed v4 state migration and mutex capability/i);
+  const after = fs.lstatSync(f.lock, { bigint: true });
+  assert.equal(after.dev, f.before.dev);
+  assert.equal(after.ino, f.before.ino);
+  assert.deepEqual(fs.readFileSync(f.lock), f.bytes);
+  assert.equal(fs.existsSync(path.join(f.stateDir, ".darwin-legacy-migration")), false);
+  assert.equal(fs.existsSync(path.join(f.stateDir, "worker-leases")), false);
+}
+
+test("disabled helper repeatedly preserves the original inode", darwin, async t => {
+  const f = fixture(t);
+  assertDisabled(f, await launch(f).child.closed);
+  assertDisabled(f, await launch(f).child.closed);
 });
 
 test("forged verification callbacks cannot remove the old lock", darwin, async t => {
@@ -119,14 +125,14 @@ test("forged verification callbacks cannot remove the old lock", darwin, async t
   assert.equal(fs.readFileSync(unknown, "utf8"), "keep\n");
 });
 
-test("a forged physical barrier missing required protocol fields is not accepted", darwin, async t => {
+test("disabled helper does not invoke the forged physical barrier callback", darwin, async t => {
   const f = fixture(t), result = await launch(f, { mode: "forged-barrier" }).child.closed;
   assert.notEqual(result.code, 0, result.output);
-  assertBackup(f);
+  assertDisabled(f, result);
 });
 
 for (const mode of ["truthy-offline", "truthy-local"]) {
-  test(`helper refuses non-boolean ${mode} confirmation`, darwin, async t => {
+  test(`disabled helper does not proceed with non-boolean ${mode} confirmation`, darwin, async t => {
     const f = fixture(t), result = await launch(f, { mode }).child.closed;
     assert.notEqual(result.code, 0, result.output);
     assert.deepEqual(fs.readFileSync(f.lock), f.bytes);
@@ -134,49 +140,56 @@ for (const mode of ["truthy-offline", "truthy-local"]) {
   });
 }
 
-test("an async inventory callback is rejected before its deferred side effect starts", darwin, async t => {
+test("disabled helper does not invoke an async inventory callback", darwin, async t => {
   const f = fixture(t), result = await launch(f, { mode: "async-callback" }).child.closed;
   assert.notEqual(result.code, 0, result.output);
   assert.deepEqual(fs.readFileSync(f.lock), f.bytes);
   assert.equal(fs.existsSync(path.join(f.stateDir, "async-effect")), false);
 });
 
-test("a rejected thenable does not escape as an unhandled rejection", darwin, async t => {
+test("disabled helper does not invoke the rejected thenable callback", darwin, async t => {
   const f = fixture(t), result = await launch(f, { mode: "reject-thenable" }).child.closed;
   assert.notEqual(result.code, 0, result.output);
   assert.deepEqual(fs.readFileSync(f.lock), f.bytes);
   assert.doesNotMatch(result.output, /UNHANDLED/);
 });
 
-test("synchronous callback reentry is refused before a second guard acquisition", darwin, async t => {
+test("disabled helper does not invoke the reentry callback", darwin, async t => {
   const f = fixture(t), result = await launch(f, { mode: "reentry" }).child.closed;
-  assert.equal(result.code, 0, result.errors + result.output);
-  assertBackup(f);
+  assertDisabled(f, result);
 });
 
-test("helper checks the transition marker again before changing the old lock", darwin, async t => {
-  const f = fixture(t), owner = launch(f, { gate: "transition-synced" });
-  await atGate(owner, "transition-synced");
-  const marker = path.join(f.stateDir, ".darwin-legacy-migration", "transition.json");
-  fs.writeFileSync(marker, "{changed");
-  owner.child.kill("SIGCONT");
-  const result = await owner.child.closed;
+test("disabled helper preserves a preexisting transition marker", darwin, async t => {
+  const f = fixture(t), directory = path.join(f.stateDir, ".darwin-legacy-migration");
+  fs.mkdirSync(directory, { mode: 0o700 });
+  const marker = path.join(directory, "transition.json"), bytes = Buffer.from("{changed");
+  fs.writeFileSync(marker, bytes, { mode: 0o600 });
+  const before = fs.lstatSync(marker, { bigint: true });
+  const result = await launch(f).child.closed;
   assert.notEqual(result.code, 0, result.output);
+  assert.match(result.output, /requires the fixed v4 state migration/i);
   assert.deepEqual(fs.readFileSync(f.lock), f.bytes);
-  assert.equal(fs.readFileSync(marker, "utf8"), "{changed");
+  assert.equal(fs.lstatSync(f.lock, { bigint: true }).ino, f.before.ino);
+  assert.equal(fs.lstatSync(marker, { bigint: true }).ino, before.ino);
+  assert.deepEqual(fs.readFileSync(marker), bytes);
 });
 
-test("resumption refuses a transition marker that cannot be synchronized", darwin, async t => {
-  const f = fixture(t), owner = launch(f, { gate: "transition-synced" });
-  await atGate(owner, "transition-synced");
-  owner.child.kill("SIGKILL");
-  await owner.child.closed;
+test("disabled helper preserves transition evidence without attempting synchronization", darwin, async t => {
+  const f = fixture(t), directory = path.join(f.stateDir, ".darwin-legacy-migration");
+  fs.mkdirSync(directory, { mode: 0o700 });
+  const marker = path.join(directory, "transition.json"), bytes = Buffer.from("{pending");
+  fs.writeFileSync(marker, bytes, { mode: 0o600 });
+  const before = fs.lstatSync(marker, { bigint: true });
   const file = preload(f, "marker-fsync"), previous = process.env.FIXTURE_FAULT;
   process.env.FIXTURE_FAULT = "marker-fsync";
   try {
     const result = await launch(f, { preload: file }).child.closed;
     assert.notEqual(result.code, 0, result.output);
+    assert.match(result.output, /requires the fixed v4 state migration/i);
     assert.deepEqual(fs.readFileSync(f.lock), f.bytes);
+    assert.equal(fs.lstatSync(f.lock, { bigint: true }).ino, f.before.ino);
+    assert.equal(fs.lstatSync(marker, { bigint: true }).ino, before.ino);
+    assert.deepEqual(fs.readFileSync(marker), bytes);
   } finally {
     if (previous === undefined) delete process.env.FIXTURE_FAULT;
     else process.env.FIXTURE_FAULT = previous;
@@ -184,29 +197,21 @@ test("resumption refuses a transition marker that cannot be synchronized", darwi
 });
 
 for (const gate of ["transition-synced", "backup-linked", "backup-synced", "legacy-name-unlinked", "legacy-name-synced"]) {
-  test(`helper preserves and resumes after process termination at ${gate}`, darwin, async t => {
-    const f = fixture(t), owner = launch(f, { gate });
-    await atGate(owner, gate);
-    owner.child.kill("SIGKILL");
-    const stopped = await owner.child.closed;
-    assert.equal(stopped.signal, "SIGKILL");
-    const resumed = await launch(f).child.closed;
-    assert.equal(resumed.code, 0, resumed.errors + resumed.output);
-    assertBackup(f);
-    assert.ok(fs.lstatSync(f.lock).isDirectory());
+  test(`disabled helper refuses before the ${gate} crash gate`, darwin, async t => {
+    const f = fixture(t), result = await launch(f, { gate }).child.closed;
+    assertDisabled(f, result);
+    assert.doesNotMatch(result.output, /PAUSE:/);
   });
 }
 
 for (const kind of ["fsync", "link", "lock", "timeout"]) {
-  test(`helper preserves the old lock on injected ${kind} failure`, darwin, async t => {
+  test(`disabled helper refuses before injected ${kind} failure`, darwin, async t => {
     const f = fixture(t), file = preload(f, kind);
     const previous = process.env.FIXTURE_FAULT;
     process.env.FIXTURE_FAULT = kind;
     try {
       const result = await launch(f, { preload: file, timeout: kind === "timeout" ? 300 : 7500 }).child.closed;
-      assert.notEqual(result.code, 0, result.output);
-      assert.deepEqual(fs.readFileSync(f.lock), f.bytes);
-      assert.equal(fs.lstatSync(f.lock, { bigint: true }).ino, f.before.ino);
+      assertDisabled(f, result);
     } finally {
       if (previous === undefined) delete process.env.FIXTURE_FAULT;
       else process.env.FIXTURE_FAULT = previous;
@@ -214,17 +219,12 @@ for (const kind of ["fsync", "link", "lock", "timeout"]) {
   });
 }
 
-test("parallel migration processes share one native guard", darwin, async t => {
-  const f = fixture(t), first = launch(f, { gate: "transition-synced" });
-  await atGate(first, "transition-synced");
-  const second = await launch(f, { timeout: 300 }).child.closed;
-  assert.notEqual(second.code, 0, second.output);
-  assert.match(second.output, /guard acquisition timed out/i);
-  assert.deepEqual(fs.readFileSync(f.lock), f.bytes);
-  first.child.kill("SIGCONT");
-  const finished = await first.child.closed;
-  assert.equal(finished.code, 0, finished.errors + finished.output);
-  assertBackup(f);
+test("parallel disabled migration processes preserve the old lock", darwin, async t => {
+  const f = fixture(t), first = launch(f, { gate: "transition-synced" }), second = launch(f, { timeout: 300 });
+  const [a, b] = await Promise.all([first.child.closed, second.child.closed]);
+  assertDisabled(f, a);
+  assertDisabled(f, b);
+  assert.doesNotMatch(a.output, /PAUSE:/);
 });
 
 test("helper refuses a preexisting hardlink without altering either name", darwin, async t => {
@@ -254,15 +254,17 @@ test("helper refuses a symbolic legacy lock without touching its target", darwin
   }
 });
 
-test("helper refuses a corrupt transition marker and retains the old lock", darwin, async t => {
-  const f = fixture(t), owner = launch(f, { gate: "transition-synced" });
-  await atGate(owner, "transition-synced");
-  owner.child.kill("SIGKILL");
-  await owner.child.closed;
-  const marker = path.join(f.stateDir, ".darwin-legacy-migration", "transition.json");
-  fs.writeFileSync(marker, "{corrupt");
+test("disabled helper preserves a corrupt transition marker and old lock", darwin, async t => {
+  const f = fixture(t), directory = path.join(f.stateDir, ".darwin-legacy-migration");
+  fs.mkdirSync(directory, { mode: 0o700 });
+  const marker = path.join(directory, "transition.json"), bytes = Buffer.from("{corrupt");
+  fs.writeFileSync(marker, bytes, { mode: 0o600 });
+  const before = fs.lstatSync(marker, { bigint: true });
   const result = await launch(f).child.closed;
   assert.notEqual(result.code, 0, result.output);
+  assert.match(result.output, /requires the fixed v4 state migration/i);
   assert.deepEqual(fs.readFileSync(f.lock), f.bytes);
-  assert.equal(fs.readFileSync(marker, "utf8"), "{corrupt");
+  assert.equal(fs.lstatSync(f.lock, { bigint: true }).ino, f.before.ino);
+  assert.equal(fs.lstatSync(marker, { bigint: true }).ino, before.ino);
+  assert.deepEqual(fs.readFileSync(marker), bytes);
 });

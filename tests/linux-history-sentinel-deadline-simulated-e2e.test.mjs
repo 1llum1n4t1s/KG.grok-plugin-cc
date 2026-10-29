@@ -135,11 +135,16 @@ for (const scenario of ["legacy-root", "future", "expired", "late-ready", "ack-l
         await new Promise(resolve => setTimeout(resolve, 20));
       }
       assert.match(evidence, /^ready-open-race-started$/m, "the read-only open must reach the post-syscall gate");
-      assert.ok(evidence.indexOf("root-lock-closed\n") >= 0 && evidence.indexOf("root-lock-closed\n") < evidence.indexOf("ready-open-race-started\n"),
-        "this race requires the root lock close to precede the read-only open");
+      const rootClosed = evidence.indexOf("root-lock-closed\n"), readyOpened = evidence.indexOf("ready-read-open\n");
+      const raceStarted = evidence.indexOf("ready-open-race-started\n");
+      assert.ok(rootClosed >= 0 && rootClosed < readyOpened && readyOpened < raceStarted,
+        "the root lock must close before the successful read-only open and its post-syscall gate");
+      assert.ok(fs.existsSync(visible), "the observer publishes the visible marker only after the read-only open succeeds");
+      assert.doesNotMatch(evidence, /^ready-open-race-returned$/m, "the open wrapper must remain gated during verification");
       const during = verifier();
       fs.writeFileSync(verifyRelease, "release", { flag: "wx", mode: 0o600 });
-      assert.notEqual(during.status, 0, "a verifier must reject while the successful open has not yet returned");
+      assert.equal(during.status, 0, `the successful open already holds the read-only FD: ${during.stderr}`);
+      assert.equal(during.stdout, "verified\n");
       const result = await closed;
       assert.equal(result.code, 0, `a fully published sentinel must start: ${stderr}`);
       const after = verifier(); assert.equal(after.status, 0, `the verifier must accept after publication: ${after.stderr}`);

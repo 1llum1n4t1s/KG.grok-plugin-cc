@@ -13,7 +13,7 @@ export function withWorkspaceDeadline(deadline, run) {
   return WORKSPACE_DEADLINE.run(Math.min(deadline, inherited ?? Infinity), run);
 }
 
-/** @param {{ deadline?: number }} options */
+/** @param {{ deadline?: number, strict?: boolean }} options */
 export function resolveWorkspaceRoot(cwd, options = {}) {
   const inherited = WORKSPACE_DEADLINE.getStore();
   if (inherited !== undefined) {
@@ -25,8 +25,8 @@ export function resolveWorkspaceRoot(cwd, options = {}) {
   try {
     return ensureGitRepository(cwd, options);
   } catch (error) {
-    // 期限付き解決のtimeout/実行不能で保存先をcwdへ変えてはならない。
-    if (options.deadline !== undefined && error?.code !== "GROK_NOT_GIT_REPOSITORY") throw error;
+    // 厳密な解決や期限付き解決の失敗で保存先をcwdへ変えてはならない。
+    if ((options.strict || options.deadline !== undefined) && error?.code !== "GROK_NOT_GIT_REPOSITORY") throw error;
     return cwd;
   }
 }

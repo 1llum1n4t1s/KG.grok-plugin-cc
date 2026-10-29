@@ -178,15 +178,31 @@ test("broker startup remains unconfirmed when the sentinel disappears while init
   }
 });
 
+function directorySnapshot(dir) {
+  const stat = fs.lstatSync(dir, { bigint: true });
+  const identity = { dev: stat.dev, ino: stat.ino, mode: stat.mode, size: stat.size, mtimeNs: stat.mtimeNs };
+  if (stat.isSymbolicLink()) return { identity, link: fs.readlinkSync(dir) };
+  if (stat.isDirectory()) return { identity, entries: Object.fromEntries(fs.readdirSync(dir).sort().map(name => [name, directorySnapshot(path.join(dir, name))])) };
+  return { identity, bytes: fs.readFileSync(dir) };
+}
+
 for (const component of ["namespace", "epoch"]) {
   test(`broker save refuses a symlinked ${component} directory`, { skip: !linux }, t => {
     const f = fixture(t), epoch = JSON.parse(fs.readFileSync(path.join(f.state, "state.lock", "protocol.json"), "utf8")).epoch;
-    const target = path.join(path.dirname(f.cwd), "foreign"), root = path.join(f.state, "broker-v3");
+    const fixtureRoot = path.dirname(f.cwd), target = path.join(fixtureRoot, "foreign"), root = path.join(f.state, "broker-v3");
+    const replaced = component === "namespace" ? root : path.join(root, epoch);
+    const saved = path.join(fixtureRoot, `preserved-broker-${component}`);
     fs.mkdirSync(target);
-    if (component === "namespace") fs.symlinkSync(target, root, "dir");
-    else { fs.mkdirSync(root); fs.symlinkSync(target, path.join(root, epoch), "dir"); }
-    assert.throws(() => saveBrokerSession(f.cwd, { epoch, generation: "test", endpoint: "unix:/invalid", pid: process.pid }), /directory|symlink|invalid/i);
-    assert.deepEqual(fs.readdirSync(target), []);
+    fs.writeFileSync(path.join(target, "untouched"), "foreign state");
+    fs.renameSync(replaced, saved);
+    const savedBefore = directorySnapshot(saved), targetBefore = directorySnapshot(target);
+    fs.symlinkSync(target, replaced, "dir");
+    const linkBefore = directorySnapshot(replaced);
+    assert.throws(() => saveBrokerSession(f.cwd, { epoch, generation: "test", endpoint: "unix:/invalid", pid: process.pid }),
+      { message: "Broker admission journal broker state directory is invalid or a symlink." });
+    assert.deepEqual(directorySnapshot(replaced), linkBefore);
+    assert.deepEqual(directorySnapshot(target), targetBefore);
+    assert.deepEqual(directorySnapshot(saved), savedBefore);
   });
 }
 
@@ -343,7 +359,12 @@ fs.openSync=function(file,flags,...args) {
     throw Object.assign(new Error('isolated fixture rejected broker spawn'),{code:'EIO'});
   }
   const fd=originalOpen.call(this,file,flags,...args);
-  if(process.env.TEST_GATE_ROLE==='direct' && String(file)===process.env.TEST_NATIVE_LOCK) lockHandles.add(fd);
+  if(process.env.TEST_GATE_ROLE==='direct') {
+    if(process.platform==='linux') {
+      const stack=new Error().stack;
+      if(String(file)===process.env.TEST_STATE_DIR && stack.split('\n')[2]?.includes('withLinuxRootLock') && stack.includes('reserveDirectStart')) lockHandles.add(fd);
+    } else if(String(file)===process.env.TEST_NATIVE_LOCK) lockHandles.add(fd);
+  }
   return fd;
 };
 require('node:module').syncBuiltinESMExports();
@@ -352,7 +373,7 @@ require('node:module').syncBuiltinESMExports();
 function gatedWorker(f, preload, role, gate, source) {
   const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
     cwd: f.cwd, env: { ...process.env, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, TEST_GATE_ROLE: role,
-      TEST_GATE: gate, TEST_NATIVE_LOCK: path.join(f.state, "state.lock", "native.lock"), TEST_FAKE: f.fake }, stdio: ["ignore", "pipe", "pipe"]
+      TEST_GATE: gate, TEST_STATE_DIR: f.state, TEST_NATIVE_LOCK: path.join(f.state, "state.lock", "native.lock"), TEST_FAKE: f.fake }, stdio: ["ignore", "pipe", "pipe"]
   });
   let stdout = "", stderr = "";
   const closed = new Promise((resolve, reject) => { child.once("error", reject); child.once("close", code => resolve(code)); });

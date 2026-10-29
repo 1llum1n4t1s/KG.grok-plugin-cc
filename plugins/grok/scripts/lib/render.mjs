@@ -144,8 +144,8 @@ function isStructuredReviewStoredResult(storedJob) {
     return false;
   }
   return (
-    Object.prototype.hasOwnProperty.call(result, "result") ||
-    Object.prototype.hasOwnProperty.call(result, "parseError")
+    Object.hasOwn(result, "result") ||
+    Object.hasOwn(result, "parseError")
   );
 }
 
@@ -276,7 +276,7 @@ function describeGrokAuth(auth) {
     const method = auth.method === "api-key" ? "XAI_API_KEY" : "browser login";
     return auth.currentModelId ? `signed in via ${method} (model: ${auth.currentModelId})` : `signed in via ${method}`;
   }
-  if (auth.reason === "connect-failed" || auth.reason === "check-failed") {
+  if (auth.reason === "connect-failed" || auth.reason === "check-failed" || auth.reason === "grok-missing") {
     return auth.detail ? `could not be checked — ${auth.detail}` : "could not be checked";
   }
   return auth.detail ? `not signed in — ${auth.detail}` : `not signed in (${auth.reason ?? "unknown reason"})`;
@@ -292,8 +292,8 @@ export function renderSetupReport(report) {
     `- node: ${report.node.detail}`,
     `- grok: ${describeGrokAvailability(report.grok)}`,
     `- auth: ${describeGrokAuth(report.auth)}`,
-    `- shared broker: ${report.sessionRuntime?.brokerActive ? `active (${report.sessionRuntime.brokerEndpoint})` : "not running"}`,
-    `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    `- shared broker: ${report.sessionRuntime == null ? "unknown" : report.sessionRuntime.brokerActive ? `active (${report.sessionRuntime.brokerEndpoint})` : "not running"}`,
+    `- review gate: ${report.reviewGateEnabled == null ? "unknown" : report.reviewGateEnabled ? "enabled" : "disabled"}`,
     ""
   ];
 

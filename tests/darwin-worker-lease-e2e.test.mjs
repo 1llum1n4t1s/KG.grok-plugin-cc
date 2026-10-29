@@ -7,7 +7,7 @@ import { fork, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { buildStatusSnapshot, resolveResultJob } from "../plugins/grok/scripts/lib/job-control.mjs";
 import { getProcessSnapshot } from "../plugins/grok/scripts/lib/process.mjs";
-import { createStateJobReader, loadState, migrateStateLock, readJobFile, resolveJobFile, resolveStateDir, resolveStateFile, updateState, upsertJob, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
+import { createStateJobReader, loadState, migrateStateLock, readJobFile, resolveJobFile, resolveStateDir, resolveStateFile, updateState, withStateSnapshot, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
 import { makeTempDir } from "./helpers.mjs";
 
 // 故障条件: 停止中 worker を終了と断定する、PID 再利用で停止を見逃す、
@@ -68,6 +68,47 @@ function leaseRecord(workspace, id) {
   assert.ok(relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
   assert.ok(indexed.workerLease.dev && indexed.workerLease.ino && indexed.workerLease.stateGeneration);
   return indexed.workerLease;
+}
+
+for (const mismatch of ["grokPromptState", "grokSessionId"]) {
+  test(`status retains conflicting ${mismatch} evidence after a leased worker exits`, darwin, async t => {
+    const { workspace, job } = fixture(t, `turn-evidence-${mismatch}`);
+    const worker = await startWorker(t, job, {});
+    const lease = leaseRecord(workspace, job.id);
+    const indexedEvidence = { grokPromptState: "terminal", grokSessionId: "turn-index" };
+    const detailEvidence = { ...indexedEvidence, [mismatch]: mismatch === "grokPromptState" ? "not-sent" : "turn-detail" };
+    updateState(workspace, (state, context) => {
+      const indexed = state.jobs.find(value => value.id === job.id);
+      Object.assign(indexed, indexedEvidence);
+      writeJobFile(workspace, job.id, { ...readJobFile(resolveJobFile(workspace, job.id)), ...detailEvidence }, context);
+    });
+    assert.equal(worker.child.kill("SIGKILL"), true);
+    await worker.closed;
+    assert.equal(worker.child.signalCode, "SIGKILL");
+    const cli = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [cli, "status", "--cwd", workspace, "--json", "--all"], {
+      env: { ...process.env, CODEX_THREAD_ID: "", GROK_COMPANION_SESSION_ID: "" }, encoding: "utf8", timeout: 30000
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(result.stdout);
+    const reported = [report.latestFinished, ...report.recent, ...report.running].find(value => value?.id === job.id);
+    assert.equal(reported.status, "failed");
+    assert.equal(reported.terminationPending, true);
+    const indexed = loadState(workspace).jobs.find(value => value.id === job.id);
+    const stored = readJobFile(resolveJobFile(workspace, job.id));
+    for (const record of [indexed, stored]) {
+      assert.equal(record.status, "failed");
+      assert.equal(record.terminationPending, true);
+      assert.equal(record.pid, null);
+      assert.equal(record.workerStopProof, "darwin-lease-released");
+      assert.equal(record.workerStopLeaseId, lease.id);
+      assert.deepEqual(record.workerLease, lease);
+    }
+    assert.equal(indexed.grokPromptState, indexedEvidence.grokPromptState);
+    assert.equal(indexed.grokSessionId, indexedEvidence.grokSessionId);
+    assert.equal(stored.grokPromptState, detailEvidence.grokPromptState);
+    assert.equal(stored.grokSessionId, detailEvidence.grokSessionId);
+  });
 }
 
 test("a naturally identified stopped worker owns the same lease in both records", darwin, async t => {
@@ -164,11 +205,11 @@ test("dead worker is reconciled even when its numeric PID and start key appear t
   const snapshot = getProcessSnapshot(other.child.pid);
   assert.ok(snapshot?.startKey);
   // 置換PIDに同じ開始キーが見える状況を、両原本に反映して模擬する。
-  updateState(workspace, state => {
+  updateState(workspace, (state, context) => {
     const indexed = state.jobs.find(entry => entry.id === job.id);
     const stored = readJobFile(resolveJobFile(workspace, job.id));
     Object.assign(indexed, { pid: other.child.pid, processStartKey: snapshot.startKey });
-    writeJobFile(workspace, job.id, { ...stored, pid: other.child.pid, processStartKey: snapshot.startKey });
+    writeJobFile(workspace, job.id, { ...stored, pid: other.child.pid, processStartKey: snapshot.startKey }, context);
   });
   status(workspace);
   assert.equal(loadState(workspace).jobs.find(entry => entry.id === job.id).status, "failed");
@@ -217,9 +258,13 @@ test("a missing detail record does not turn an uncertain worker into a confirmed
 test("a delayed claim cannot replace cancellation published after lease acquisition", darwin, async t => {
   const { workspace, job } = fixture(t, "delayed-claim");
   const worker = await pauseBeforeClaim(t, job);
-  const cancelled = { ...job, status: "cancelled", phase: "cancelled", createdAt: new Date().toISOString() };
-  writeJobFile(workspace, job.id, cancelled);
-  upsertJob(workspace, cancelled);
+  updateState(workspace, (state, context) => {
+    const indexed = state.jobs.find(entry => entry.id === job.id);
+    const stored = readJobFile(resolveJobFile(workspace, job.id));
+    const patch = { status: "cancelled", phase: "termination-pending", terminationPending: true };
+    writeJobFile(workspace, job.id, { ...stored, ...patch }, context);
+    Object.assign(indexed, patch);
+  });
   const before = fs.readFileSync(resolveJobFile(workspace, job.id), "utf8");
   releasePaused(worker);
   const [result] = await once(worker.child, "message");
@@ -249,28 +294,24 @@ test("queued cancellation rejects a delayed claimant and waits for the worker to
   assert.equal(readJobFile(resolveJobFile(workspace, job.id)).terminationPending, false);
 });
 
-test("a delayed claimant stays rejected even after cancellation and history pruning", darwin, async t => {
+test("a delayed claimant stays rejected while normal history updates preserve its pending cancellation", darwin, async t => {
   const { workspace, job } = fixture(t, "pruned-cancel-before-claim");
   const worker = await pauseBeforeClaim(t, job);
   assert.equal(readJobFile(resolveJobFile(workspace, job.id)).status, "queued");
   const cli = new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url).pathname;
   await runCommand(t, cli, ["cancel", "--cwd", workspace, "--json", job.id]);
   assert.equal(readJobFile(resolveJobFile(workspace, job.id)).status, "cancelled");
-  updateState(workspace, state => {
-    // 旧版の誤った never-started 確定を模擬し、上限整理が対象にできる状態にする。
-    const indexed = state.jobs.find(entry => entry.id === job.id);
-    const stored = readJobFile(resolveJobFile(workspace, job.id));
-    const legacyProof = { phase: "cancelled", terminationPending: false, workerStopConfirmed: true,
-      workerStopProof: "never-started", workerStopProcessStartKey: null };
-    Object.assign(indexed, legacyProof);
-    writeJobFile(workspace, job.id, { ...stored, ...legacyProof });
+  updateState(workspace, (state, context) => {
     for (let i = 0; i < 55; i += 1) state.jobs.push({ id: `later-${i}`, status: "completed", updatedAt: `9999-01-01T00:00:${String(i).padStart(2, "0")}.000Z` });
   });
   releasePaused(worker);
   const [result] = await once(worker.child, "message");
   assert.equal(result.type, "rejected");
   const remaining = loadState(workspace).jobs.find(entry => entry.id === job.id);
-  assert.ok(!remaining || remaining.status === "cancelled");
+  assert.equal(remaining?.status, "cancelled");
+  assert.equal(remaining.terminationPending, true);
+  assert.notEqual(remaining.workerStopConfirmed, true);
+  assert.equal(readJobFile(resolveJobFile(workspace, job.id)).terminationPending, true);
 });
 
 test("two processes racing to claim the same ID preserve the winner's lease", darwin, async t => {
@@ -294,7 +335,7 @@ for (const kind of ["missing", "different-id"]) test(`partial lease ${kind} rema
   const lease = leaseRecord(workspace, job.id);
   const stored = readJobFile(resolveJobFile(workspace, job.id));
   stored.workerLease = kind === "missing" ? null : { ...lease, id: "00000000-0000-4000-8000-000000000000" };
-  writeJobFile(workspace, job.id, stored);
+  updateState(workspace, (_state, context) => { writeJobFile(workspace, job.id, stored, context); });
   const before = fs.readFileSync(resolveJobFile(workspace, job.id), "utf8");
   try { status(workspace); } catch { /* 矛盾は失敗または保留として扱う。 */ }
   assert.equal(loadState(workspace).jobs.find(entry => entry.id === job.id).status, "running");
@@ -305,32 +346,36 @@ test("loss of both lease attributes with a present PID cannot turn a start-key m
   const { workspace, job } = fixture(t, "both-leases-missing");
   await startWorker(t, job);
   leaseRecord(workspace, job.id);
-  updateState(workspace, state => {
+  updateState(workspace, (state, context) => {
     const indexed = state.jobs.find(entry => entry.id === job.id);
     const stored = readJobFile(resolveJobFile(workspace, job.id));
     indexed.workerLease = null;
-    writeJobFile(workspace, job.id, { ...stored, workerLease: null });
+    writeJobFile(workspace, job.id, { ...stored, workerLease: null }, context);
   });
   try { status(workspace); } catch { /* 新旧を識別できなければエラーでも保留でもよい。 */ }
   assert.equal(loadState(workspace).jobs.find(entry => entry.id === job.id).status, "running");
   assert.equal(readJobFile(resolveJobFile(workspace, job.id)).status, "running");
 });
 
-test("ESRCH permits an unidentified worker to be reconciled when both records agree", darwin, async t => {
+test("ESRCH alone cannot reconcile an unleased worker even when both records agree", darwin, async t => {
   const { workspace, job } = fixture(t, "unleased-absent");
   const worker = await startWorker(t, job, {});
   leaseRecord(workspace, job.id);
-  updateState(workspace, state => {
+  updateState(workspace, (state, context) => {
     const indexed = state.jobs.find(entry => entry.id === job.id);
     const stored = readJobFile(resolveJobFile(workspace, job.id));
     indexed.workerLease = null;
-    writeJobFile(workspace, job.id, { ...stored, workerLease: null });
+    writeJobFile(workspace, job.id, { ...stored, workerLease: null }, context);
   });
   worker.child.kill("SIGKILL");
   await worker.closed;
+  const beforeIndex = loadState(workspace).jobs.find(entry => entry.id === job.id);
+  const beforeDetail = fs.readFileSync(resolveJobFile(workspace, job.id), "utf8");
   status(workspace);
-  assert.equal(loadState(workspace).jobs.find(entry => entry.id === job.id).status, "failed");
-  assert.equal(readJobFile(resolveJobFile(workspace, job.id)).status, "failed");
+  assert.deepEqual(loadState(workspace).jobs.find(entry => entry.id === job.id), beforeIndex);
+  assert.equal(fs.readFileSync(resolveJobFile(workspace, job.id), "utf8"), beforeDetail);
+  assert.equal(beforeIndex.status, "running");
+  assert.notEqual(beforeIndex.workerStopConfirmed, true);
 });
 
 test("ESRCH is not accepted when the two job records disagree about the owner PID", darwin, async t => {
@@ -339,11 +384,11 @@ test("ESRCH is not accepted when the two job records disagree about the owner PI
   leaseRecord(workspace, job.id);
   worker.child.kill("SIGKILL");
   await worker.closed;
-  updateState(workspace, state => {
+  updateState(workspace, (state, context) => {
     const indexed = state.jobs.find(entry => entry.id === job.id);
     const stored = readJobFile(resolveJobFile(workspace, job.id));
     Object.assign(indexed, { pid: 2147483647, workerLease: null });
-    writeJobFile(workspace, job.id, { ...stored, workerLease: null });
+    writeJobFile(workspace, job.id, { ...stored, workerLease: null }, context);
   });
   const before = fs.readFileSync(resolveJobFile(workspace, job.id), "utf8");
   try { status(workspace); } catch { /* 元ownerが一意でなければエラーでも保留でもよい。 */ }
@@ -354,8 +399,10 @@ test("ESRCH is not accepted when the two job records disagree about the owner PI
 test("legacy completed results remain readable without a worker lease", darwin, t => {
   const { workspace, job } = fixture(t, "legacy-finished");
   const completed = { ...job, status: "completed", phase: "done", rendered: "legacy result" };
-  writeJobFile(workspace, job.id, completed);
-  upsertJob(workspace, completed);
+  updateState(workspace, (state, context) => {
+    writeJobFile(workspace, job.id, completed, context);
+    state.jobs.unshift(completed);
+  });
   assert.equal(resolveResultJob(workspace, job.id).job.status, "completed");
   assert.equal(readJobFile(resolveJobFile(workspace, job.id)).rendered, "legacy result");
 });
@@ -392,13 +439,13 @@ for (const command of ["status", "SessionEnd"]) for (const damage of ["missing",
   assert.equal(worker.child.exitCode, null);
 });
 
-test("history pruning preserves a live lease when only detail still references it", darwin, async t => {
+test("normal history updates preserve a live lease when only detail still references it", darwin, async t => {
   const { workspace, job } = fixture(t, "detail-only-lease");
   const worker = await startWorker(t, job, {});
   const lease = leaseRecord(workspace, job.id);
   const detailFile = resolveJobFile(workspace, job.id);
   const detailBefore = fs.readFileSync(detailFile, "utf8");
-  updateState(workspace, state => {
+  updateState(workspace, (state, context) => {
     const indexed = state.jobs.find(entry => entry.id === job.id);
     Object.assign(indexed, { status: "completed", terminationPending: false, workerLease: null, updatedAt: "2000-01-01T00:00:00.000Z" });
     for (let i = 0; i < 55; i += 1) state.jobs.push({ id: `detail-only-history-${i}`, status: "completed", updatedAt: "9999-01-01T00:00:00.000Z" });
@@ -415,7 +462,7 @@ test("an explicit index removal preserves a detail-only live lease when its ledg
   const lease = leaseRecord(workspace, job.id);
   const detailFile = resolveJobFile(workspace, job.id);
   const detailBefore = fs.readFileSync(detailFile, "utf8");
-  updateState(workspace, state => {
+  updateState(workspace, (state, context) => {
     state.jobs.find(entry => entry.id === job.id).workerLease = null;
   });
   // 不整合を隔離 test root 内で模擬し、片側 lease を ledger の空きだけで捨てない。
@@ -425,7 +472,7 @@ test("an explicit index removal preserves a detail-only live lease when its ledg
   ledger.slots[lease.slot] = { slot: lease.slot, state: "free" };
   fs.writeFileSync(ledgerFile, `${JSON.stringify(ledger)}\n`);
   try {
-    updateState(workspace, state => { state.jobs = state.jobs.filter(entry => entry.id !== job.id); });
+    updateState(workspace, (state, context) => { state.jobs = state.jobs.filter(entry => entry.id !== job.id); });
   } catch { /* 不整合を明示的に拒否する動作も許す。 */ }
   assert.ok(loadState(workspace).jobs.some(entry => entry.id === job.id));
   assert.equal(fs.readFileSync(detailFile, "utf8"), detailBefore);
@@ -436,8 +483,10 @@ test("an explicit index removal preserves a detail-only live lease when its ledg
 for (const kind of ["oversized state", "oversized detail", "FIFO detail", "symlink detail", "hardlink state", "hardlink detail", "world-writable state", "world-writable detail"]) test(`state operations reject ${kind} before an unsafe read`, darwin, async t => {
   const { workspace, job } = fixture(t, `read-${kind.replaceAll(" ", "-")}`);
   const completed = { ...job, status: "completed", phase: "done", rendered: "preserve" };
-  writeJobFile(workspace, job.id, completed);
-  upsertJob(workspace, completed);
+  updateState(workspace, (state, context) => {
+    writeJobFile(workspace, job.id, completed, context);
+    state.jobs.unshift(completed);
+  });
   const isState = kind.endsWith(" state");
   const probePath = isState ? resolveStateFile(workspace) : resolveJobFile(workspace, job.id);
   fs.renameSync(probePath, `${probePath}.preserved-test-original`);
@@ -490,6 +539,7 @@ for (const kind of ["different-inode", "directory"]) test(`lease path ${kind} do
 
 async function pauseBeforeClaim(t, job) {
   const ready = path.join(job.workspaceRoot, `${job.id}-claim-ready`), release = path.join(job.workspaceRoot, `${job.id}-claim-release`);
+  const stateDir = resolveStateDir(job.workspaceRoot);
   const worker = manage(t, fork(new URL("./fixtures/darwin-worker-lease-worker.mjs", import.meta.url), [], {
     stdio: ["ignore", "ignore", "inherit", "ipc"]
   }));
@@ -497,23 +547,56 @@ async function pauseBeforeClaim(t, job) {
   const lease = await waitGate(worker, ready);
   assert.equal(typeof lease?.path, "string");
   assert.equal(path.isAbsolute(lease.path), true);
-  const relative = path.relative(resolveStateDir(job.workspaceRoot), lease.path);
+  const relative = path.relative(stateDir, lease.path);
   assert.ok(relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
   return { ...worker, lease, release };
 }
 
 async function pauseAfterLeaseCreation(t, job) {
   const ready = path.join(job.workspaceRoot, `${job.id}-lease-ready`), release = path.join(job.workspaceRoot, `${job.id}-lease-release`);
+  const stateDir = resolveStateDir(job.workspaceRoot);
+  const gate = path.join(job.workspaceRoot, `${job.id}-lease-gate.cjs`);
+  fs.writeFileSync(gate, String.raw`
+const fs = require("node:fs"), path = require("node:path"), cp = require("node:child_process");
+const { syncBuiltinESMExports } = require("node:module");
+const original = cp.spawnSync; let gated = false;
+cp.spawnSync = function(command, args, options, ...rest) {
+  const fd = options?.stdio?.[3];
+  if (!gated && command === "/usr/bin/lockf" && Number.isInteger(fd)) {
+    const stat = fs.fstatSync(fd, { bigint: true }), bytes = Buffer.alloc(36);
+    let id = "";
+    try { if (fs.readSync(fd, bytes, 0, bytes.length, 0) === bytes.length) id = bytes.toString("utf8"); } catch {}
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+      const root = fs.realpathSync.native(process.env.GROK_TEST_STATE_DIR), directory = path.join(root, "worker-leases");
+      const name = fs.readdirSync(directory).find(name => {
+        if (!/^slot-[0-9]{3}\.lease$/.test(name)) return false;
+        const current = fs.lstatSync(path.join(directory, name), { bigint: true });
+        return current.dev === stat.dev && current.ino === stat.ino;
+      });
+      if (!name) throw Error("fixture could not identify the created lease by inode");
+      gated = true;
+      const dir = fs.lstatSync(directory, { bigint: true });
+      const epoch = JSON.parse(fs.readFileSync(path.join(root,"state.lock","protocol.json"),"utf8")).epoch;
+      const lease = { id, path: path.join(directory,name), slot: Number(name.slice(5,8)), dev: String(stat.dev), ino: String(stat.ino),
+        stateGeneration: epoch, directoryDev: String(dir.dev), directoryIno: String(dir.ino) };
+      fs.writeFileSync(process.env.GROK_TEST_LEASE_READY, JSON.stringify(lease));
+      const deadline = Date.now() + 15000;
+      while (!fs.existsSync(process.env.GROK_TEST_LEASE_RELEASE) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
+      if (!fs.existsSync(process.env.GROK_TEST_LEASE_RELEASE)) throw Error("lease test gate timed out");
+    }
+  }
+  return original.call(this, command, args, options, ...rest);
+};
+syncBuiltinESMExports();`);
   const worker = manage(t, fork(new URL("./fixtures/darwin-worker-lease-worker.mjs", import.meta.url), [], {
-    stdio: ["ignore", "ignore", "inherit", "ipc"],
-    execArgv: ["--require", fileURLToPath(new URL("./fixtures/darwin-lockf-test-gate.cjs", import.meta.url))],
-    env: { ...process.env, GROK_TEST_STATE_DIR: resolveStateDir(job.workspaceRoot), GROK_TEST_LEASE_READY: ready, GROK_TEST_LEASE_RELEASE: release }
+    stdio: ["ignore", "ignore", "inherit", "ipc"], execArgv: ["--require", gate],
+    env: { ...process.env, GROK_TEST_STATE_DIR: stateDir, GROK_TEST_LEASE_READY: ready, GROK_TEST_LEASE_RELEASE: release }
   }));
   worker.child.send({ job });
   const lease = await waitGate(worker, ready);
   assert.equal(typeof lease?.path, "string");
   assert.equal(path.isAbsolute(lease.path), true);
-  const relative = path.relative(resolveStateDir(job.workspaceRoot), lease.path);
+  const relative = path.relative(stateDir, lease.path);
   assert.ok(relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
   return { ...worker, lease, release };
 }
@@ -529,48 +612,97 @@ async function waitGate(worker, ready) {
 
 function releasePaused(worker) { fs.writeFileSync(worker.release, "release"); }
 
-async function sweep(workspace) {
-  const { sweepDarwinWorkerLeases } = await import("../plugins/grok/scripts/lib/darwin-lease-sweep.mjs");
-  return sweepDarwinWorkerLeases(workspace, { maxEntries: 256, timeoutMs: 30000 });
+function assertStateMutexContended(lease) {
+  const stateDir = path.dirname(path.dirname(lease.path));
+  const file = path.join(stateDir, "state.lock", "native.lock");
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const probe = spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "3"], { stdio: ["ignore", "pipe", "pipe", fd], timeout: 2000 });
+    assert.ifError(probe.error);
+    assert.equal(probe.signal, null);
+    assert.equal(probe.status, 75, "the fixture must hold the actual state mutex");
+  } finally { fs.closeSync(fd); }
 }
 
-test("sweep preserves a pre-claim lease held by a delayed live worker", darwin, async t => {
+async function sweep(workspace, maxEntries = 256, timeoutMs = 30000) {
+  const { sweepDarwinWorkerLeases } = await import("../plugins/grok/scripts/lib/darwin-lease-sweep.mjs");
+  return sweepDarwinWorkerLeases(workspace, { maxEntries, timeoutMs });
+}
+
+// 停止済み fixture の予約 slot だけを次に検査し、無関係な 255 slot の走査を避ける。
+function selectStoppedReservation(workspace, jobId, lease) {
+  withStateSnapshot(workspace, (state, context) => {
+    assert.equal(state.jobs.some(entry => entry.id === jobId), false);
+    const file = path.join(context.stateDir, "darwin-lease-ledger.json");
+    const ledger = JSON.parse(fs.readFileSync(file, "utf8"));
+    const entry = ledger.slots[lease.slot];
+    assert.equal(entry.state, "reserved");
+    assert.equal(entry.jobId, jobId);
+    assert.equal(entry.lease, undefined);
+    ledger.cursor = lease.slot;
+    context.check();
+    const fd = fs.openSync(file, "r+");
+    try { fs.ftruncateSync(fd, 0); fs.writeFileSync(fd, JSON.stringify(ledger)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    context.check();
+  });
+}
+
+test("a bounded sweep preserves the published lease held by a delayed live claimant", darwin, async t => {
   const { workspace, job } = fixture(t, "sweep-live-claim");
   const worker = await pauseBeforeClaim(t, job);
   const before = fs.statSync(worker.lease.path, { bigint: true });
-  await sweep(workspace);
+  const fd = fs.openSync(worker.lease.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const probe = spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "3"], { stdio: ["ignore", "pipe", "pipe", fd], timeout: 2000 });
+    assert.ifError(probe.error); assert.equal(probe.signal, null); assert.equal(probe.status, 75, "live worker must hold its lease");
+  } finally { fs.closeSync(fd); }
+  const result = await sweep(workspace, 1, 5000);
+  assert.equal(result.examined, 1);
   const after = fs.statSync(worker.lease.path, { bigint: true });
   assert.equal(after.dev, before.dev);
   assert.equal(after.ino, before.ino);
+  assert.equal(readJobFile(resolveJobFile(workspace, job.id)).status, "queued");
   releasePaused(worker);
   const [started] = await once(worker.child, "message");
   assert.equal(started.type, "started");
   assert.equal(leaseRecord(workspace, job.id).id, worker.lease.id);
 });
 
-test("sweep reclaims an unreferenced pre-claim lease after its worker dies", darwin, async t => {
+test("sweep preserves an incomplete pre-claim reservation after its worker dies", darwin, async t => {
   const { workspace, job } = fixture(t, "sweep-dead-claim");
   const worker = await pauseAfterLeaseCreation(t, job);
-  assert.equal(fs.statSync(worker.lease.path).isFile(), true);
-  worker.child.kill("SIGKILL");
+  const before = fs.readFileSync(worker.lease.path);
+  assert.equal(worker.child.kill("SIGKILL"), true);
   await worker.closed;
-  await sweep(workspace);
-  assert.equal(fs.existsSync(worker.lease.path), false);
+  selectStoppedReservation(workspace, job.id, worker.lease);
+  const result = await sweep(workspace, 1, 5000);
+  assert.equal(result.examined, 1);
+  assert.equal(result.reclaimed, 0);
+  assert.equal(result.uncertain, 1);
+  assert.deepEqual(fs.readFileSync(worker.lease.path), before);
   assert.equal(loadState(workspace).jobs.some(entry => entry.id === job.id), false);
 });
 
-test("a late lease claimant cannot publish an inode already reclaimed by sweep", darwin, async t => {
-  const { workspace, job } = fixture(t, "sweep-wins-before-lock");
+test("sweep cannot pass the state mutex while a lease reservation is being created", darwin, async t => {
+  const { workspace, job } = fixture(t, "sweep-waits-for-reservation");
   const worker = await pauseAfterLeaseCreation(t, job);
-  const leasePath = worker.lease.path;
-  const relative = path.relative(resolveStateDir(workspace), leasePath);
-  assert.ok(path.isAbsolute(leasePath) && relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
-  await sweep(workspace);
-  assert.equal(fs.existsSync(leasePath), false);
+  const before = fs.statSync(worker.lease.path, { bigint: true });
+  assertStateMutexContended(worker.lease);
+  const startedAt = Date.now();
+  await assert.rejects(sweep(workspace, 1, 200), error => {
+    if (/timed out|deadline/i.test(error.message)) return true;
+    assert.match(error.message, /^POSIX state lock utility failed: /);
+    assert.equal(error.cause?.code, "ETIMEDOUT");
+    return true;
+  });
+  assert.ok(Date.now() - startedAt < 2000, "sweep must respect the state mutex deadline");
+  const after = fs.statSync(worker.lease.path, { bigint: true });
+  assert.equal(after.dev, before.dev); assert.equal(after.ino, before.ino);
+  assert.equal(worker.child.exitCode, null);
   releasePaused(worker);
-  const [result] = await once(worker.child, "message");
-  assert.equal(result.type, "rejected");
-  assert.equal(loadState(workspace).jobs.some(entry => entry.id === job.id), false);
+  const [started] = await once(worker.child, "message");
+  assert.equal(started.type, "started");
+  assert.equal(leaseRecord(workspace, job.id).id, worker.lease.id);
 });
 
 test("sweep preserves an orphan when the state marker changes", darwin, async t => {
@@ -612,6 +744,7 @@ test("lease sweep respects its deadline while another process holds the state mu
   const waitDeadline = Date.now() + 10000;
   while (!fs.existsSync(ready) && Date.now() < waitDeadline) await new Promise(resolve => setTimeout(resolve, 20));
   assert.ok(fs.existsSync(ready));
+  assertStateMutexContended(abandoned.lease);
   const { sweepDarwinWorkerLeases } = await import("../plugins/grok/scripts/lib/darwin-lease-sweep.mjs");
   const started = Date.now();
   await assert.rejects(Promise.resolve().then(() => sweepDarwinWorkerLeases(workspace, { maxEntries: 100, timeoutMs: 200 })));
@@ -619,7 +752,7 @@ test("lease sweep respects its deadline while another process holds the state mu
   assert.equal(fs.statSync(abandoned.lease.path).isFile(), true);
 });
 
-test("a completed record and lease survive history pruning while its worker still holds the lease", darwin, async t => {
+test("normal history updates preserve a completed record and its still-held lease", darwin, async t => {
   const { workspace, job } = fixture(t, "completed-still-alive");
   const worker = await startWorker(t, job, { keepOpenAfterCompletion: true });
   const lease = leaseRecord(workspace, job.id);
@@ -627,21 +760,22 @@ test("a completed record and lease survive history pruning while its worker stil
   const [completed] = await once(worker.child, "message");
   assert.equal(completed.type, "completed");
   assert.equal(loadState(workspace).jobs.find(entry => entry.id === job.id).status, "completed");
-  updateState(workspace, state => {
+  updateState(workspace, (state, context) => {
     for (let i = 0; i < 50; i += 1) {
       const record = { id: `new-finished-${i}`, status: "completed", updatedAt: `9999-01-01T00:00:${String(i).padStart(2, "0")}.000Z` };
-      writeJobFile(workspace, record.id, record);
+      writeJobFile(workspace, record.id, record, context);
       state.jobs.push(record);
     }
   });
-  await sweep(workspace);
+  const scanned = await sweep(workspace, 1, 5000);
+  assert.equal(scanned.examined, 1);
   assert.ok(loadState(workspace).jobs.some(entry => entry.id === job.id));
   assert.equal(fs.statSync(lease.path).isFile(), true);
   worker.child.send("exit");
   await worker.closed;
 });
 
-test("history pruning reclaims a completed worker lease only after the worker exits", darwin, async t => {
+test("normal history updates retain a completed record and its worker lease after exit", darwin, async t => {
   const { workspace, job } = fixture(t, "completed-worker-exited");
   const worker = await startWorker(t, job, {});
   const lease = leaseRecord(workspace, job.id);
@@ -649,19 +783,22 @@ test("history pruning reclaims a completed worker lease only after the worker ex
   const [completed] = await once(worker.child, "message");
   assert.equal(completed.type, "completed");
   await worker.closed;
-  await sweep(workspace);
   assert.equal(fs.statSync(lease.path).isFile(), true, "referenced history keeps its lease");
-  updateState(workspace, state => {
+  updateState(workspace, (state, context) => {
     for (let i = 0; i < 50; i += 1) {
       const record = { id: `new-completed-${i}`, status: "completed", updatedAt: `9999-01-01T00:00:${String(i).padStart(2, "0")}.000Z` };
-      writeJobFile(workspace, record.id, record);
+      writeJobFile(workspace, record.id, record, context);
       state.jobs.push(record);
     }
   });
-  await sweep(workspace);
   updateState(workspace, () => {});
-  assert.equal(loadState(workspace).jobs.some(entry => entry.id === job.id), false);
-  assert.equal(fs.existsSync(lease.path), false);
+  const indexed = loadState(workspace).jobs.find(entry => entry.id === job.id);
+  const stored = readJobFile(resolveJobFile(workspace, job.id));
+  assert.equal(indexed?.status, "completed");
+  assert.equal(stored.status, "completed");
+  assert.deepEqual(indexed.workerLease, lease);
+  assert.deepEqual(stored.workerLease, lease);
+  assert.equal(fs.statSync(lease.path).isFile(), true);
 });
 
 async function runCommand(t, script, args, input = "") {
@@ -742,14 +879,14 @@ test("cancel does not trust a legacy process-exited proof with no PID or lease",
   const { workspace, job } = fixture(t, "unverified-old-proof");
   await startWorker(t, job);
   leaseRecord(workspace, job.id);
-  updateState(workspace, state => {
+  updateState(workspace, (state, context) => {
     const indexed = state.jobs.find(entry => entry.id === job.id);
     const stored = readJobFile(resolveJobFile(workspace, job.id));
     const patch = { status: "cancelled", phase: "termination-pending", terminationPending: true,
       pid: null, workerLease: null, workerStopConfirmed: true, workerStopProof: "process-exited",
       workerStopProcessStartKey: indexed.processStartKey };
     Object.assign(indexed, patch);
-    writeJobFile(workspace, job.id, { ...stored, ...patch });
+    writeJobFile(workspace, job.id, { ...stored, ...patch }, context);
   });
   const cli = new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url).pathname;
   await runCommand(t, cli, ["cancel", "--cwd", workspace, "--json", job.id]);

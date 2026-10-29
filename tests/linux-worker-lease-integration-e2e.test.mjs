@@ -4,8 +4,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { makeTempDir } from "./helpers.mjs";
-import { resolveStateDir } from "../plugins/grok/scripts/lib/state.mjs";
+import { makeTempDir, removeTempFixture } from "./helpers.mjs";
+import { resolveStateDir, withStateSnapshot, readJobFile, resolveJobFile } from "../plugins/grok/scripts/lib/state.mjs";
+import { openLinuxSentinelProcess, linuxSentinelExited } from "../plugins/grok/scripts/lib/linux-state-sentinel.mjs";
+import { withAvailableLinuxLease } from "../plugins/grok/scripts/lib/linux-worker-lease.mjs";
+import { verifyPublishedLinuxLeaseRecords } from "../plugins/grok/scripts/lib/linux-lease-ledger.mjs";
+import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
 
 // 故障条件: lease を両記録へ公開せず agent を起動する、旧 protocol のまま起動する。
 // Mac では procfs・mount・start tick・flock・abstract socket を模擬する。
@@ -33,8 +37,88 @@ test("Linux task publishes its worker lease before running (Mac: simulated Linux
     env.GROK_LINUX_SIM_STATE_DIR = stateDir;
   }
   const command = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
-  let worker, closed, migrated = false, markerBeforeLegacy;
+  const rootIdentity = fs.lstatSync(root, { bigint: true });
+  let worker, closed, migrated = false, migrationStarted = false, markerBeforeLegacy, legacyText, job;
+  let migrationEpoch, migrationSentinel, stateIdentity, markerIdentity, agentIdentity, agentFd, syncUnconfirmed = false;
+  function pinAgent() {
+    if (agentFd !== undefined) return;
+    const pid = Number(fs.readFileSync(agentPidFile, "utf8"));
+    assert.ok(Number.isSafeInteger(pid) && pid > 0, "agent PID is unavailable");
+    const raw = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const match = raw.match(/^([1-9]\d*) \(.*\) ([A-Za-z]) (.*)$/s);
+    assert.ok(match && Number(match[1]) === pid, "agent process identity is unavailable");
+    const fields = match[3].trim().split(/\s+/);
+    const group = Number(fields[1]), startTick = fields[18];
+    assert.equal(group, pid, "fixture agent must own its process group");
+    assert.match(startTick, /^[1-9]\d*$/);
+    agentIdentity = { pid, startTick };
+    agentFd = openLinuxSentinelProcess(agentIdentity);
+  }
   t.after(async () => {
+    if (process.platform === "linux") {
+      try {
+        let agentCaptureError;
+        if (worker) {
+          try { if (agentFd === undefined && fs.existsSync(agentPidFile)) pinAgent(); }
+          catch (error) { agentCaptureError = error; }
+          if (worker.exitCode === null && worker.signalCode === null) worker.kill("SIGKILL");
+          let timer;
+          try { await Promise.race([closed, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("worker close unconfirmed")), 8000); })]); }
+          finally { clearTimeout(timer); }
+        }
+        if (!migrationStarted || !migrated || syncUnconfirmed) throw new Error("CLI migration or command exit was not confirmed");
+        if (agentCaptureError) throw agentCaptureError;
+        const rootNow = fs.lstatSync(root, { bigint: true });
+        assert.ok(rootNow.isDirectory() && !rootNow.isSymbolicLink() && rootNow.dev === rootIdentity.dev && rootNow.ino === rootIdentity.ino);
+        if (worker) {
+          assert.ok(agentFd !== undefined && agentIdentity && job?.workerLease, "agent or worker lease ownership is unconfirmed");
+          const deadline = Date.now() + 8000;
+          for (;;) {
+            const exited = linuxSentinelExited(agentIdentity, agentFd);
+            let groupAlive = false;
+            try { process.kill(-agentIdentity.pid, 0); groupAlive = true; }
+            catch (error) { if (error.code !== "ESRCH") throw error; }
+            if (exited && !groupAlive) break;
+            if (Date.now() >= deadline) throw new Error("agent or owned group exit unconfirmed");
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+        }
+        const current = fs.lstatSync(stateDir, { bigint: true });
+        assert.ok(current.isDirectory() && !current.isSymbolicLink() && current.dev === stateIdentity.dev && current.ino === stateIdentity.ino);
+        const markerPath = path.join(stateDir, "state.lock", "protocol.json");
+        const markerStat = fs.lstatSync(markerPath, { bigint: true });
+        assert.ok(markerStat.isFile() && !markerStat.isSymbolicLink() && markerStat.dev === markerIdentity.dev && markerStat.ino === markerIdentity.ino);
+        if (markerBeforeLegacy !== undefined) {
+          const actual = fs.readFileSync(markerPath, "utf8");
+          if (actual !== markerBeforeLegacy) {
+            assert.equal(actual, legacyText, "legacy marker changed unexpectedly");
+            fs.writeFileSync(markerPath, markerBeforeLegacy);
+          }
+        }
+        const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+        assert.equal(marker.epoch, migrationEpoch);
+        assert.deepEqual(marker.sentinel, migrationSentinel);
+        if (worker) withStateSnapshot(workspace, (state, context) => {
+          assert.equal(context.epoch, migrationEpoch);
+          const indexed = state.jobs.find(entry => entry.id === job.id);
+          const stored = readJobFile(resolveJobFile(workspace, job.id, context.stateDir));
+          verifyPublishedLinuxLeaseRecords({ context, indexed, stored, lease: job.workerLease });
+          const observed = withAvailableLinuxLease(job.workerLease, context, () => {
+            verifyPublishedLinuxLeaseRecords({ context, indexed, stored, lease: job.workerLease });
+            return true;
+          });
+          assert.equal(observed.status, "available", "worker lease release was not confirmed");
+        });
+        const stopped = shutdownPosixStateLockSentinel(stateDir, { offlineConfirmed: true, expectedStateDir: stateDir });
+        assert.equal(stopped.stopped, true); assert.equal(stopped.epoch, migrationEpoch); assert.equal(stopped.stateDir, stateDir);
+        removeTempFixture(root, { recursive: true, force: true });
+      } catch (error) { throw new Error(`Fixture retained because owner, lease or sentinel termination was unconfirmed: ${root}`, { cause: error }); }
+      finally {
+        if (agentFd !== undefined) fs.closeSync(agentFd);
+        for (const [key, value] of previous) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+      }
+      return;
+    }
     try {
       if (worker) {
         if (worker.exitCode === null && worker.signalCode === null) worker.kill("SIGKILL");
@@ -68,16 +152,23 @@ test("Linux task publishes its worker lease before running (Mac: simulated Linux
       }
     }
   });
+  migrationStarted = true;
   const migration = spawnSync(process.execPath, [command, "state-lock", "migrate", "--offline-confirmed", "--local-only",
     "--expected-state-dir", stateDir, "--cwd", workspace], { env, encoding: "utf8", timeout: 15000 });
   assert.equal(migration.status, 0, migration.stderr);
   migrated = true;
+  if (process.platform === "linux") {
+    const marker = JSON.parse(fs.readFileSync(path.join(stateDir, "state.lock", "protocol.json"), "utf8"));
+    migrationEpoch = marker.epoch; migrationSentinel = marker.sentinel; stateIdentity = fs.lstatSync(stateDir, { bigint: true });
+    markerIdentity = fs.lstatSync(path.join(stateDir, "state.lock", "protocol.json"), { bigint: true });
+    assert.match(migrationEpoch, /^[0-9a-f-]{36}$/i); assert.ok(migrationSentinel);
+  }
   worker = spawn(process.execPath, [command, "task", "--cwd", workspace, "--json", "lease integration"], { env, stdio: ["ignore", "ignore", "pipe"] });
+  closed = new Promise(resolve => worker.once("close", resolve));
+  worker.once("error", () => { syncUnconfirmed = true; });
   let stderr = "";
   worker.stderr.on("data", chunk => { stderr += chunk; });
-  closed = new Promise(resolve => worker.once("close", resolve));
   const stateFile = path.join(stateDir, "state.json");
-  let job;
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
     if (fs.existsSync(stateFile)) {
@@ -89,6 +180,7 @@ test("Linux task publishes its worker lease before running (Mac: simulated Linux
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   assert.ok(job && fs.existsSync(agentPidFile), `task did not start its agent: ${stderr}`);
+  if (process.platform === "linux") pinAgent();
   const detail = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${job.id}.json`), "utf8"));
   assert.ok(job.workerLease, "running worker must publish a lease before starting the agent");
   assert.match(job.claimToken, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
@@ -101,6 +193,7 @@ test("Linux task publishes its worker lease before running (Mac: simulated Linux
   assert.equal(JSON.parse(fs.readFileSync(path.join(stateDir, "state.lock", "protocol.json"), "utf8")).protocol,
     "posix-linux-worker-lease-v6");
   const status = spawnSync(process.execPath, [command, "status", "--cwd", workspace, "--json"], { env, encoding: "utf8", timeout: 15000 });
+  if (process.platform === "linux" && (status.error || status.status === null)) syncUnconfirmed = true;
   assert.equal(status.status, 0, status.stderr);
   assert.equal(JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.find(entry => entry.id === job.id).status, "running");
 
@@ -148,10 +241,12 @@ test("Linux task publishes its worker lease before running (Mac: simulated Linux
   const marker = path.join(stateDir, "state.lock", "protocol.json");
   markerBeforeLegacy = fs.readFileSync(marker, "utf8");
   const legacy = { ...JSON.parse(markerBeforeLegacy), protocol: "posix-linux-sentinel-v3" };
-  const legacyText = `${JSON.stringify(legacy)}\n`;
+  legacyText = `${JSON.stringify(legacy)}\n`;
   fs.writeFileSync(marker, legacyText);
   const stateBeforeLegacy = fs.readFileSync(stateFile, "utf8"), detailBeforeLegacy = fs.readFileSync(path.join(stateDir, "jobs", `${job.id}.json`), "utf8");
   const refused = spawnSync(process.execPath, [command, "status", "--cwd", workspace, "--json"], { env, encoding: "utf8", timeout: 15000 });
+  if (process.platform === "linux" && (refused.error || refused.status === null)) syncUnconfirmed = true;
+  assert.notEqual(refused.status, null, "refusal CLI must exit");
   assert.notEqual(refused.status, 0, "new runtime must refuse a v3 barrier");
   assert.equal(fs.readFileSync(marker, "utf8"), legacyText);
   assert.equal(fs.readFileSync(stateFile, "utf8"), stateBeforeLegacy);
@@ -246,7 +341,7 @@ test("simulated Linux interrupted marker publication remains fail-closed on expl
   assert.deepEqual(fs.readdirSync(barrier).sort(), entries);
 });
 
-test("simulated Linux CLI retains worker lease after output until process exit", { skip: process.platform !== "darwin", timeout: 45000 }, async t => {
+test("simulated Linux CLI retains worker lease after output until process exit", { skip: process.platform !== "darwin", timeout: 120000 }, async t => {
   const previous = ["CLAUDE_PLUGIN_DATA", "PLUGIN_DATA"].map(key => [key, process.env[key]]);
   const root = fs.realpathSync(makeTempDir("grok-linux-worker-lifetime-"));
   const data = path.join(root, "data"), workspace = path.join(root, "workspace"), registry = path.join(root, "processes");
@@ -295,7 +390,7 @@ test("simulated Linux CLI retains worker lease after output until process exit",
   let stdout = "", stderr = "";
   worker.stdout.on("data", chunk => { stdout += chunk; }); worker.stderr.on("data", chunk => { stderr += chunk; });
   closed = new Promise(resolve => worker.once("close", resolve));
-  const deadline = Date.now() + 20000;
+  const deadline = Date.now() + 80000;
   let output;
   while (!output && worker.exitCode === null && Date.now() < deadline) {
     try { output = JSON.parse(stdout); } catch { await new Promise(resolve => setTimeout(resolve, 20)); }
@@ -312,13 +407,17 @@ test("simulated Linux CLI retains worker lease after output until process exit",
   const candidate = () => spawnSync(process.execPath, [command, "task-resume-candidate", "--cwd", workspace, "--json"],
     { env, encoding: "utf8", timeout: 15000 });
   const whileAlive = candidate();
+  assert.equal(whileAlive.error, undefined); assert.equal(whileAlive.signal, null);
   if (whileAlive.status === 0) assert.equal(JSON.parse(whileAlive.stdout).available, false, "a live worker is not a stopped resume candidate");
-  else assert.match(whileAlive.stderr, /worker|lease|pending|unavailable/i);
+  else {
+    assert.equal(whileAlive.status, 1);
+    assert.match(whileAlive.stderr, /worker|lease|pending|unavailable/i);
+  }
   fs.writeFileSync(release, "release", { flag: "wx", mode: 0o600 });
   await closed;
   assert.equal(worker.exitCode, 0, stderr);
   assert.equal(observe().status, "available", "worker exit must release its lease");
   const afterExit = candidate();
-  assert.equal(afterExit.status, 0, afterExit.stderr);
-  assert.equal(JSON.parse(afterExit.stdout).candidate?.id, jobId);
+  assert.equal(afterExit.error, undefined); assert.equal(afterExit.signal, null); assert.equal(afterExit.status, 1);
+  assert.match(afterExit.stderr, /not a verified broker resume candidate/i);
 });

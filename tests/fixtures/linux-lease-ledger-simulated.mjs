@@ -190,6 +190,17 @@ publish();
 assert.equal(verifyPublishedLinuxLease({ context, indexed: record, stored: record,
   owner: reservation.owner, lease: reservation.lease, claimToken }), true);
 assert.equal(verifyPublishedLinuxLeaseRecords({ context, indexed: record, stored: record, lease: reservation.lease }), true);
+const stateFile = path.join(stateDir, "state.json");
+const originalState = fs.readFileSync(stateFile);
+try {
+  for (const tail of [null, { ...record }]) {
+    const malformed = Buffer.from(`${JSON.stringify({ jobs: [record, tail] })}\n`);
+    fs.writeFileSync(stateFile, malformed, { mode: 0o600 });
+    assert.throws(() => verifyPublishedLinuxLeaseRecords({ context, indexed: record, stored: record, lease: reservation.lease }), /invalid job IDs/);
+    assert.deepEqual(fs.readFileSync(stateFile), malformed);
+    assert.equal(fs.existsSync(reservation.lease.path), true);
+  }
+} finally { fs.writeFileSync(stateFile, originalState, { mode: 0o600 }); }
 const bindingPath = reservation.lease.path.replace(/\.lease$/, ".binding");
 const binding = fs.readFileSync(bindingPath);
 const changedBinding = JSON.parse(binding);

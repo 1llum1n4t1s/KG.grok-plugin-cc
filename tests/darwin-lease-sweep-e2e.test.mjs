@@ -7,7 +7,7 @@ import { fork } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import {
-  loadState, migrateStateLock, readJobFile, resolveJobFile, resolveStateDir, resolveStateFile, updateState, withStateSnapshot, writeJobFile
+  loadState, migrateStateLock, readJobFile, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, updateState, withStateSnapshot, writeJobFile
 } from "../plugins/grok/scripts/lib/state.mjs";
 import { makeTempDir } from "./helpers.mjs";
 
@@ -168,6 +168,28 @@ function digestRecord(record) { return createHash("sha256").update(canonicalJson
 function proofFile(workspace, id) {
   return path.join(resolveStateDir(workspace), "jobs", `${id}.worker-stop-proof`);
 }
+
+test("Darwin lease verification rejects invalid records after its matching job", darwin, async t => {
+  const { workspace, job } = fixture(t, "invalid-tail");
+  await startWorker(t, job);
+  const lease = recordedLease(workspace, job.id);
+  const stateFile = resolveStateFile(workspace), original = fs.readFileSync(stateFile);
+  const { verifyPublishedDarwinLeaseRecords } = await import("../plugins/grok/scripts/lib/darwin-lease-sweep.mjs");
+  withStateSnapshot(workspace, (state, context) => {
+    const indexed = state.jobs.find(current => current.id === job.id);
+    const stored = readJobFile(resolveJobFile(workspace, job.id));
+    for (const tail of [null, { ...indexed }]) {
+      const malformed = { ...state, jobs: [...state.jobs, tail] };
+      const bytes = Buffer.from(JSON.stringify(malformed));
+      fs.writeFileSync(stateFile, bytes, { mode: 0o600 });
+      try {
+        assert.throws(() => verifyPublishedDarwinLeaseRecords({ context, indexed, stored, lease }), /malformed or duplicate job IDs/);
+        assert.deepEqual(fs.readFileSync(stateFile), bytes);
+        assertSameFile(lease.path, lease);
+      } finally { fs.writeFileSync(stateFile, original, { mode: 0o600 }); }
+    }
+  });
+});
 
 test("sweep keeps the exact lease while a real worker holds its FD", darwin, async t => {
   const { workspace, job } = fixture(t, "live-owner");
@@ -366,20 +388,83 @@ test("at capacity repeated reservations visit all slots and recover an orphan wi
   const filled = await first;
   assert.equal(filled.type, "full", JSON.stringify(filled));
   assert.equal(filled.leases.length, 254);
-  setCursor(workspace, (incomplete.binding.slot + 1) % 256);
-  let accepted;
-  for (let attempt = 0; attempt < 16; attempt += 1) {
+  for (const lease of filled.leases) assertSameFile(lease.path, lease);
+  const incompleteBinding = fs.readFileSync(incomplete.name);
+  const incompleteStat = fs.lstatSync(incomplete.name, { bigint: true });
+  const initialCursor = incomplete.binding.slot;
+  setCursor(workspace, initialCursor);
+  assert.equal(findLedger(workspace).value.cursor, initialCursor);
+  const stateDir = resolveStateDir(workspace);
+  const retryableFailures = new Set([
+    "Darwin lease slots are full or uncertain (1 incomplete reservations)",
+    "Timed out sweeping Darwin worker leases",
+    "Timed out inspecting POSIX state lock",
+    "Timed out acquiring POSIX state lock",
+    `Timed out acquiring POSIX state lock: ${stateDir}`,
+    "Timed out acquiring Grok state lock",
+    "Timed out acquiring Grok state lock before host/volume inspection",
+    "Timed out verifying Grok state lock migration",
+    "Timed out verifying Grok state lock migration scope",
+    "Unable to start Git (ETIMEDOUT): spawnSync git ETIMEDOUT"
+  ]);
+  const assertRetryable = (message, detail) => assert.ok(retryableFailures.has(message), detail);
+  assert.throws(() => assertRetryable("Unrelated operation timed out", "unexpected timeout"), /unexpected timeout/);
+  assert.throws(() => assertRetryable("Unable to start Git (EIO): spawnSync git EIO", "unexpected Git error"), /unexpected Git error/);
+  // 同じ reserve 経路で timeout と OS error を区別し、一般エラーを retryable にしない。
+  for (const [command, message, operation, code, signal] of [
+    ["host-timeout", "POSIX state lock host identity is unavailable", "ioreg", "ETIMEDOUT", "SIGTERM"],
+    ["mount-eio", "POSIX state lock filesystem inspection failed", "mount", "EIO", null],
+    ["mount-stat-eio", "POSIX state lock filesystem inspection failed", "mount-stat", "EIO", null]
+  ]) {
     const response = once(child, "message");
-    child.send("overflow");
+    child.send(command);
     const [result] = await response;
-    if (result.type === "accepted") { accepted = result; break; }
-    assert.equal(result.type, "rejected", JSON.stringify(result));
+    assert.equal(result.type, "rejected");
+    assert.equal(result.message, message);
+    assert.deepEqual(result.diagnostics, [{ operation, code, status: null, signal }]);
+    assert.equal(JSON.stringify(result).includes("FIXTURE_PRIVATE_SHOULD_NOT_APPEAR"), false);
+    assert.equal(findLedger(workspace).value.cursor, initialCursor);
+    assert.throws(() => assertRetryable(result.message, "generic OS failure must not be retried"), /generic OS failure must not be retried/);
+    assert.deepEqual(fs.readFileSync(incomplete.name), incompleteBinding);
   }
-  assert.ok(accepted, "bounded sweeps did not revisit the orphan within one full rotation");
+  const visited = new Set(), history = [];
+  let accepted, advances = 0, stalled = 0;
+  // 最初の注入とは別に、実際の走査を従来どおり最大64回行う。
+  for (let attempt = 0; attempt <= 64 && advances <= 512; attempt += 1) {
+    const before = findLedger(workspace).value.cursor;
+    const response = once(child, "message");
+    child.send(attempt === 0 ? "overflow-git-timeout" : "overflow");
+    const [result] = await response;
+    const after = findLedger(workspace).value.cursor;
+    const advanced = (after - before + 256) % 256;
+    history.push({ before, after, advanced, type: result.type, message: result.message ?? null,
+      ...(result.diagnostics?.length ? { diagnostics: result.diagnostics } : {}) });
+    if (attempt === 0) {
+      assert.equal(result.type, "rejected");
+      assert.match(result.message, /^Unable to start Git \(ETIMEDOUT\): spawnSync git ETIMEDOUT$/);
+      assert.equal(after, initialCursor, "Git timeout before sweep must not advance the cursor");
+    }
+    assert.ok(advanced <= 16, JSON.stringify(history));
+    for (let offset = 0; offset < advanced; offset += 1) visited.add((before + offset) % 256);
+    advances += advanced;
+    if (result.type === "accepted") { accepted = result; break; }
+    assert.equal(result.type, "rejected", JSON.stringify(history));
+    assertRetryable(result.message, JSON.stringify(history));
+    if (attempt !== 0) stalled = advanced === 0 ? stalled + 1 : 0;
+    assert.ok(stalled < 3, `sweep cursor did not advance: ${JSON.stringify(history)}`);
+  }
+  assert.ok(accepted, `bounded sweeps did not recover the orphan: ${JSON.stringify(history)}`);
+  assert.ok(advances <= 512, `sweep exceeded two rotations: ${JSON.stringify(history)}`);
+  assert.equal(visited.size, 256, `sweep did not visit every slot: ${JSON.stringify(history)}`);
+  assert.ok(visited.has(incomplete.binding.slot) && visited.has(orphan.binding.slot), JSON.stringify(history));
   assert.equal(accepted.lease.slot, orphan.binding.slot);
   assert.notEqual(accepted.lease.id, orphan.binding.lease.id);
+  for (const lease of filled.leases) assertSameFile(lease.path, lease);
   assertSameFile(incomplete.binding.lease.path, incomplete.binding.lease);
-  assert.equal(fs.existsSync(incomplete.name), true);
+  const incompleteAfter = fs.lstatSync(incomplete.name, { bigint: true });
+  assert.equal(incompleteAfter.dev, incompleteStat.dev);
+  assert.equal(incompleteAfter.ino, incompleteStat.ino);
+  assert.deepEqual(fs.readFileSync(incomplete.name), incompleteBinding);
   child.send("stop");
   await closed;
 });
@@ -476,7 +561,7 @@ for (const duplicate of ["slot", "claimToken", "path"]) {
 for (const damage of ["not-published", "changed-token"]) {
   test(`owner cannot commit output or log with ${damage} ledger`, darwin, async t => {
     const { workspace, job } = fixture(t, `owner-${damage}`);
-    const logFile = path.join(workspace, "owner.log");
+    const logFile = resolveJobLogFile(workspace, job.id);
     fs.writeFileSync(logFile, "existing log\n", { mode: 0o600 });
     const worker = await startWorker(t, { ...job, logFile });
     const lease = recordedLease(workspace, job.id);
@@ -584,9 +669,9 @@ test("lease unlink directory fsync failure retains the binding", { ...darwin, ti
   assert.equal(fs.existsSync(abandoned.name), true, "binding must survive an uncertain unlink");
 });
 
-test("prune retains completed detail and log while reclaim unlink durability is uncertain", { ...darwin, timeout: 180000 }, async t => {
+test("completed history remains when reclaim unlink durability is uncertain", { ...darwin, timeout: 180000 }, async t => {
   const { workspace, job } = fixture(t, "prune-reclaim-failure");
-  const logFile = path.join(workspace, "completed.log");
+  const logFile = resolveJobLogFile(workspace, job.id);
   fs.writeFileSync(logFile, "existing log\n", { mode: 0o600 });
   const worker = await startWorker(t, { ...job, logFile });
   const lease = recordedLease(workspace, job.id);
@@ -626,14 +711,14 @@ test("prune retains completed detail and log while reclaim unlink durability is 
   assert.ok(["rejected", "uncertain"].includes(result.type), JSON.stringify(result));
   const indexed = loadState(workspace).jobs.find(entry => entry.id === job.id);
   const detail = readJobFile(resolveJobFile(workspace, job.id));
-  assert.ok(indexed && detail, "reclaiming job must remain protected from prune");
+  assert.ok(indexed && detail, "reclaiming history must remain available");
   assert.equal(detail.rendered, detailBefore.rendered);
   assert.equal(fs.readFileSync(logFile, "utf8"), logBefore);
 });
 
 test("observer death during unlink keeps reclaiming ledger and completed artifacts", { ...darwin, timeout: 180000 }, async t => {
   const { workspace, job } = fixture(t, "prune-reclaim-killed");
-  const logFile = path.join(workspace, "completed-killed.log");
+  const logFile = resolveJobLogFile(workspace, job.id);
   fs.writeFileSync(logFile, "existing log\n", { mode: 0o600 });
   const worker = await startWorker(t, { ...job, logFile });
   const lease = recordedLease(workspace, job.id);
@@ -681,7 +766,7 @@ test("observer death during unlink keeps reclaiming ledger and completed artifac
 });
 
 for (const [kind, altered] of [["queued", false], ["terminal", false], ["queued", true], ["terminal", true]]) {
-  test(`observer death between ${kind} detail and index commits ${altered ? "preserves altered detail" : "resumes from durable reclaim intent"}`, darwin, async t => {
+  test(`observer death between ${kind} detail and index commits ${altered ? "preserves altered detail" : "preserves the uncertain intermediate state"}`, darwin, async t => {
     const { workspace, job } = fixture(t, `detail-index-crash-${kind}-${altered}`);
     let lease;
     if (kind === "queued") {
@@ -757,7 +842,15 @@ for (const [kind, altered] of [["queued", false], ["terminal", false], ["queued"
     const beforeDetail = readJobFile(detailPath);
     assert.deepEqual(beforeIndex.workerLease, lease);
     assert.equal(beforeDetail.workerLease, null);
-    if (altered) writeJobFile(workspace, job.id, { ...beforeDetail, rendered: "unexpected alteration" });
+    if (altered) {
+      const indexBytes = fs.readFileSync(resolveStateFile(workspace));
+      withStateSnapshot(workspace, (_state, context) => {
+        assert.deepEqual(readJobFile(detailPath), beforeDetail);
+        writeJobFile(workspace, job.id, { ...beforeDetail, rendered: "unexpected alteration" }, context);
+      });
+      assert.deepEqual(fs.readFileSync(resolveStateFile(workspace)), indexBytes);
+      assert.equal(readJobFile(detailPath).rendered, "unexpected alteration");
+    }
     setCursor(workspace, lease.slot);
     const { sweepDarwinWorkerLeases } = await import("../plugins/grok/scripts/lib/darwin-lease-sweep.mjs");
     if (altered) {
@@ -769,18 +862,28 @@ for (const [kind, altered] of [["queued", false], ["terminal", false], ["queued"
       assert.equal(readJobFile(detailPath).rendered, "unexpected alteration");
       return;
     }
-    await sweepDarwinWorkerLeases(workspace, { maxEntries: 1, timeoutMs: 5000 });
-    assert.equal(fs.existsSync(lease.path), false);
-    assert.equal(fs.existsSync(lease.path.replace(/\.lease$/, ".binding")), false);
-    assert.equal(findLedger(workspace).value.slots[lease.slot].state, "free");
-    const indexed = loadState(workspace).jobs.find(entry => entry.id === job.id);
-    const stored = readJobFile(detailPath);
-    assert.equal(indexed.workerLease, null);
-    assert.equal(stored.workerLease, null);
-    assert.equal(indexed.workerStopProof, "darwin-lease-released");
-    assert.equal(stored.workerStopProof, "darwin-lease-released");
-    const { verifyDarwinStopCertificate } = await import("../plugins/grok/scripts/lib/darwin-lease-sweep.mjs");
-    withStateSnapshot(workspace, (_state, context) => verifyDarwinStopCertificate({ context, indexed, stored }));
+    const indexFile = resolveStateFile(workspace), bindingFile = lease.path.replace(/\.lease$/, ".binding");
+    const indexBytes = fs.readFileSync(indexFile), detailBytes = fs.readFileSync(detailPath);
+    const bindingBytes = fs.readFileSync(bindingFile);
+    const bindingStat = fs.lstatSync(bindingFile, { bigint: true });
+    const ledgerBefore = findLedger(workspace).value;
+    const entryBefore = ledgerBefore.slots[lease.slot];
+    assert.equal(ledgerBefore.cursor, lease.slot);
+    assert.equal(entryBefore.state, "reclaiming");
+    assert.equal(entryBefore.reclaimKind, kind);
+    const result = await sweepDarwinWorkerLeases(workspace, { maxEntries: 1, timeoutMs: 5000 });
+    assert.deepEqual(result, { examined: 1, reclaimed: 0, uncertain: 1 });
+    const ledgerAfter = findLedger(workspace).value;
+    assert.equal(ledgerAfter.cursor, (lease.slot + 1) % 256);
+    assert.deepEqual(ledgerAfter.slots[lease.slot], entryBefore);
+    assertSameFile(lease.path, lease);
+    const bindingAfter = fs.lstatSync(bindingFile, { bigint: true });
+    assert.equal(bindingAfter.dev, bindingStat.dev);
+    assert.equal(bindingAfter.ino, bindingStat.ino);
+    assert.deepEqual(fs.readFileSync(bindingFile), bindingBytes);
+    assert.deepEqual(fs.readFileSync(indexFile), indexBytes);
+    assert.deepEqual(fs.readFileSync(detailPath), detailBytes);
+    assert.equal(fs.existsSync(proofFile(workspace, job.id)), false);
   });
 }
 
@@ -976,12 +1079,17 @@ for (const invalidId of ["job A", ".hidden", "日本語"]) {
     const { workspace, job } = fixture(t, "invalid-id");
     const ledger = findLedger(workspace);
     const slotsBefore = ledger.value.slots;
+    const ledgerBefore = fs.readFileSync(ledger.name);
     const stateBefore = fs.readFileSync(resolveStateFile(workspace), "utf8");
+    const jobsDir = path.join(resolveStateDir(workspace), "jobs");
+    const jobsBefore = fs.existsSync(jobsDir) ? fs.readdirSync(jobsDir).sort() : [];
     const worker = await attemptWorker(t, { ...job, id: invalidId });
     assert.equal(worker.message.type, "rejected", JSON.stringify(worker.message));
+    assert.throws(() => resolveJobFile(workspace, invalidId));
     assert.equal(fs.readFileSync(resolveStateFile(workspace), "utf8"), stateBefore);
     assert.deepEqual(findLedger(workspace).value.slots, slotsBefore);
-    assert.equal(fs.existsSync(resolveJobFile(workspace, invalidId)), false);
+    assert.deepEqual(fs.readFileSync(ledger.name), ledgerBefore);
+    assert.deepEqual(fs.existsSync(jobsDir) ? fs.readdirSync(jobsDir).sort() : [], jobsBefore);
     await startWorker(t, { ...job, id: "valid-after-invalid" });
   });
 }

@@ -274,7 +274,7 @@ test("hooks keep session lifecycle cleanup and stop gating wired", () => {
   assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
   assert.match(hooks.hooks.Stop[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
   assert.equal(hooks.hooks.SessionStart[0].hooks[0].timeout, 5);
-  assert.equal(hooks.hooks.SessionEnd[0].hooks[0].timeout, 5);
+  assert.equal(hooks.hooks.SessionEnd[0].hooks[0].timeout, 3);
   assert.equal(hooks.hooks.UserPromptSubmit[0].hooks[0].timeout, 60);
   assert.equal(hooks.hooks.Stop[0].hooks[0].timeout, 900);
 });

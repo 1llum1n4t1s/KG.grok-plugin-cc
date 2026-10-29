@@ -1,11 +1,11 @@
 import { registerHooks } from "node:module";
 
 // journal module だけに欠落／zero flag の fs shim を渡す。kernel の実挙動は変更しない。
-const match = /^flag-(O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK)-(missing|zero)$/.exec(process.env.GROK_RECLAIM_FLAG_FAULT ?? "");
+const match = /^flag-(O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK)-(missing|zero|overflow)$/.exec(process.env.GROK_RECLAIM_FLAG_FAULT ?? "");
 if (!match) throw new Error("invalid reclaim flag fault");
 const source = `
   import fs from "node:fs";
-  const constants = { ...fs.constants, ${JSON.stringify(match[1])}: ${match[2] === "zero" ? "0" : "undefined"} };
+  const constants = { ...fs.constants, ${JSON.stringify(match[1])}: ${match[2] === "zero" ? "0" : match[2] === "overflow" ? "2 ** 32" : "undefined"} };
   let operations = 0;
   const shim = { ...fs, constants };
   for (const name of ["openSync", "fstatSync", "lstatSync"]) {

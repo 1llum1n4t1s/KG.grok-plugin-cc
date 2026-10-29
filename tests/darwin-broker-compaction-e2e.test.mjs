@@ -178,20 +178,28 @@ let session; try { session=await ensureBrokerSession(${JSON.stringify(f.workspac
   return result.session.generation;
 }
 
-test("offline migration preserves confirmed v2 history and makes capacity available to a real broker", darwin, async t => {
+function captureFile(file) {
+  return { file, bytes: fs.readFileSync(file), stat: fs.lstatSync(file, { bigint: true }) };
+}
+
+function assertFileUnchanged(before) {
+  const after = fs.lstatSync(before.file, { bigint: true });
+  assert.equal(after.dev, before.stat.dev);
+  assert.equal(after.ino, before.stat.ino);
+  assert.deepEqual(fs.readFileSync(before.file), before.bytes);
+}
+
+test("offline migration refuses the old v2 marker and preserves confirmed journal", darwin, t => {
   const f = fixture(t), old = confirmedJournal(f, true);
   fs.writeFileSync(f.journal, old.bytes, { mode: 0o600 });
+  const journal = captureFile(f.journal);
+  const marker = captureFile(path.join(f.stateDir, "state.lock", "protocol.json"));
   const result = migrate(f);
   assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.ok(containsExactFile(f.stateDir, old.bytes), "original v2 journal was not retained");
-  await oldWriter(f);
-  const first = await startAndStopBroker(f);
-  const second = await startAndStopBroker(f);
-  assert.notEqual(first, second);
-  assert.equal(old.generations.has(first), false);
-  assert.equal(old.generations.has(second), false);
-  assert.ok(containsExactFile(f.stateDir, old.bytes), "original v2 journal changed after startup");
+  assert.notEqual(result.status, 0, result.stderr || result.stdout);
+  assertFileUnchanged(journal);
+  assertFileUnchanged(marker);
+  assert.equal(fs.existsSync(path.join(f.stateDir, ".darwin-legacy-migration")), false);
 });
 
 test("offline migration preserves a released shipped file-lock state", darwin, async t => {
@@ -205,43 +213,30 @@ test("offline migration preserves a released shipped file-lock state", darwin, a
   await oldFileLockWriter(f);
 });
 
-test("offline migration preserves the actual retained file lock from a stopped legacy writer", darwin, async t => {
+test("offline migration refuses the retained lock from a stopped legacy writer", darwin, t => {
   const f = fixture(t, "retained-file-lock", false);
-  const lock = path.join(f.stateDir, "state.lock"), before = fs.readFileSync(lock);
-  const stateFile = path.join(f.stateDir, "state.json"), state = fs.readFileSync(stateFile);
-  assert.match(before.toString("utf8"), /^[1-9]\d*\n$/);
-  assert.ok(fs.lstatSync(lock).isFile());
-  const result = migrate(f);
-  assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.ok(fs.lstatSync(lock).isDirectory(), "new state barrier was not installed");
-  assert.ok(containsExactFile(f.stateDir, before), "old state.lock bytes were not retained");
-  assert.deepEqual(fs.readFileSync(stateFile), state);
-  await oldFileLockWriter(f);
-  const again = migrate(f);
-  assert.ifError(again.error);
-  assert.equal(again.status, 0, again.stderr || again.stdout);
-  assert.ok(containsExactFile(f.stateDir, before), "repeated migration lost the old lock");
+  const lock = captureFile(path.join(f.stateDir, "state.lock"));
+  const state = captureFile(path.join(f.stateDir, "state.json"));
+  assert.match(lock.bytes.toString("utf8"), /^[1-9]\d*\n$/);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = migrate(f);
+    assert.ifError(result.error);
+    assert.notEqual(result.status, 0, result.stderr || result.stdout);
+    assertFileUnchanged(lock);
+    assertFileUnchanged(state);
+    assert.equal(fs.existsSync(path.join(f.stateDir, ".darwin-legacy-migration")), false);
+  }
 });
 
-test("offline migration preserves retained old lock and synthetic confirmed broker and direct records", darwin, async t => {
+test("offline migration refuses retained lock with confirmed synthetic admissions", darwin, t => {
   const f = fixture(t, "retained-file-lock"), broker = confirmedJournal(f), direct = directMarker(f);
-  const lock = path.join(f.stateDir, "state.lock"), oldLock = fs.readFileSync(lock);
-  const stateFile = path.join(f.stateDir, "state.json"), state = fs.readFileSync(stateFile);
   fs.writeFileSync(f.journal, broker.bytes, { mode: 0o600 });
+  const files = [path.join(f.stateDir, "state.lock"), path.join(f.stateDir, "state.json"), f.journal, direct.file].map(captureFile);
   const result = migrate(f);
   assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.ok(containsExactFile(f.stateDir, oldLock), "old lock was not retained");
-  assert.ok(containsExactFile(f.stateDir, broker.bytes), "old broker journal was not retained");
-  assert.ok(containsExactFile(f.stateDir, direct.bytes), "old direct marker was not retained");
-  assert.deepEqual(fs.readFileSync(stateFile), state);
-  await oldFileLockWriter(f);
-  const generation = await startAndStopBroker(f);
-  assert.equal(broker.generations.has(generation), false);
-  assert.ok(containsExactFile(f.stateDir, oldLock));
-  assert.ok(containsExactFile(f.stateDir, broker.bytes));
-  assert.ok(containsExactFile(f.stateDir, direct.bytes));
+  assert.notEqual(result.status, 0, result.stderr || result.stdout);
+  for (const file of files) assertFileUnchanged(file);
+  assert.equal(fs.existsSync(path.join(f.stateDir, ".darwin-legacy-migration")), false);
 });
 
 for (const kind of ["pending-broker", "pending-direct", "corrupt-direct", "unknown-direct", "foreign-host", "foreign-state"]) {
@@ -260,9 +255,13 @@ for (const kind of ["pending-broker", "pending-direct", "corrupt-direct", "unkno
       fs.writeFileSync(direct.file, records.map(record => JSON.stringify(record)).join("\n") + "\n", { mode: 0o600 });
     }
     const directBytes = fs.readFileSync(direct.file);
+    const snapshots = [lock, f.journal, direct.file, path.join(f.stateDir, "state.json")].map(captureFile);
     const result = migrate(f);
     assert.ifError(result.error);
     assert.notEqual(result.status, 0, `migration accepted ${kind}`);
+    assert.match(result.stderr + result.stdout, /completion evidence is unavailable/i);
+    for (const snapshot of snapshots) assertFileUnchanged(snapshot);
+    assert.equal(fs.existsSync(path.join(f.stateDir, ".darwin-legacy-migration")), false);
     assert.deepEqual(fs.readFileSync(lock), oldLock);
     assert.deepEqual(fs.readFileSync(f.journal), broker);
     assert.deepEqual(fs.readFileSync(direct.file), directBytes);
@@ -297,20 +296,17 @@ test("offline migration refuses an unparseable old file lock without changing it
   assert.equal(fs.lstatSync(lock, { bigint: true }).ino, identity.ino);
 });
 
-test("offline migration preserves shipped file-lock state alongside synthetic confirmed admission", darwin, async t => {
+test("offline migration refuses shipped state with synthetic confirmed admission", darwin, t => {
   const f = fixture(t, "file-lock"), old = confirmedJournal(f, true);
-  const stateFile = path.join(f.stateDir, "state.json"), before = fs.readFileSync(stateFile);
-  // 旧配布版は journal を生成しない。合成した混在状態として区別する。
   fs.writeFileSync(f.journal, old.bytes, { mode: 0o600 });
+  const journal = captureFile(f.journal), state = captureFile(path.join(f.stateDir, "state.json"));
   const result = migrate(f);
   assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.deepEqual(fs.readFileSync(stateFile), before);
-  assert.ok(containsExactFile(f.stateDir, old.bytes), "original confirmed journal was not retained");
-  await oldFileLockWriter(f);
-  const generation = await startAndStopBroker(f);
-  assert.equal(old.generations.has(generation), false);
-  assert.ok(containsExactFile(f.stateDir, old.bytes), "original confirmed journal changed after startup");
+  assert.notEqual(result.status, 0, result.stderr || result.stdout);
+  assertFileUnchanged(journal);
+  assertFileUnchanged(state);
+  assert.equal(fs.existsSync(path.join(f.stateDir, "state.lock", "protocol.json")), false);
+  assert.equal(fs.existsSync(path.join(f.stateDir, ".darwin-legacy-migration")), false);
 });
 
 for (const kind of ["pending", "settled-only", "corrupt", "legacy", "oversized"]) {
@@ -323,9 +319,12 @@ for (const kind of ["pending", "settled-only", "corrupt", "legacy", "oversized"]
     else if (kind === "legacy") bytes = Buffer.from(complete.toString().replaceAll('"version":2', '"version":1'));
     else bytes = Buffer.alloc(4 * 1024 * 1024 + 1, 120);
     fs.writeFileSync(f.journal, bytes, { mode: 0o600 });
+    const journal = captureFile(f.journal), marker = captureFile(path.join(f.stateDir, "state.lock", "protocol.json"));
     const result = migrate(f);
     assert.ifError(result.error);
     assert.notEqual(result.status, 0, `migration accepted ${kind}`);
+    assertFileUnchanged(journal);
+    assertFileUnchanged(marker);
     assert.deepEqual(fs.readFileSync(f.journal), bytes);
   });
 }

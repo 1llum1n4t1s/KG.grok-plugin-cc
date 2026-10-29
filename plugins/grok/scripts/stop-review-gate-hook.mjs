@@ -281,8 +281,7 @@ function recordTurnBaseline(workspaceRoot, input, sessionId, deadline) {
   }
 }
 
-function main() {
-  const input = readHookInput();
+function main(input) {
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const deadline = input.hook_event_name === "UserPromptSubmit" ? performance.now() + PROMPT_BASELINE_TIMEOUT_MS : undefined;
   const workspaceRoot = resolveWorkspaceRoot(cwd);
@@ -433,7 +432,7 @@ function handleHookEvent(input, cwd, workspaceRoot, config, deadline) {
 }
 
 try {
-  main();
+  main(await readHookInput());
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`${message}\n`);

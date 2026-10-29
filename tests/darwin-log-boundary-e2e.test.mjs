@@ -51,26 +51,36 @@ function fixture(t) {
   return { workspace, jobsDir, logFile, job };
 }
 
-for (const kind of ["hardlink", "unsafe-mode", "write-only", "regular"]) test(`legacy cancel protects ${kind} log`, darwin, t => {
+function fileIdentity(file) {
+  const stat = fs.lstatSync(file, { bigint: true });
+  return { dev: stat.dev, ino: stat.ino, mode: stat.mode, nlink: stat.nlink, size: stat.size };
+}
+
+for (const kind of ["hardlink", "unsafe-mode", "write-only", "regular"]) test(`legacy cancel rejects unverified worker and preserves ${kind} log`, darwin, t => {
   const f = fixture(t);
   const external = path.join(f.workspace, "external");
   if (kind === "hardlink") fs.linkSync(f.logFile, external);
   if (kind === "unsafe-mode") fs.chmodSync(f.logFile, 0o644);
   if (kind === "write-only") fs.chmodSync(f.logFile, 0o200);
   const before = kind === "write-only" ? Buffer.from("legacy log\n") : fs.readFileSync(f.logFile);
+  const identity = fileIdentity(f.logFile);
+  const externalIdentity = kind === "hardlink" ? fileIdentity(external) : null;
+  const stateFile = path.join(path.dirname(f.jobsDir), "state.json");
+  const detailFile = path.join(f.jobsDir, f.job.id + ".json");
+  const stateBefore = fs.readFileSync(stateFile), detailBefore = fs.readFileSync(detailFile);
   const result = spawnSync(process.execPath, [cli, "cancel", "--cwd", f.workspace, "--json", f.job.id], {
     env: process.env, encoding: "utf8", timeout: 30000
   });
-  assert.equal(result.status, 0, result.stderr);
-  const payload = JSON.parse(result.stdout);
-  assert.equal(payload.status, "cancelled");
-  if (kind === "regular") assert.match(fs.readFileSync(f.logFile, "utf8"), /Cancelled by user/);
-  else {
-    if (kind === "write-only") fs.chmodSync(f.logFile, 0o600);
-    assert.deepEqual(fs.readFileSync(f.logFile), before);
-    if (kind === "hardlink") assert.deepEqual(fs.readFileSync(external), before);
-    assert.ok(payload.logWarningCount > 0);
-  }
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /no verified current worker lease; cancellation remains pending/i);
+  assert.equal(result.stdout, "");
+  assert.deepEqual(fs.readFileSync(stateFile), stateBefore);
+  assert.deepEqual(fs.readFileSync(detailFile), detailBefore);
+  assert.deepEqual(fileIdentity(f.logFile), identity);
+  if (kind === "hardlink") assert.deepEqual(fileIdentity(external), externalIdentity);
+  if (kind === "write-only") fs.chmodSync(f.logFile, 0o600);
+  assert.deepEqual(fs.readFileSync(f.logFile), before);
+  if (kind === "hardlink") assert.deepEqual(fs.readFileSync(external), before);
 });
 
 test("legacy cancel preserves an external regular file named by both job records", darwin, t => {
@@ -84,14 +94,21 @@ test("legacy cancel preserves an external regular file named by both job records
   detail.logFile = external;
   fs.writeFileSync(stateFile, JSON.stringify(state));
   fs.writeFileSync(detailFile, JSON.stringify(detail));
+  const stateBefore = fs.readFileSync(stateFile), detailBefore = fs.readFileSync(detailFile);
+  const externalBefore = fs.readFileSync(external), externalIdentity = fileIdentity(external);
+  const localBefore = fs.readFileSync(f.logFile), localIdentity = fileIdentity(f.logFile);
   const result = spawnSync(process.execPath, [cli, "cancel", "--cwd", f.workspace, "--json", f.job.id], {
     env: process.env, encoding: "utf8", timeout: 30000
   });
-  assert.equal(result.status, 0, result.stderr);
-  const payload = JSON.parse(result.stdout);
-  assert.equal(payload.status, "cancelled");
-  assert.ok(payload.logWarningCount > 0);
-  assert.equal(fs.readFileSync(external, "utf8"), "external contents\n");
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /no verified current worker lease; cancellation remains pending/i);
+  assert.equal(result.stdout, "");
+  assert.deepEqual(fs.readFileSync(stateFile), stateBefore);
+  assert.deepEqual(fs.readFileSync(detailFile), detailBefore);
+  assert.deepEqual(fileIdentity(external), externalIdentity);
+  assert.deepEqual(fs.readFileSync(external), externalBefore);
+  assert.deepEqual(fileIdentity(f.logFile), localIdentity);
+  assert.deepEqual(fs.readFileSync(f.logFile), localBefore);
 });
 
 for (const kind of ["hardlink", "symlink", "unsafe-mode", "write-only", "regular", "missing"]) test(`progress and final output protect ${kind} log`, darwin, t => {
@@ -183,11 +200,11 @@ test("cancel reports an omitted log when a released lease is swept after state c
     }
     throw new Error(`cancel sweep test gate timed out: ${stderr}`);
   };
-  await waitFor(() => loadState(f.workspace).jobs.find(entry => entry.id === job.id)?.status === "cancelled");
+  await waitFor(() => withStateSnapshot(f.workspace, state => state.jobs.find(entry => entry.id === job.id)?.status === "cancelled"));
   worker.send("finish");
   await workerClosed;
   await waitFor(() => fs.existsSync(gate));
-  const before = loadState(f.workspace).jobs.find(entry => entry.id === job.id);
+  const before = withStateSnapshot(f.workspace, state => state.jobs.find(entry => entry.id === job.id));
   assert.ok(before.workerLease);
   // 走査 cursor だけを mutex 下で回収対象に合わせ、回収自体は実装を通す。
   withStateSnapshot(f.workspace, () => {
@@ -200,7 +217,7 @@ test("cancel reports an omitted log when a released lease is swept after state c
   });
   const sweep = sweepDarwinWorkerLeases(f.workspace, { maxEntries: 1, timeoutMs: 5000 });
   assert.equal(sweep.reclaimed, 1, JSON.stringify(sweep));
-  assert.equal(loadState(f.workspace).jobs.find(entry => entry.id === job.id).workerLease, null);
+  assert.equal(withStateSnapshot(f.workspace, state => state.jobs.find(entry => entry.id === job.id).workerLease), null);
   fs.writeFileSync(`${gate}.release`, "release");
   await cancelClosed;
   assert.equal(cancel.exitCode, 0, stderr);

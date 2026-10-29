@@ -10,10 +10,10 @@ import { makeTempDir, removeTempFixture } from "./helpers.mjs";
 
 // 実 Mac process と CLI を使用するが、boot ID・procfs/mount/flock は模擬する。
 // 特に directory flock の Linux kernel / filesystem 契約は別途実機確認が必要。
-test("Linux offline history recovery and migration serialize on the same root lock", {
-  skip: process.platform !== "darwin", timeout: 180000
-}, async t => {
-  const root = fs.realpathSync(makeTempDir("grok-linux-history-offline-lock-"));
+// 履歴削除と旧 recover-history は未統合。現行CLIの拒否と記録の保全を確認する。
+// 旧回復処理のroot lockやmount変更の競合は、現行CLIからは実行できない。
+function offlineHistoryFixture(t, prefix) {
+  const root = fs.realpathSync(makeTempDir(prefix));
   const data = path.join(root, "data"), workspace = path.join(root, "workspace");
   for (const dir of [data, workspace, path.join(root, "processes")]) fs.mkdirSync(dir, { mode: 0o700 });
   const prior = ["CLAUDE_PLUGIN_DATA", "PLUGIN_DATA"].map(key => [key, process.env[key]]);
@@ -22,117 +22,91 @@ test("Linux offline history recovery and migration serialize on the same root lo
   const command = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
   const preload = fileURLToPath(new URL("./fixtures/linux-cli-simulated-preload.mjs", import.meta.url));
   const boot = fileURLToPath(new URL("./fixtures/linux-history-boot-preload.mjs", import.meta.url));
-  const pause = fileURLToPath(new URL("./fixtures/linux-history-offline-lock-pause.mjs", import.meta.url));
-  const ready = path.join(root, "offline-lock-ready"), release = path.join(root, "offline-lock-release"), reused = path.join(root, "offline-operation-reused");
   const env = { ...process.env, CLAUDE_PLUGIN_DATA: data, GROK_LINUX_SIM_ROOT: root, GROK_LINUX_SIM_STATE_DIR: stateDir,
-    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import ${JSON.stringify(preload)} --import ${JSON.stringify(boot)} --import ${JSON.stringify(pause)}`.trim() };
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import ${JSON.stringify(preload)} --import ${JSON.stringify(boot)}`.trim() };
   delete env.PLUGIN_DATA; delete env.GROK_HISTORY_SIM_BOOT;
-  delete env.GROK_HISTORY_OFFLINE_LOCK_READY; delete env.GROK_HISTORY_OFFLINE_LOCK_RELEASE;
-  delete env.GROK_HISTORY_OFFLINE_REUSED;
   const args = ["--offline-confirmed", "--local-only", "--expected-state-dir", stateDir, "--cwd", workspace];
-  const run = (argv, extra = {}) => spawnSync(process.execPath, [command, ...argv], { env: { ...env, ...extra }, encoding: "utf8", timeout: 30000 });
-  let sentinel = false, verifiedDone = false, holder, migration, holderClosed, migrationClosed;
-  t.after(async () => {
+  const run = argv => spawnSync(process.execPath, [command, ...argv], { env, encoding: "utf8", timeout: 30000 });
+  let sentinel = false, verifiedDone = false;
+  t.after(() => {
     try {
-      if ((holder || migration) && !fs.existsSync(release)) fs.writeFileSync(release, "release", { flag: "wx", mode: 0o600 });
-      for (const child of [holder, migration]) if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      if (holderClosed) await holderClosed;
-      if (migrationClosed) await migrationClosed;
       if (sentinel) {
         const stop = run(["state-lock", "stop-sentinel", ...args]);
         assert.equal(stop.status, 0, stop.stderr);
       }
       if (verifiedDone) removeTempFixture(root, { recursive: true, force: true });
-      else t.diagnostic(`Retained offline lock fixture: ${root}`);
+      else t.diagnostic(`Retained offline history fixture: ${root}`);
     } finally {
       for (const [key, value] of prior) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     }
   });
-  const first = run(["state-lock", "migrate", ...args]); assert.equal(first.status, 0, first.stderr); sentinel = true;
-  const markerBytes = fs.readFileSync(path.join(barrier, "protocol.json")), marker = JSON.parse(markerBytes), epoch = marker.epoch;
-  const journal = path.join(stateDir, "history-journal-v1", epoch), oldJournal = fs.statSync(journal, { bigint: true });
-  const ledger = path.join(stateDir, "worker-leases-v1", epoch, "ledger.json"), ledgerBytes = fs.readFileSync(ledger);
-  const bootstrap = path.join(journal, "bootstrap");
-  const makeBootstrap = () => {
-    const fd = fs.openSync(bootstrap, "wx", 0o600);
-    try { fs.writeFileSync(fd, `${JSON.stringify({ version: 1, epoch, nonce: randomUUID() }, null, 2)}\n`); fs.fsyncSync(fd); }
-    finally { fs.closeSync(fd); }
-    const journalFd = fs.openSync(journal, "r"); try { fs.fsyncSync(journalFd); } finally { fs.closeSync(journalFd); }
+  const migrate = () => {
+    const result = run(["state-lock", "migrate", ...args]);
+    if (result.status === 0) sentinel = true;
+    return result;
   };
-  makeBootstrap();
+  const first = migrate(); assert.equal(first.status, 0, first.stderr);
+  const markerBytes = fs.readFileSync(path.join(barrier, "protocol.json"));
+  const epoch = JSON.parse(markerBytes).epoch;
+  const journal = path.join(stateDir, "history-journal-v1", epoch);
+  const journalIdentity = fs.statSync(journal, { bigint: true });
+  const bootstrap = path.join(journal, "bootstrap");
+  const bootstrapBytes = Buffer.from(`${JSON.stringify({ version: 1, epoch, nonce: randomUUID() }, null, 2)}\n`);
+  const fd = fs.openSync(bootstrap, "wx", 0o600);
+  try { fs.writeFileSync(fd, bootstrapBytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  const journalFd = fs.openSync(journal, "r");
+  try { fs.fsyncSync(journalFd); } finally { fs.closeSync(journalFd); }
+  const stateFile = path.join(stateDir, "state.json"), stateBytes = fs.readFileSync(stateFile);
+  const ledger = path.join(stateDir, "worker-leases-v1", epoch, "ledger.json"), ledgerBytes = fs.readFileSync(ledger);
   const stop = run(["state-lock", "stop-sentinel", ...args]); assert.equal(stop.status, 0, stop.stderr); sentinel = false;
-  const savedBarrier = path.join(stateDir, `state.lock.history-${epoch}`), oldBarrier = fs.statSync(barrier, { bigint: true });
+  const barrierIdentity = fs.statSync(barrier, { bigint: true });
+  const savedBarrier = path.join(stateDir, `state.lock.history-${epoch}`);
   fs.renameSync(barrier, savedBarrier);
   env.GROK_HISTORY_SIM_BOOT = "33333333-3333-4333-8333-333333333333";
-  const recoverArgs = ["state-lock", "recover-history", "--offline-confirmed", "--local-only", "--all-old-processes-stopped",
-    "--expected-state-dir", stateDir, "--old-epoch", epoch, "--old-barrier", savedBarrier, "--cwd", workspace];
-  const start = (argv, childEnv) => {
-    const child = spawn(process.execPath, [command, ...argv], { env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "", stderr = "";
-    child.stdout.on("data", chunk => { stdout += chunk; }); child.stderr.on("data", chunk => { stderr += chunk; });
-    const closed = new Promise(resolve => child.once("close", (code, signal) => resolve({ code, signal, stdout, stderr })));
-    return { child, closed };
+  const assertPreserved = () => {
+    const currentJournal = fs.statSync(journal, { bigint: true }), currentBarrier = fs.statSync(savedBarrier, { bigint: true });
+    assert.equal(currentJournal.dev, journalIdentity.dev); assert.equal(currentJournal.ino, journalIdentity.ino);
+    assert.equal(currentBarrier.dev, barrierIdentity.dev); assert.equal(currentBarrier.ino, barrierIdentity.ino);
+    assert.deepEqual(fs.readFileSync(stateFile), stateBytes);
+    assert.deepEqual(fs.readFileSync(bootstrap), bootstrapBytes);
+    assert.deepEqual(fs.readFileSync(ledger), ledgerBytes);
+    assert.deepEqual(fs.readFileSync(path.join(savedBarrier, "protocol.json")), markerBytes);
   };
-  // 逆順: migrate が先に root lock を取っている間は recover が旧記録に触れない。
-  const reverseReady = path.join(root, "migration-lock-ready"), reverseRelease = path.join(root, "migration-lock-release");
-  ({ child: migration, closed: migrationClosed } = start(["state-lock", "migrate", ...args], { ...env,
-    GROK_HISTORY_OFFLINE_LOCK_CMD: "migrate", GROK_HISTORY_OFFLINE_LOCK_READY: reverseReady, GROK_HISTORY_OFFLINE_LOCK_RELEASE: reverseRelease }));
-  let reverseDeadline = Date.now() + 15000;
-  while (!fs.existsSync(reverseReady) && migration.exitCode === null && Date.now() < reverseDeadline) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.ok(fs.existsSync(reverseReady), "migration must acquire the shared root lock before journal preflight");
-  ({ child: holder, closed: holderClosed } = start(recoverArgs, env));
-  await new Promise(resolve => setTimeout(resolve, 2000));
-  assert.ok(fs.existsSync(bootstrap), "recovery must not change the journal while migration owns the root lock");
-  assert.ok(!fs.existsSync(barrier), "migration must not create a barrier before validating the old journal");
-  fs.writeFileSync(reverseRelease, "release", { flag: "wx", mode: 0o600 });
-  const blocked = await migrationClosed;
-  if (blocked.code === 0) sentinel = true;
-  assert.notEqual(blocked.code, 0, "migration must refuse the pending old journal");
-  assert.ok(!fs.existsSync(barrier), "a refused preflight must not leave a partial barrier");
-  let reverseRecovered = await holderClosed;
-  if (reverseRecovered.code !== 0 && /lock|timed out/i.test(reverseRecovered.stderr)) {
-    const retry = run(recoverArgs); reverseRecovered = { code: retry.status, stderr: retry.stderr };
-  }
-  assert.equal(reverseRecovered.code, 0, reverseRecovered.stderr);
-  assert.ok(!fs.existsSync(bootstrap));
-  makeBootstrap();
-  // 由来不明の barrier は回復操作でも置換・削除しない。
-  fs.mkdirSync(barrier, { mode: 0o700 });
-  const unknownBarrierFile = path.join(barrier, "unknown-evidence");
-  fs.writeFileSync(unknownBarrierFile, "keep", { flag: "wx", mode: 0o600 });
-  const unknownBarrierId = fs.statSync(barrier, { bigint: true }), unknownAttempt = run(recoverArgs);
-  assert.notEqual(unknownAttempt.status, 0, "an unknown current barrier must be refused");
-  assert.equal(fs.readFileSync(unknownBarrierFile, "utf8"), "keep");
-  assert.equal(fs.statSync(barrier, { bigint: true }).ino, unknownBarrierId.ino);
-  assert.ok(fs.existsSync(bootstrap));
-  fs.renameSync(barrier, path.join(root, "preserved-unknown-barrier"));
-  ({ child: holder, closed: holderClosed } = start(recoverArgs, { ...env,
-    GROK_HISTORY_OFFLINE_LOCK_READY: ready, GROK_HISTORY_OFFLINE_LOCK_RELEASE: release, GROK_HISTORY_OFFLINE_REUSED: reused }));
-  const deadline = Date.now() + 15000;
-  while (!fs.existsSync(ready) && holder.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.ok(fs.existsSync(ready), "recover-history must acquire and hold the root directory lock");
-  assert.ok(fs.existsSync(reused), "the operation FD must be closed and reopened under the same number");
-  ({ child: migration, closed: migrationClosed } = start(["state-lock", "migrate", ...args], env));
-  await new Promise(resolve => setTimeout(resolve, 2000));
-  assert.ok(!fs.existsSync(barrier), "migration must not publish or create a barrier while recovery owns the root lock");
-  assert.ok(migration.exitCode === null || migration.exitCode !== 0, "migration must not complete while recovery owns the root lock");
-  fs.writeFileSync(release, "release", { flag: "wx", mode: 0o600 });
-  const recovered = await holderClosed; assert.equal(recovered.code, 0, recovered.stderr);
-  let migrated = await migrationClosed;
-  if (migrated.code !== 0 && /lock|timed out/i.test(migrated.stderr)) {
-    const retry = run(["state-lock", "migrate", ...args]);
-    migrated = { code: retry.status, stderr: retry.stderr };
-  }
-  assert.equal(migrated.code, 0, migrated.stderr); sentinel = true;
-  assert.ok(!fs.existsSync(bootstrap), "pre-publication scratch must be safely cleared");
-  assert.equal(fs.statSync(savedBarrier, { bigint: true }).dev, oldBarrier.dev);
-  assert.equal(fs.statSync(savedBarrier, { bigint: true }).ino, oldBarrier.ino);
-  assert.deepEqual(fs.readFileSync(path.join(savedBarrier, "protocol.json")), markerBytes);
-  assert.deepEqual(fs.readFileSync(ledger), ledgerBytes);
-  assert.equal(fs.statSync(journal, { bigint: true }).dev, oldJournal.dev);
-  assert.equal(fs.statSync(journal, { bigint: true }).ino, oldJournal.ino);
-  assert.notEqual(JSON.parse(fs.readFileSync(path.join(barrier, "protocol.json"), "utf8")).epoch, epoch);
-  verifiedDone = true;
+  return { stateDir, workspace, barrier, savedBarrier, epoch, args, run, migrate, assertPreserved, complete() { verifiedDone = true; } };
+}
+
+test("Linux rejects unavailable history recovery and preserves the incomplete migration", {
+  skip: process.platform !== "darwin", timeout: 180000
+}, t => {
+  const f = offlineHistoryFixture(t, "grok-linux-history-offline-lock-");
+  const unsupported = f.run(["state-lock", "recover-history", "--offline-confirmed", "--local-only", "--all-old-processes-stopped",
+    "--expected-state-dir", f.stateDir, "--old-epoch", f.epoch, "--old-barrier", f.savedBarrier, "--cwd", f.workspace]);
+  assert.equal(unsupported.error, undefined); assert.equal(unsupported.signal, null); assert.equal(unsupported.status, 1);
+  assert.match(unsupported.stderr, /Invalid state-lock arguments\/options/);
+  assert.equal(fs.existsSync(f.barrier), false);
+  f.assertPreserved();
+
+  const migration = f.migrate();
+  assert.equal(migration.error, undefined); assert.equal(migration.signal, null); assert.equal(migration.status, 1, "unconfirmed history must not migrate");
+  assert.match(migration.stderr, /Old Linux history journal contains unconfirmed evidence/);
+  const entries = fs.readdirSync(f.barrier).sort();
+  assert.equal(entries.includes("native.lock"), true);
+  assert.equal(entries.includes("protocol.json"), false);
+  const prepared = entries.filter(name => /^prepared-.*\.json$/.test(name));
+  assert.equal(prepared.length, 1);
+  const preparedBytes = fs.readFileSync(path.join(f.barrier, prepared[0]));
+  const preparedIdentity = fs.statSync(path.join(f.barrier, prepared[0]), { bigint: true });
+  f.assertPreserved();
+
+  const retry = f.migrate();
+  assert.equal(retry.error, undefined); assert.equal(retry.signal, null); assert.equal(retry.status, 1, "an incomplete barrier must remain fail-closed");
+  assert.match(retry.stderr, /POSIX state lock migration is incomplete or invalid/);
+  assert.deepEqual(fs.readdirSync(f.barrier).sort(), entries);
+  assert.deepEqual(fs.readFileSync(path.join(f.barrier, prepared[0])), preparedBytes);
+  const retriedPrepared = fs.statSync(path.join(f.barrier, prepared[0]), { bigint: true });
+  assert.equal(retriedPrepared.dev, preparedIdentity.dev); assert.equal(retriedPrepared.ino, preparedIdentity.ino);
+  f.assertPreserved();
+  f.complete();
 });
 
 test("Linux concurrent first migrations lock the same newly created root", {
@@ -199,70 +173,15 @@ test("Linux concurrent first migrations lock the same newly created root", {
   verifiedDone = true;
 });
 
-test("Linux offline recovery refuses a same-inode named mount change", {
+test("Linux epoch recovery refuses a missing barrier and preserves old history", {
   skip: process.platform !== "darwin", timeout: 180000
-}, async t => {
-  const root = fs.realpathSync(makeTempDir("grok-linux-offline-mount-"));
-  const data = path.join(root, "data"), workspace = path.join(root, "workspace");
-  for (const dir of [data, workspace, path.join(root, "processes")]) fs.mkdirSync(dir, { mode: 0o700 });
-  const prior = ["CLAUDE_PLUGIN_DATA", "PLUGIN_DATA"].map(key => [key, process.env[key]]);
-  process.env.CLAUDE_PLUGIN_DATA = data; delete process.env.PLUGIN_DATA;
-  const stateDir = resolveStateDir(workspace), barrier = path.join(stateDir, "state.lock"), stateFile = path.join(stateDir, "state.json");
-  const command = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
-  const preload = fileURLToPath(new URL("./fixtures/linux-cli-simulated-preload.mjs", import.meta.url));
-  const boot = fileURLToPath(new URL("./fixtures/linux-history-boot-preload.mjs", import.meta.url));
-  const pause = fileURLToPath(new URL("./fixtures/linux-history-offline-lock-pause.mjs", import.meta.url));
-  const mount = fileURLToPath(new URL("./fixtures/linux-history-offline-mount-preload.mjs", import.meta.url));
-  const ready = path.join(root, "mount-lock-ready"), release = path.join(root, "mount-lock-release"), switchFile = path.join(root, "mount-switch");
-  const env = { ...process.env, CLAUDE_PLUGIN_DATA: data, GROK_LINUX_SIM_ROOT: root, GROK_LINUX_SIM_STATE_DIR: stateDir,
-    GROK_HISTORY_MOUNT_SWITCH: switchFile,
-    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import ${JSON.stringify(preload)} --import ${JSON.stringify(boot)} --import ${JSON.stringify(mount)} --import ${JSON.stringify(pause)}`.trim() };
-  delete env.PLUGIN_DATA; delete env.GROK_HISTORY_SIM_BOOT;
-  const args = ["--offline-confirmed", "--local-only", "--expected-state-dir", stateDir, "--cwd", workspace];
-  const run = argv => spawnSync(process.execPath, [command, ...argv], { env, encoding: "utf8", timeout: 30000 });
-  let sentinel = false, holder, closed, verifiedDone = false;
-  t.after(async () => {
-    try {
-      if (holder && !fs.existsSync(release)) fs.writeFileSync(release, "release", { flag: "wx", mode: 0o600 });
-      if (holder && holder.exitCode === null && holder.signalCode === null) holder.kill("SIGTERM");
-      if (closed) await closed;
-      if (sentinel) {
-        const stop = run(["state-lock", "stop-sentinel", ...args]); assert.equal(stop.status, 0, stop.stderr);
-      }
-      if (verifiedDone) removeTempFixture(root, { recursive: true, force: true });
-      else t.diagnostic(`Retained named mount fixture: ${root}`);
-    } finally {
-      for (const [key, value] of prior) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
-    }
-  });
-  const migration = run(["state-lock", "migrate", ...args]); assert.equal(migration.status, 0, migration.stderr); sentinel = true;
-  const markerBytes = fs.readFileSync(path.join(barrier, "protocol.json")), epoch = JSON.parse(markerBytes).epoch;
-  const journal = path.join(stateDir, "history-journal-v1", epoch), bootstrap = path.join(journal, "bootstrap");
-  const bootBytes = Buffer.from(`${JSON.stringify({ version: 1, epoch, nonce: randomUUID() }, null, 2)}\n`);
-  const fd = fs.openSync(bootstrap, "wx", 0o600); try { fs.writeFileSync(fd, bootBytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-  const journalFd = fs.openSync(journal, "r"); try { fs.fsyncSync(journalFd); } finally { fs.closeSync(journalFd); }
-  const indexBytes = fs.readFileSync(stateFile), rootIdentity = fs.statSync(stateDir, { bigint: true });
-  const stop = run(["state-lock", "stop-sentinel", ...args]); assert.equal(stop.status, 0, stop.stderr); sentinel = false;
-  const savedBarrier = path.join(stateDir, `state.lock.history-${epoch}`); fs.renameSync(barrier, savedBarrier);
-  env.GROK_HISTORY_SIM_BOOT = "33333333-3333-4333-8333-333333333333";
-  const recoverArgs = ["state-lock", "recover-history", "--offline-confirmed", "--local-only", "--all-old-processes-stopped",
-    "--expected-state-dir", stateDir, "--old-epoch", epoch, "--old-barrier", savedBarrier, "--cwd", workspace];
-  holder = spawn(process.execPath, [command, ...recoverArgs], { env: { ...env, GROK_HISTORY_OFFLINE_LOCK_READY: ready,
-    GROK_HISTORY_OFFLINE_LOCK_RELEASE: release }, stdio: ["ignore", "pipe", "pipe"] });
-  let stderr = ""; holder.stderr.on("data", chunk => { stderr += chunk; });
-  closed = new Promise(resolve => holder.once("close", (code, signal) => resolve({ code, signal, stderr })));
-  const deadline = Date.now() + 15000;
-  while (!fs.existsSync(ready) && holder.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.ok(fs.existsSync(ready), "recovery must hold the root lock before the simulated mount change");
-  fs.writeFileSync(switchFile, "changed", { flag: "wx", mode: 0o600 });
-  fs.writeFileSync(release, "release", { flag: "wx", mode: 0o600 });
-  const result = await closed;
-  assert.notEqual(result.code, 0, "changed named mount must refuse recovery");
-  assert.match(result.stderr, /mount boundary/i);
-  const after = fs.statSync(stateDir, { bigint: true });
-  assert.equal(after.dev, rootIdentity.dev); assert.equal(after.ino, rootIdentity.ino);
-  assert.deepEqual(fs.readFileSync(stateFile), indexBytes);
-  assert.deepEqual(fs.readFileSync(bootstrap), bootBytes);
-  assert.deepEqual(fs.readFileSync(path.join(savedBarrier, "protocol.json")), markerBytes);
-  verifiedDone = true;
+}, t => {
+  const f = offlineHistoryFixture(t, "grok-linux-offline-recovery-");
+  const result = f.run(["state-lock", "recover", "--offline-confirmed", "--local-only", "--all-old-processes-stopped",
+    "--expected-state-dir", f.stateDir, "--cwd", f.workspace]);
+  assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, 1, "epoch recovery requires the active state barrier");
+  assert.match(result.stderr, /Grok state lock requires explicit offline migration/);
+  assert.equal(fs.existsSync(f.barrier), false);
+  f.assertPreserved();
+  f.complete();
 });

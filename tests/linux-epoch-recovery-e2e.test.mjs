@@ -209,13 +209,20 @@ test("recovery refuses non-private current and recovery directories", { skip: pr
   const epoch = scope(c => c.epoch), recovery = path.join(state, "linux-epoch-recovery-v1");
   const dirs = [recovery, path.join(recovery, epoch), path.join(state, "broker-v3"),
     path.join(state, "broker-v3", epoch), path.join(state, "direct-start-v2"), path.join(state, "direct-start-v2", epoch)];
+  const namespaces = new Set([path.join(state, "broker-v3"), path.join(state, "direct-start-v2")]);
   for (const dir of dirs) {
-    const original = fs.statSync(dir).mode & 0o7777;
+    const before = fs.statSync(dir, { bigint: true });
+    const original = Number(before.mode & 0o7777n);
     try {
       fs.chmodSync(dir, 0o777);
       assert.throws(() => scope(c => requireLinuxEpochRecovery(c)), `accepted non-private directory: ${dir}`);
       assert.throws(() => scope(c => createLinuxEpochRecovery(c, confirmed)), `reconfirmed non-private directory: ${dir}`);
     } finally { fs.chmodSync(dir, original); }
+    if (namespaces.has(dir)) {
+      assert.notEqual(fs.statSync(dir, { bigint: true }).ctimeNs, before.ctimeNs, `namespace ctime did not change: ${dir}`);
+      assert.throws(() => scope(c => requireLinuxEpochRecovery(c)), /explicit offline recovery is required/);
+      scope(c => createLinuxEpochRecovery(c, confirmed));
+    }
     scope(c => requireLinuxEpochRecovery(c));
   }
 });
@@ -974,10 +981,11 @@ for (const failure of ["intent open", "intent write", "intent fsync", "intent pa
 test("interrupted intent archival preserves evidence and permits a confirmed retry", { skip: process.platform !== "linux" }, t => {
   const { scope, confirmed, dir } = linkedPointerFixture(t);
   const pending = path.join(dir, "pending.json"), realFsync = fs.fsyncSync;
+  const fdPath = fd => { try { return fs.realpathSync(`/proc/self/fd/${fd}`); } catch { return null; } };
   let fileFault = 0;
   assert.throws(() => scope(c => {
     fs.fsyncSync = fd => {
-      if (fs.realpathSync(`/proc/self/fd/${fd}`) === pending) {
+      if (fdPath(fd) === pending) {
         fileFault++; const error = new Error("injected pending fsync EIO"); error.code = "EIO"; throw error;
       }
       return realFsync(fd);
@@ -989,8 +997,8 @@ test("interrupted intent archival preserves evidence and permits a confirmed ret
   let archiveFault = 0;
   assert.throws(() => scope(c => {
     fs.fsyncSync = fd => {
-      const file = fs.realpathSync(`/proc/self/fd/${fd}`);
-      if (path.dirname(file) === dir && /^pending-archive-[0-9a-f-]{36}\.json$/.test(path.basename(file))) {
+      const file = fdPath(fd);
+      if (file && path.dirname(file) === dir && /^pending-archive-[0-9a-f-]{36}\.json$/.test(path.basename(file))) {
         archiveFault++; const error = new Error("injected archive fsync EIO"); error.code = "EIO"; throw error;
       }
       return realFsync(fd);
@@ -1001,7 +1009,7 @@ test("interrupted intent archival preserves evidence and permits a confirmed ret
   assert.throws(() => scope(c => requireLinuxEpochRecovery(c)));
   const synced = new Set();
   scope(c => {
-    fs.fsyncSync = fd => { const file = fs.realpathSync(`/proc/self/fd/${fd}`); synced.add(file); return realFsync(fd); };
+    fs.fsyncSync = fd => { const file = fdPath(fd); if (file) synced.add(file); return realFsync(fd); };
     try { return createLinuxEpochRecovery(c, confirmed); } finally { fs.fsyncSync = realFsync; }
   });
   scope(c => requireLinuxEpochRecovery(c));

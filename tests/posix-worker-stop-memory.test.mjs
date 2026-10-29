@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { boundJsonDiagnostic, hasGenerationIdentity, sameTurnEvidence } from "../plugins/grok/scripts/lib/tracked-jobs.mjs";
 import { stopTrackedJobProcess } from "../plugins/grok/scripts/lib/process.mjs";
 
 // 失敗条件: 照会直後のPID再利用、生存継続、識別不能、旧jobの識別子欠落で
@@ -29,13 +30,16 @@ for (const platform of ["linux", "darwin"]) {
 
 const companion = fs.readFileSync(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url), "utf8");
 const source = companion.slice(companion.indexOf("async function handleCancel"), companion.indexOf("async function main"));
-for (const outcome of ["exit", "pending"]) {
-  test(`legacy Darwin cancel releases state lock before waiting for worker: ${outcome}`, async () => {
+for (const missing of ["index", "detail"]) {
+  test(`Darwin cancel retains the job when the ${missing} record lacks a lease`, async () => {
+    const lease = { id: "lease", slot: 0, path: "/virtual/lease", dev: "1", ino: "2", stateGeneration: "current-epoch", directoryDev: "1", directoryIno: "3" };
     const indexed = { id: "job", createdAt: "created", epoch: "current-epoch", status: "running", pid: 42, processStartKey: "worker-start",
-      grokTransport: "broker", grokPromptState: "not-sent" };
+      claimToken: "claim", workerLease: lease, grokTransport: "broker", grokPromptState: "not-sent" };
     let stored = { ...indexed };
+    if (missing === "index") delete indexed.workerLease;
+    else delete stored.workerLease;
+    const original = JSON.stringify([indexed, stored]);
     let locked = false;
-    let lockedDuringWait;
     let outputs = 0;
     const lock = fn => { assert.equal(locked, false); locked = true;
       try { return fn({ jobs: [indexed] }, { epoch: "current-epoch" }); } finally { locked = false; } };
@@ -44,30 +48,17 @@ for (const outcome of ["exit", "pending"]) {
       resolveCancelableJob: () => ({ workspaceRoot: "mock", job: indexed }), isActiveJob: () => true,
       updateState: (_root, fn) => lock(fn), withStateSnapshot: (_root, fn) => lock(fn),
       readStoredJob: () => { assert.equal(locked, true); return stored; },
-      writeJobFile: (_root, _id, value) => { assert.equal(locked, true); stored = value; },
-      inspectTrackedJobProcess: () => "match", createProcessLookupDiagnostics: () => ({}),
-      stopTrackedJobProcess: () => {
-        lockedDuringWait = locked;
-        assert.equal(locked, false, "Worker must be free to persist terminal state while cancel waits");
-        assert.equal(stored.terminationPending, true);
-        if (outcome === "pending") throw Error("Process exit could not be confirmed.");
-      },
+      writeJobFile: () => assert.fail("An unverified job must not be changed"),
+      inspectTrackedJobProcess: () => assert.fail("An unverified PID must not be inspected"), createProcessLookupDiagnostics: () => ({}),
+      stopTrackedJobProcess: () => assert.fail("An unverified worker must not be stopped"),
       nowIso: () => "now", appendLogLine() {}, setTimeout: () => ({ unref() {} }),
       outputCommandResult: () => { outputs += 1; }, renderCancelReport: () => "report"
     });
+    Object.assign(context, { boundJsonDiagnostic, hasGenerationIdentity, sameTurnEvidence, performance });
     vm.runInContext(source, context);
-    const operation = context.handleCancel([]);
-    if (outcome === "exit") {
-      await operation;
-      assert.equal(stored.terminationPending, false);
-      assert.equal(stored.pid, null);
-      assert.equal(outputs, 1);
-    } else {
-      await assert.rejects(operation, /cancellation remains pending/i);
-      assert.equal(stored.terminationPending, true);
-      assert.equal(stored.pid, 42);
-      assert.equal(outputs, 0);
-    }
-    assert.equal(lockedDuringWait, false);
+    await assert.rejects(context.handleCancel([]), /no verified current worker lease/i);
+    assert.equal(JSON.stringify([indexed, stored]), original);
+    assert.equal(outputs, 0);
+    assert.equal(locked, false);
   });
 }

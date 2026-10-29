@@ -33,6 +33,9 @@ function fixture(releaseAt, resolutionMs = 0) {
     performance: { now: () => elapsed },
     process: { pid: 123, platform: "win32" }, SLEEP_SIGNAL: {},
     HELD_STATE_LOCK_SCOPES: new Map(),
+    DARWIN_STATE_CAPABILITIES: new WeakSet(),
+    LINUX_HISTORY_CAPABILITIES: new WeakSet(),
+    acquireExistingDarwinMigrationGuard(value) { assert.equal(value, stateDir); return null; },
     assertStateLockBarrier: value => { assert.equal(value, stateDir); return "virtual-lock"; },
     inspectNativeStateLockScope: value => { assert.equal(value, stateDir); return { hostId: protocol.hostId }; },
     readStateLockProtocol(value, scope) {

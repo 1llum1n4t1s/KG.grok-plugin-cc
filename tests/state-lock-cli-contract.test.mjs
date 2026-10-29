@@ -14,7 +14,7 @@ const handler = source.slice(source.indexOf("function handleStateLock("), source
 function memoryCli(args) {
   const calls = [];
   const context = {
-    path, normalizeArgv: value => value, parseCommandInput: parseArgs,
+    path, process: { platform: process.platform }, normalizeArgv: value => value, parseCommandInput: parseArgs,
     resolveCommandWorkspace() { calls.push("workspace"); return "/workspace"; },
     migrateStateLock(cwd, options) { calls.push({ cwd, options }); return { stateDir: "C:\\Actual\\State", protocol: "native-local-v2" }; },
     outputCommandResult(payload, text, json) { calls.push({ payload, text, json }); }

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { boundJsonDiagnostic, hasGenerationIdentity, sameTurnEvidence } from "../plugins/grok/scripts/lib/tracked-jobs.mjs";
 import { inspectTrackedJobProcess } from "../plugins/grok/scripts/lib/process.mjs";
 import { isActiveJob } from "../plugins/grok/scripts/lib/job-status.mjs";
 
@@ -37,9 +38,10 @@ for (const platform of ["win32", "linux", "darwin"]) {
         stopTrackedJobProcess: () => assert.fail("Missing PID must never be stopped"),
         outputCommandResult: () => { output += 1; }, renderCancelReport: () => "report"
       });
+      Object.assign(context, { boundJsonDiagnostic, hasGenerationIdentity, sameTurnEvidence, performance });
       vm.runInContext(source, context);
       const operation = context.handleCancel([]);
-      const safe = platform !== "linux" && (kind === "queued" || (platform === "win32" && kind === "confirmed"));
+      const safe = platform === "win32" && ["queued", "confirmed"].includes(kind);
       if (safe) {
         await operation;
         assert.equal(output, 1); assert.equal(stored.terminationPending, false);
@@ -47,7 +49,7 @@ for (const platform of ["win32", "linux", "darwin"]) {
       } else {
         await assert.rejects(operation, /pending|verify/i);
         assert.equal(output, 0);
-        if (platform === "linux") assert.equal(JSON.stringify([indexed, stored]), original);
+        if (platform !== "win32") assert.equal(JSON.stringify([indexed, stored]), original);
         else assert.equal(stored.terminationPending, true);
       }
     });
@@ -66,22 +68,39 @@ for (const proof of ["missing", "confirmed", "wrong-generation", "one-sided", "p
     let stored = { ...job };
     if (proof === "one-sided") delete stored.workerStopConfirmed;
     const state = { jobs: [job], reviewGateSessions: [] };
+    const original = JSON.stringify([job, stored]);
+    let concurrentSnapshot;
     let transactions = 0;
+    let writes = 0;
     const context = vm.createContext({ process: { platform, stderr: { write() {} } }, performance: { now: () => 0 },
       fs: { existsSync: () => true }, resolveWorkspaceRoot: () => "virtual", resolveStateFile: () => "state", resolveJobFile: () => "job",
-      readJobFile: () => stored, writeJobFile: (_root, _id, value) => { stored = value; }, nowIso: () => "now", appendLogLine() {},
+      readJobFile: () => stored, writeJobFile: (_root, _id, value) => { writes++; stored = value; }, nowIso: () => "now", appendLogLine() {},
       updateState: (_root, callback) => {
         transactions += 1;
-        if (transactions === 2 && proof === "proof-changed") stored.workerStopProof = null;
+        if (transactions === 2) {
+          if (platform !== "win32") assert.equal(JSON.stringify([state.jobs[0], stored]), original);
+          if (proof === "proof-changed") stored.workerStopProof = null;
+          concurrentSnapshot = JSON.stringify([state.jobs[0], stored]);
+        }
         callback(state, { epoch: "current-epoch" });
       }, withStateSnapshot: (_root, callback) => callback(state, { epoch: "current-epoch" }),
       createProcessLookupDiagnostics: () => ({}), isActiveJob,
-      inspectTrackedJobProcess: (pid, key) => inspectTrackedJobProcess(pid, key, { platform }),
+      inspectTrackedJobProcess: (pid, key) => {
+        if (platform !== "win32") assert.fail("Unleased POSIX workers must not be inspected by PID");
+        return inspectTrackedJobProcess(pid, key, { platform });
+      },
       stopTrackedJobProcess: () => assert.fail("Missing worker PID must never be stopped")
     });
+    Object.assign(context, { hasGenerationIdentity, sameTurnEvidence });
     vm.runInContext(cleanupSource, context);
     await context.cleanupSessionJobs("virtual", "session");
-    assert.equal(state.jobs.length, platform !== "linux" && ["confirmed", "never-started"].includes(proof) ? 0 : 1);
+    assert.equal(state.jobs.length, platform === "win32" && ["confirmed", "never-started"].includes(proof) ? 0 : 1);
+    if (platform !== "win32") {
+      assert.equal(writes, 0);
+      assert.equal(state.jobs[0], job);
+      assert.equal(job.terminationPending, true);
+      assert.equal(JSON.stringify([state.jobs[0], stored]), concurrentSnapshot ?? original);
+    }
   });
 }
 }

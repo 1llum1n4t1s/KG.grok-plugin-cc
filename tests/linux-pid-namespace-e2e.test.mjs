@@ -7,9 +7,10 @@ import process from "node:process";
 import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { migrateStateLock, resolveStateDir, saveState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
+import { migrateStateLock, resolveStateDir, updateState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
 import { inspectPosixStateLockScope, readPosixStateLockProtocol } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
 import { sentinelScript } from "../plugins/grok/scripts/lib/linux-state-sentinel.mjs";
+import { initializeLinuxLeaseLedger } from "../plugins/grok/scripts/lib/linux-lease-ledger.mjs";
 
 // 先行失敗条件: 別 namespace の生存 PID/PGID を不在と誤認、同 namespace の誤拒否、
 // 旧 marker の誤受理、boot/namespace 変更や照会不能の見逃し、PID 衝突による誤状態更新・signal、
@@ -25,6 +26,12 @@ const jobModule = new URL("../plugins/grok/scripts/lib/job-control.mjs", import.
 const brokerSource = fileURLToPath(new URL("../plugins/grok/scripts/lib/broker-lifecycle.mjs", import.meta.url));
 const brokerModule = new URL("../plugins/grok/scripts/lib/broker-lifecycle.mjs", import.meta.url).href;
 const stateModule = new URL("../plugins/grok/scripts/lib/state.mjs", import.meta.url).href;
+const ledgerModule = new URL("../plugins/grok/scripts/lib/linux-lease-ledger.mjs", import.meta.url).href;
+const migrationImport = `import {migratePosixStateLock} from ${JSON.stringify(lockModule)};import {initializeLinuxLeaseLedger} from ${JSON.stringify(ledgerModule)};`;
+const migrationCall = `migratePosixStateLock(process.env.PROBE_STATE,{expectedStateDir:process.env.PROBE_STATE,prepareLinuxGeneration:context=>initializeLinuxLeaseLedger({context})})`;
+const migrateFixtureLock = (lock, stateDir) => lock.migratePosixStateLock(stateDir, {
+  expectedStateDir: stateDir, prepareLinuxGeneration: context => initializeLinuxLeaseLedger({ context })
+});
 
 const ownerSource = `
 import net from 'node:net';
@@ -39,6 +46,7 @@ const observerSource = `
 import fs from 'node:fs';import net from 'node:net';import {spawn,spawnSync} from 'node:child_process';
 import {inspectTrackedJobProcess} from ${JSON.stringify(processModule)};
 import {inspectPosixStateLockScope,readPosixStateLockProtocol,migratePosixStateLock} from ${JSON.stringify(lockModule)};
+import {initializeLinuxLeaseLedger} from ${JSON.stringify(ledgerModule)};
 import {buildStatusSnapshot} from ${JSON.stringify(jobModule)};
 const owner=JSON.parse(process.env.PROBE_OWNER), stateDir=process.env.PROBE_STATE, cwd=process.env.PROBE_WORKSPACE;
 const nspid=fs.readFileSync('/proc/self/status','utf8').match(/^NSpid:\\s*(.+)$/m)?.[1].trim().split(/\\s+/).map(Number)??[];
@@ -61,7 +69,7 @@ if(process.env.PROBE_COLLISION==='1'){
 }
 try{readPosixStateLockProtocol(stateDir+'/state.lock',inspectPosixStateLockScope(stateDir));result.marker='accepted';}catch(e){result.marker='rejected';}
 try{const s=buildStatusSnapshot(cwd,{env:{}});result.status='returned';result.running=s.running.map(j=>j.id);}catch(e){result.status='rejected';}
-if(process.env.PROBE_INHERITED==='1'){const separate=process.env.PROBE_SEPARATE;fs.mkdirSync(separate,{mode:0o700});try{migratePosixStateLock(separate,{expectedStateDir:separate});result.inheritedMigration='accepted';}catch{result.inheritedMigration='rejected';}result.inheritedArtifacts=fs.readdirSync(separate);}
+if(process.env.PROBE_INHERITED==='1'){const separate=process.env.PROBE_SEPARATE;fs.mkdirSync(separate,{mode:0o700});try{migratePosixStateLock(separate,{expectedStateDir:separate,prepareLinuxGeneration:context=>initializeLinuxLeaseLedger({context})});result.inheritedMigration='accepted';}catch{result.inheritedMigration='rejected';}result.inheritedArtifacts=fs.readdirSync(separate);}
 const socket=net.connect(process.env.PROBE_SOCKET);socket.on('connect',()=>socket.write('ping'));
 socket.on('data',data=>{result.socketReply=data.toString();socket.end();});
 socket.on('error',e=>{result.socketError=e.message;});
@@ -117,8 +125,10 @@ test("Linux PID namespace ownership is enforced for shared state", { skip: enabl
   });
   const seed = () => {
     const job = { id: "owner", status: "running", pid: ownerInfo.pid, processStartKey: ownerInfo.startKey, createdAt: new Date().toISOString() };
-    saveState(workspace, { version: 1, config: {}, jobs: [job] });
-    writeJobFile(workspace, job.id, job);
+    updateState(workspace, (state, context) => {
+      state.jobs = [job];
+      writeJobFile(workspace, job.id, job, context);
+    });
   };
   seed();
   const env = { ...process.env, PROBE_OWNER: JSON.stringify(ownerInfo), PROBE_OWNER_NS: fs.readlinkSync("/proc/self/ns/pid"), PROBE_STATE: stateDir, PROBE_WORKSPACE: workspace, PROBE_SOCKET: socket };
@@ -248,7 +258,7 @@ test("sentinel shutdown invalidates its marker without signaling a PID", { skip:
     }
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  lock.migratePosixStateLock(stateDir, { expectedStateDir: stateDir });
+  migrateFixtureLock(lock, stateDir);
   const scope = lock.inspectPosixStateLockScope(stateDir);
   assert.ok(lock.readPosixStateLockProtocol(path.join(stateDir, "state.lock"), scope));
   assert.equal(typeof lock.shutdownPosixStateLockSentinel, "function");
@@ -258,7 +268,7 @@ test("sentinel shutdown invalidates its marker without signaling a PID", { skip:
   await lock.shutdownPosixStateLockSentinel(stateDir, { offlineConfirmed: true, expectedStateDir: stateDir });
   stopped = true;
   assert.throws(() => lock.readPosixStateLockProtocol(path.join(stateDir, "state.lock"), scope));
-  assert.throws(() => lock.migratePosixStateLock(stateDir, { expectedStateDir: stateDir }));
+  assert.throws(() => migrateFixtureLock(lock, stateDir));
 });
 
 // sentinel と観測側が別々の安定した mount namespace にいる。旧パスを隠すのは観測側だけ。
@@ -273,7 +283,7 @@ test("sentinel barrier identity and stable cross-namespace root aliases", { skip
     if (initialized) lock.shutdownPosixStateLockSentinel(stateDir, { offlineConfirmed: true, expectedStateDir: stateDir });
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  const marker = lock.migratePosixStateLock(stateDir, { expectedStateDir: stateDir });
+  const marker = migrateFixtureLock(lock, stateDir);
   initialized = true;
   const markerPath = path.join(stateDir, "state.lock", "protocol.json"), originalMarker = fs.readFileSync(markerPath, "utf8");
   const preload = path.join(dir, "fd-observation.cjs");
@@ -392,7 +402,7 @@ for (const targetKind of ["ready read", "directory sync"]) {
       t.diagnostic(`Isolated fixture retained: ${dir}`);
     });
     if (targetKind === "ready read") {
-      try { lock.migratePosixStateLock(stateDir, { expectedStateDir: stateDir }); }
+      try { migrateFixtureLock(lock, stateDir); }
       finally {
         initialized = fs.existsSync(path.join(lockDir, "protocol.json")) && fs.existsSync(path.join(lockDir, "sentinel-ready.json"));
       }
@@ -513,7 +523,7 @@ if (process.argv[2]==='bootstrap') {
  syncBuiltinESMExports();
 }
 `);
-    const source = `import {migratePosixStateLock} from ${JSON.stringify(lockModule)};try{migratePosixStateLock(process.env.PROBE_STATE,{expectedStateDir:process.env.PROBE_STATE});process.exit(2)}catch{process.exit(0)}`;
+    const source = `${migrationImport}try{${migrationCall};process.exit(2)}catch{process.exit(0)}`;
     const audit = path.join(dir, "failure-triggered");
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { env: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, PROBE_STATE: stateDir, PROBE_FAILURE: mode, PROBE_AUDIT: audit }, encoding: "utf8", timeout: 15000 });
     assert.equal(result.error, undefined, result.error?.message);
@@ -561,7 +571,7 @@ if(process.argv[2]==='sentinel') {
  syncBuiltinESMExports();
 }
 `);
-    const source = `import {migratePosixStateLock} from ${JSON.stringify(lockModule)};try{migratePosixStateLock(process.env.PROBE_STATE,{expectedStateDir:process.env.PROBE_STATE});process.exit(0)}catch{process.exit(2)}`;
+    const source = `${migrationImport}try{${migrationCall};process.exit(0)}catch{process.exit(2)}`;
     const owner = spawn(process.execPath, ["--input-type=module", "-e", source], { env: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, PROBE_STATE: stateDir, PROBE_GATE: dir, PROBE_READY_OUTCOME: outcome }, stdio: ["ignore", "ignore", "ignore"] });
     const closed = new Promise(resolve => owner.once("close", resolve));
     const alive = sentinel => {
@@ -621,7 +631,7 @@ test("a reused PID namespace inode cannot adopt an old state marker", { skip: en
     fs.rmSync(dir, { recursive: true, force: true });
   });
   const shell = 'mount -t proc proc /proc && exec "$@"';
-  const writer = `import fs from 'node:fs';import {migratePosixStateLock} from ${JSON.stringify(lockModule)};migratePosixStateLock(process.env.PROBE_STATE,{expectedStateDir:process.env.PROBE_STATE});console.log(JSON.stringify({namespace:fs.readlinkSync('/proc/self/ns/pid'),pid:process.pid,boot:fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim()}));process.stdin.resume();process.stdin.on('end',()=>process.exit(0));`;
+  const writer = `import fs from 'node:fs';${migrationImport}${migrationCall};console.log(JSON.stringify({namespace:fs.readlinkSync('/proc/self/ns/pid'),pid:process.pid,boot:fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim()}));process.stdin.resume();process.stdin.on('end',()=>process.exit(0));`;
   owner = spawn("unshare", ["-m", "-p", "-f", "/bin/sh", "-c", shell, "probe", process.execPath, "--input-type=module", "-e", writer], { env: { ...process.env, PROBE_STATE: stateDir }, stdio: ["pipe", "pipe", "pipe"] });
   const first = await new Promise((resolve, reject) => {
     let out = "", err = "";
@@ -669,11 +679,11 @@ test("reused namespace cannot clean up a replacement broker socket", { skip: ena
     fs.rmSync(sessionDir, { recursive: true, force: true });
   });
   const broker = `const net=require('node:net');const server=net.createServer(c=>c.end('old'));server.listen(process.env.PROBE_SOCKET,()=>console.log('ready'));process.stdin.resume();process.stdin.on('end',()=>server.close());`;
-  const writer = `import fs from 'node:fs';import {spawn} from 'node:child_process';import {migrateStateLock,resolveStateDir} from ${JSON.stringify(stateModule)};import {saveBrokerSession} from ${JSON.stringify(brokerModule)};
-const cwd=process.env.PROBE_WORKSPACE,dir=process.env.PROBE_DIR;migrateStateLock(cwd,{offlineConfirmed:true,localOnly:true,expectedStateDir:resolveStateDir(cwd)});
-const c=spawn(process.execPath,['-e',${JSON.stringify(broker)}],{detached:true,stdio:['pipe','pipe','inherit']});let out='';c.stdout.on('data',d=>{out+=d;if(!out.includes('\\n'))return;c.stdout.removeAllListeners('data');const generation='old-fixture-generation';const session={generation,pid:c.pid,endpoint:'unix:'+process.env.PROBE_SOCKET,sessionDir:dir,pidFile:dir+'/broker.pid',logFile:dir+'/broker.log',ownedGroup:{pgid:c.pid,generation,platform:'linux'},shutdownAcceptedGeneration:generation};fs.writeFileSync(session.pidFile,String(c.pid));fs.writeFileSync(session.logFile,'old');saveBrokerSession(cwd,session);
-const journal=resolveStateDir(cwd)+'/broker-v2/broker-admission.jsonl';const records=[{event:'pending',ownerPid:process.pid,platform:'linux',lockToken:'fixture',endpoint:session.endpoint,sessionDir:dir,pidFile:session.pidFile,logFile:session.logFile},{event:'spawned',pid:c.pid,pgid:c.pid},{event:'settled',pid:c.pid,outcome:'ready'},{event:'confirmed',pid:c.pid,outcome:'ready'}].map(r=>JSON.stringify({version:2,generation,...r})).join('\\n')+'\\n';fs.writeFileSync(journal,records,{mode:0o600});
-console.log(JSON.stringify({namespace:fs.readlinkSync('/proc/self/ns/pid'),boot:fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim(),pid:c.pid}));});process.stdin.resume();process.stdin.on('end',()=>c.stdin.end());c.on('close',code=>process.exit(code??1));`;
+  const writer = `import fs from 'node:fs';import {spawn} from 'node:child_process';import {migrateStateLock,resolveStateDir} from ${JSON.stringify(stateModule)};import {saveBrokerSession,resolveBrokerStateDir} from ${JSON.stringify(brokerModule)};
+const cwd=process.env.PROBE_WORKSPACE,dir=process.env.PROBE_DIR;const marker=migrateStateLock(cwd,{offlineConfirmed:true,localOnly:true,expectedStateDir:resolveStateDir(cwd)});
+const c=spawn(process.execPath,['-e',${JSON.stringify(broker)}],{detached:true,stdio:['pipe','pipe','inherit']});let out='';c.stdout.on('data',d=>{out+=d;if(!out.includes('\\n'))return;c.stdout.removeAllListeners('data');const generation='old-fixture-generation';const session={generation,epoch:marker.epoch,pid:c.pid,endpoint:'unix:'+process.env.PROBE_SOCKET,sessionDir:dir,pidFile:dir+'/broker.pid',logFile:dir+'/broker.log',ownedGroup:{pgid:c.pid,generation,platform:'linux'},shutdownAcceptedGeneration:generation};fs.writeFileSync(session.pidFile,String(c.pid));fs.writeFileSync(session.logFile,'old');saveBrokerSession(cwd,session);
+const journal=resolveBrokerStateDir(cwd)+'/broker-admission.jsonl';const records=[{event:'pending',ownerPid:process.pid,platform:'linux',lockToken:'fixture',endpoint:session.endpoint,sessionDir:dir,pidFile:session.pidFile,logFile:session.logFile},{event:'spawned',pid:c.pid,pgid:c.pid},{event:'settled',pid:c.pid,outcome:'ready'},{event:'confirmed',pid:c.pid,outcome:'ready'}].map(r=>JSON.stringify({version:2,generation,epoch:marker.epoch,...r})).join('\\n')+'\\n';fs.writeFileSync(journal,records,{mode:0o600});
+console.log(JSON.stringify({namespace:fs.readlinkSync('/proc/self/ns/pid'),boot:fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim(),pid:c.pid,session}));});process.stdin.resume();process.stdin.on('end',()=>c.stdin.end());c.on('close',code=>process.exit(code??1));`;
   owner = spawn("unshare", ["-m", "-p", "-f", "/bin/sh", "-c", shell, "probe", process.execPath, "--input-type=module", "-e", writer], { env, stdio: ["pipe", "pipe", "pipe"] });
   const first = await new Promise((resolve, reject) => {
     let out = "", err = "";
@@ -689,10 +699,10 @@ console.log(JSON.stringify({namespace:fs.readlinkSync('/proc/self/ns/pid'),boot:
   await new Promise((resolve, reject) => { replacement.once("error", reject); replacement.listen(socketPath, resolve); });
   const reply = await new Promise((resolve, reject) => { const client = net.connect(socketPath); client.on("data", data => resolve(data.toString())); client.on("error", reject); });
   assert.equal(reply, "replacement");
-  const observer = `import fs from 'node:fs';import {cleanupIdleBrokerSession,ensureBrokerSession,loadBrokerSession} from ${JSON.stringify(brokerModule)};const result={namespace:fs.readlinkSync('/proc/self/ns/pid'),boot:fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim()};if(result.namespace===process.env.PROBE_NS){const s=loadBrokerSession(process.env.PROBE_WORKSPACE);try{result.adopted=(await ensureBrokerSession(process.env.PROBE_WORKSPACE,{timeoutMs:3000,env:{}}))?.generation??null;}catch(e){result.adoptionError=e.message;}try{result.cleaned=await cleanupIdleBrokerSession(process.env.PROBE_WORKSPACE,s,{timeoutMs:1800});}catch(e){result.error=e.message;}result.socketExists=fs.existsSync(process.env.PROBE_SOCKET);}console.log(JSON.stringify(result));`;
+  const observer = `import fs from 'node:fs';import {cleanupIdleBrokerSession,ensureBrokerSession,loadBrokerSession} from ${JSON.stringify(brokerModule)};const result={namespace:fs.readlinkSync('/proc/self/ns/pid'),boot:fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim()};if(result.namespace===process.env.PROBE_NS){const s=JSON.parse(process.env.PROBE_SESSION);try{result.loaded=loadBrokerSession(process.env.PROBE_WORKSPACE)?.generation??null;}catch(e){result.loadError=e.message;}try{result.adopted=(await ensureBrokerSession(process.env.PROBE_WORKSPACE,{timeoutMs:3000,env:{}}))?.generation??null;}catch(e){result.adoptionError=e.message;}try{result.cleaned=await cleanupIdleBrokerSession(process.env.PROBE_WORKSPACE,s,{timeoutMs:1800});}catch(e){result.error=e.message;}result.socketExists=fs.existsSync(process.env.PROBE_SOCKET);}console.log(JSON.stringify(result));`;
   let reused;
   for (let i = 0; i < 256; i++) {
-    const child = spawnSync("unshare", ["-m", "-p", "-f", "/bin/sh", "-c", shell, "probe", process.execPath, "--input-type=module", "-e", observer], { env: { ...env, PROBE_NS: first.namespace }, encoding: "utf8", timeout: 15000 });
+    const child = spawnSync("unshare", ["-m", "-p", "-f", "/bin/sh", "-c", shell, "probe", process.execPath, "--input-type=module", "-e", observer], { env: { ...env, PROBE_NS: first.namespace, PROBE_SESSION: JSON.stringify(first.session) }, encoding: "utf8", timeout: 15000 });
     assert.equal(child.error, undefined, child.error?.message); assert.equal(child.status, 0, child.stderr);
     const result = JSON.parse(child.stdout.trim());
     if (result.namespace === first.namespace) { reused = result; break; }
@@ -700,10 +710,20 @@ console.log(JSON.stringify({namespace:fs.readlinkSync('/proc/self/ns/pid'),boot:
   if (!reused) return t.skip("namespace inode was not reused within 256 isolated attempts");
   assert.equal(reused.boot, first.boot);
   await t.test("replacement endpoint is not adopted as the old generation", () => {
+    assert.match(reused.loadError ?? "", /sentinel|namespace/i, JSON.stringify({ first, reused }));
+    assert.match(reused.adoptionError ?? "", /sentinel|namespace/i, JSON.stringify({ first, reused }));
+    assert.notEqual(reused.loaded, "old-fixture-generation", JSON.stringify({ first, reused }));
     assert.notEqual(reused.adopted, "old-fixture-generation", JSON.stringify({ first, reused }));
   });
-  await t.test("replacement endpoint is not removed by old cleanup", () => {
+  await t.test("replacement endpoint is not removed by old cleanup", async () => {
     assert.equal(reused.socketExists, true, JSON.stringify({ first, reused }));
+    assert.match(reused.error ?? "", /sentinel|namespace/i, JSON.stringify({ first, reused }));
     assert.notEqual(reused.cleaned, true, JSON.stringify({ first, reused }));
+    const reply = await new Promise((resolve, reject) => {
+      const client = net.connect(socketPath);
+      client.on("data", data => resolve(data.toString()));
+      client.on("error", reject);
+    });
+    assert.equal(reply, "replacement");
   });
 });

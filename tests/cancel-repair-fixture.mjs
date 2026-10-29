@@ -3,9 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { GrokAcpClient } from "../plugins/grok/scripts/lib/acp.mjs";
 import { removeTempFixture } from "./helpers.mjs";
 import { startFixtureBroker } from "./broker-fixture-helper.mjs";
+import { ensureBrokerSession } from "../plugins/grok/scripts/lib/broker-lifecycle.mjs";
+import { migrateStateLock, resolveStateDir } from "../plugins/grok/scripts/lib/state.mjs";
+import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
 
 export const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -14,6 +18,10 @@ const fake = String.raw`
 import fs from "node:fs";
 import readline from "node:readline";
 if (process.argv.includes("--version") || process.argv.includes("--help")) {
+  if (process.env.CANCEL_FAIL_PROBE && process.argv.includes("--version")) {
+    fs.appendFileSync(process.env.CANCEL_TEST_LOG, JSON.stringify({ probeFailed: true }) + "\n");
+    process.exit(1);
+  }
   if (process.env.CANCEL_PROBE_DELAY) {
     fs.appendFileSync(process.env.CANCEL_TEST_LOG, JSON.stringify({ probe: true }) + "\n");
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.CANCEL_PROBE_DELAY));
@@ -33,14 +41,25 @@ const finish = (id, stopReason = "end_turn") => {
 };
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const m = JSON.parse(line);
-  if (m.method === "initialize") return send({ id: m.id, result: { protocolVersion: 1, agentCapabilities: {
-    loadSession: true, ...(process.env.CANCEL_LIST_SESSIONS ? { sessionCapabilities: { list: {} } } : {})
-  } } });
-  if (m.method === "session/new") return send({ id: m.id, result: {
-    sessionId: process.env.CANCEL_NUMBERED_SESSIONS ? "session-" + (++sessionNumber) : "session-1"
-  } });
+  if (m.method === "initialize") {
+    const reply = () => send({ id: m.id, result: { protocolVersion: 1, agentCapabilities: {
+      loadSession: !process.env.CANCEL_NO_LOAD_SESSION, ...(process.env.CANCEL_LIST_SESSIONS ? { sessionCapabilities: { list: {} } } : {})
+    } } });
+    if (process.env.CANCEL_DELAY_INITIALIZE) {
+      log({ delayedInitialize: true });
+      return setTimeout(reply, Number(process.env.CANCEL_DELAY_INITIALIZE));
+    }
+    return reply();
+  }
+  if (m.method === "session/new") {
+    log({ newSession: true });
+    return send({ id: m.id, result: {
+      sessionId: process.env.CANCEL_SESSION_PREFIX ? process.env.CANCEL_SESSION_PREFIX + (++sessionNumber) :
+        process.env.CANCEL_NUMBERED_SESSIONS ? "session-" + (++sessionNumber) : "session-1"
+    } });
+  }
   if (m.method === "session/load") {
-    log({ loadedSession: m.params.sessionId });
+    log({ loadedSession: m.params.sessionId, loadParams: m.params });
     return send({ id: m.id, result: { sessionId: m.params.sessionId } });
   }
   if (m.method === "session/list") {
@@ -113,9 +132,10 @@ export async function stopFixtureChild(child) {
 }
 
 let fixtureActive = false;
-export async function fixture(t, extraEnv = {}) {
+export async function fixture(t, extraEnv = {}, onRoot = () => {}, { broker = null, inspectProcesses = spawnSync, onStartupChild = () => {} } = {}) {
   if (fixtureActive) throw new Error("Cancel fixtures cannot share the process environment concurrently");
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cancel-repair-e2e-"));
+  onRoot(cwd);
   const script = path.join(cwd, "agent.mjs");
   fs.writeFileSync(script, fake);
   const bin = path.join(cwd, process.platform === "win32" ? "grok.cmd" : "grok");
@@ -130,9 +150,62 @@ export async function fixture(t, extraEnv = {}) {
   process.env.PLUGIN_DATA = data;
   const env = { ...process.env, GROK_BIN: bin, CANCEL_TEST_LOG: logFile, CANCEL_REVIEW_GATE: path.join(cwd, "review-release"), ...extraEnv,
     CLAUDE_PLUGIN_DATA: data, PLUGIN_DATA: data, TMPDIR: cwd, TMP: cwd, TEMP: cwd, CANCEL_FIXTURE_RELEASE: path.join(cwd, "fixture-release") };
-  const address = process.platform === "win32" ? `pipe:\\\\.\\pipe\\cancel-repair-${randomUUID()}` : `unix:${path.join(cwd, "broker.sock")}`;
-  let started;
-  try { started = await startFixtureBroker(cwd, env, address); }
+  let address = process.platform === "win32" ? `pipe:\\\\.\\pipe\\cancel-repair-${randomUUID()}` : `unix:${path.join(cwd, "broker.sock")}`;
+  let started, startupChild, startupExited, startupMarker, startupStateDir;
+  const logs = () => fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
+  // 起動が失敗しても専用 sentinel の後始末を登録する。停止証拠が足りなければ保持する。
+  t.after(async () => {
+    if (started) return;
+    try {
+      if (process.platform !== "linux" || !startupChild || !startupExited || !startupMarker?.epoch || !startupStateDir ||
+          !Number.isSafeInteger(startupChild.pid) || startupChild.pid <= 0)
+        throw new Error("startup ownership or sentinel identity was not observed");
+      let timer;
+      const result = await Promise.race([startupExited, new Promise(resolve => { timer = setTimeout(() => resolve("timeout"), 3000); })]);
+      clearTimeout(timer);
+      if (result !== "exit" || (startupChild.exitCode === null && startupChild.signalCode === null))
+        throw new Error("owned broker exit was not observed");
+      const agentPids = new Set(logs().map(row => row.started).filter(pid => Number.isSafeInteger(pid) && pid > 0));
+      if (!agentPids.size) throw new Error("agent identity was not recorded");
+      const ps = inspectProcesses("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8", timeout: 3000 });
+      assert.ifError(ps.error);
+      assert.equal(ps.status, 0, ps.stderr);
+      assert.ok(!ps.stdout.split("\n").map(line => line.trim().split(/\s+/)).some(([pid, pgid, stat]) =>
+        stat && !stat.startsWith("Z") && (Number(pid) === startupChild.pid || agentPids.has(Number(pid)) || Number(pgid) === startupChild.pid)),
+      "fixture broker, agent or process group is still running");
+      const marker = JSON.parse(fs.readFileSync(path.join(startupStateDir, "state.lock", "protocol.json"), "utf8"));
+      assert.equal(marker.epoch, startupMarker.epoch);
+      assert.deepEqual(marker.sentinel, startupMarker.sentinel);
+      const stopped = shutdownPosixStateLockSentinel(startupStateDir, { offlineConfirmed: true, expectedStateDir: startupStateDir });
+      assert.equal(stopped.stopped, true);
+      assert.equal(stopped.epoch, startupMarker.epoch);
+      removeTempFixture(cwd, { recursive: true, force: true });
+    } catch (error) {
+      t.diagnostic(`Fixture retained because startup cleanup was not confirmed: ${cwd}; ${error.message}`);
+    }
+  });
+  try {
+    const modules = {
+      state: { resolveStateDir, migrateStateLock: (...args) => {
+        startupStateDir = resolveStateDir(cwd);
+        startupMarker = migrateStateLock(...args);
+        return startupMarker;
+      } },
+      onChild(child) {
+        startupChild = child;
+        startupExited = new Promise(resolve => {
+          child.once("exit", () => resolve("exit"));
+          child.once("error", () => resolve("error"));
+          child.once("close", () => resolve("close"));
+        });
+        onStartupChild(child);
+      },
+      ...(broker ? { broker } : extraEnv.CANCEL_MANAGED_ENDPOINT ? { broker: { ensureBrokerSession: (workspace, options) =>
+        ensureBrokerSession(workspace, { ...options, createBrokerEndpoint: undefined }) } } : {})
+    };
+    started = await startFixtureBroker(cwd, env, address, modules);
+    if (extraEnv.CANCEL_MANAGED_ENDPOINT) address = started.session.endpoint;
+  }
   catch (error) {
     previousData.claude === undefined ? delete process.env.CLAUDE_PLUGIN_DATA : process.env.CLAUDE_PLUGIN_DATA = previousData.claude;
     previousData.plugin === undefined ? delete process.env.PLUGIN_DATA : process.env.PLUGIN_DATA = previousData.plugin;
@@ -146,7 +219,7 @@ export async function fixture(t, extraEnv = {}) {
   const clients = [];
   const finalizers = [];
   t.after(async () => {
-    let deadlineTimer;
+    let deadlineTimer, cleaned = false;
     try {
       // 途中assertが失敗しても、ignoreCancelを含む全gateを先に解放する。
       fs.writeFileSync(env.CANCEL_FIXTURE_RELEASE, "release");
@@ -165,6 +238,22 @@ export async function fixture(t, extraEnv = {}) {
         deadlineTimer = setTimeout(() => reject(new Error(`Fixture teardown timed out. ${stderr()}`)), 10000);
       })]);
       assert.equal(proc.exitCode, 0, stderr());
+      if (process.platform === "linux" || process.platform === "darwin") {
+        const agentPids = new Set(logs().map(row => row.started).filter(pid => Number.isSafeInteger(pid) && pid > 0));
+        assert.ok(agentPids.size > 0, "fixture agent identity was not recorded");
+        await until(() => {
+          const ps = spawnSync("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8" });
+          assert.equal(ps.status, 0, ps.stderr);
+          return !ps.stdout.split("\n").map(line => line.trim().split(/\s+/)).some(([pid, pgid, stat]) =>
+            stat && !stat.startsWith("Z") && (Number(pid) === proc.pid || agentPids.has(Number(pid)) || Number(pgid) === proc.pid));
+        }, "fixture broker, agent and process group exit", 3000);
+        if (process.platform === "linux") {
+          const stateDir = resolveStateDir(cwd);
+          assert.equal(shutdownPosixStateLockSentinel(stateDir, { offlineConfirmed: true, expectedStateDir: stateDir }).stopped, true);
+        }
+      }
+      removeTempFixture(cwd, { recursive: true, force: true });
+      cleaned = true;
     } finally {
       clearTimeout(deadlineTimer);
       try {
@@ -172,7 +261,7 @@ export async function fixture(t, extraEnv = {}) {
           // 自分がspawnしたbrokerだけを停止する。fakeはstdinのEOFで終了する。
           await stopFixtureChild(proc);
         }
-        if (proc.exitCode !== null || proc.signalCode !== null) removeTempFixture(cwd, { recursive: true, force: true });
+        if (!cleaned) t.diagnostic(`Fixture retained because owned cleanup was not confirmed: ${cwd}`);
       } finally {
         previousData.claude === undefined ? delete process.env.CLAUDE_PLUGIN_DATA : process.env.CLAUDE_PLUGIN_DATA = previousData.claude;
         previousData.plugin === undefined ? delete process.env.PLUGIN_DATA : process.env.PLUGIN_DATA = previousData.plugin;
@@ -188,7 +277,17 @@ export async function fixture(t, extraEnv = {}) {
     assert.equal(client.initializeResult?._meta?.grokExecutionLedger, true);
     return client;
   };
-  const logs = () => fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
   return { cwd, env: { ...env, GROK_COMPANION_ACP_ENDPOINT: address },
-    brokerIdentity: { transport: "broker", brokerGeneration: generation }, connect, logs, cleanup: (fn) => finalizers.push(fn) };
+    brokerIdentity: { transport: "broker", brokerGeneration: generation }, brokerSession: session, brokerChild: proc, brokerExited: exited, connect, logs,
+    async stopBroker() {
+      const client = await connect();
+      try { await client.request("broker/shutdown", {}, { signal: AbortSignal.timeout(5000) }); }
+      finally { await client.close(); }
+      let timer;
+      try {
+        await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Fixture broker exit was not observed")), 5000); })]);
+      } finally { clearTimeout(timer); }
+      assert.equal(proc.exitCode, 0, stderr());
+    },
+    cleanup: (fn) => finalizers.push(fn) };
 }

@@ -28,6 +28,7 @@ import {
   getConfig,
   listJobs,
   migrateStateLock,
+  STATE_LOCK_MIGRATION_REQUIRED,
   resolveJobLogFile,
   resolveStateDir,
   setConfig,
@@ -49,6 +50,7 @@ import {
 import {
   appendDarwinVerifiedLog,
   assertDarwinJobLogPath,
+  boundJsonDiagnostic,
   createJobLogFile,
   createReservedDarwinJobLog,
   createReservedLinuxJobLog,
@@ -57,6 +59,7 @@ import {
   createProcessLookupDiagnostics,
   createProgressReporter,
   darwinLeaseDirectory,
+  hasGenerationIdentity,
   nowIso,
   observeBrokerWorkerCancellation,
   resolveCurrentSessionId,
@@ -65,6 +68,7 @@ import {
   runTrackedJob,
   sameDarwinLease,
   sameLinuxLease,
+  sameTurnEvidence,
   verifyDarwinTrackedOwner,
   verifyLinuxTrackedOwner,
 } from "./lib/tracked-jobs.mjs";
@@ -88,8 +92,6 @@ import {
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
-const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
-const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 // grok-4.6 の initialize が申告する reasoningEfforts（実測: high が既定）。
 const VALID_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
 // 言語タグの形。`ja`, `en-US`, `zh-Hans-CN` などを想定した緩めの BCP 47。
@@ -200,12 +202,22 @@ function firstMeaningfulLine(text, fallback) {
   return line ?? fallback;
 }
 
-async function buildSetupReport(cwd, actionsTaken = []) {
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
+async function buildSetupReport(cwd, workspaceRoot, actionsTaken = []) {
   const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
   const authStatus = await getGrokAuthStatus(cwd);
   const grokStatus = authStatus.availability;
-  const config = getConfig(workspaceRoot);
+  let config;
+  let sessionRuntime;
+  let migrationError;
+  try {
+    config = getConfig(workspaceRoot);
+    sessionRuntime = getSessionRuntimeStatus(process.env, workspaceRoot);
+  } catch (error) {
+    if (!["linux", "darwin"].includes(process.platform) || error?.code !== STATE_LOCK_MIGRATION_REQUIRED) throw error;
+    migrationError = error;
+    config = null;
+    sessionRuntime = null;
+  }
 
   const nextSteps = [];
   if (grokStatus.reason === "missing-agent-stdio") {
@@ -224,17 +236,18 @@ async function buildSetupReport(cwd, actionsTaken = []) {
   } else if (grokStatus.available && !authStatus.authenticated) {
     nextSteps.push("Resolve the authentication check error shown above, then rerun setup.");
   }
-  if (!config.stopReviewGate) {
+  if (migrationError) nextSteps.push(migrationError.message);
+  if (config && !config.stopReviewGate) {
     nextSteps.push("Optional: run `/grok:setup --enable-review-gate` to require a fresh review before stop.");
   }
 
   return {
-    ready: nodeStatus.available && grokStatus.available && authStatus.authenticated,
+    ready: nodeStatus.available && grokStatus.available && authStatus.authenticated && !migrationError,
     node: nodeStatus,
     grok: grokStatus,
     auth: authStatus,
-    sessionRuntime: getSessionRuntimeStatus(process.env, workspaceRoot),
-    reviewGateEnabled: Boolean(config.stopReviewGate),
+    sessionRuntime,
+    reviewGateEnabled: config ? Boolean(config.stopReviewGate) : null,
     actionsTaken,
     nextSteps
   };
@@ -327,7 +340,7 @@ async function handleSetup(argv) {
   }
 
   const cwd = resolveCommandCwd(options);
-  const workspaceRoot = resolveCommandWorkspace(options);
+  const workspaceRoot = resolveWorkspaceRoot(cwd, { strict: ["linux", "darwin"].includes(process.platform) });
   const actionsTaken = [];
 
   if (options["enable-review-gate"]) {
@@ -338,7 +351,7 @@ async function handleSetup(argv) {
     actionsTaken.push(`Disabled the stop-time review gate for ${workspaceRoot}.`);
   }
 
-  const finalReport = await buildSetupReport(cwd, actionsTaken);
+  const finalReport = await buildSetupReport(cwd, workspaceRoot, actionsTaken);
   outputResult(options.json ? finalReport : renderSetupReport(finalReport), options.json);
 }
 
@@ -457,6 +470,30 @@ function findLatestResumableTaskJob(jobs) {
   );
 }
 
+function assertResumeCandidateInSnapshot(workspaceRoot, state, context, sessionId, session, generation, executionId, excludeJobId) {
+  if (executionId == null) return;
+  const visible = filterJobsForCurrentSession(sortJobsNewestFirst(state.jobs.filter(job => job.id !== excludeJobId &&
+    (process.platform !== "linux" || job.epoch === context?.epoch))));
+  if (visible.some(job => job.jobClass === "task" && isActiveJob(job))) {
+    throw new Error("A task is still running; resume is unavailable.");
+  }
+  const indexed = visible.find(job => job.id === executionId);
+  const latest = findLatestResumableTaskJob(visible);
+  const stored = indexed && readStoredJob(workspaceRoot, executionId, context);
+  const keys = ["id", "jobClass", "status", "sessionId", "grokSessionId", "taskSessionResumable", "grokTransport",
+    "grokBrokerGeneration", "grokPromptState", "terminationPending", "createdAt", "startedAt", "completedAt", "pid", "processStartKey",
+    "grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey", "grokDirectStopGeneration", "grokDirectStopKind", "grokDirectStopConfirmedAt"];
+  if (!indexed || !stored || latest?.id !== executionId || keys.some(key => (indexed[key] ?? null) !== (stored[key] ?? null)) ||
+      indexed.jobClass !== "task" || !["completed", "failed", "cancelled"].includes(indexed.status) ||
+      indexed.taskSessionResumable !== true || indexed.grokPromptState !== "terminal" || indexed.terminationPending !== false ||
+      indexed.grokTransport !== "broker" || indexed.grokSessionId !== session || indexed.grokBrokerGeneration !== generation ||
+      ["grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey", "grokDirectStopGeneration", "grokDirectStopKind", "grokDirectStopConfirmedAt"].some(key => indexed[key] != null) ||
+      typeof executionId !== "string" || !executionId.trim() || typeof session !== "string" || !session.trim() ||
+      typeof generation !== "string" || !generation.trim()) {
+    throw new Error(`Task ${executionId} is not a verified broker resume candidate.`);
+  }
+}
+
 function currentEpochJobs(workspaceRoot, sessionId = null, excludeJobId = null) {
   return withStateSnapshot(workspaceRoot, (state, context) => state.jobs.filter(indexed => {
     if (process.platform !== "linux") return true;
@@ -511,40 +548,137 @@ function currentEpochJobs(workspaceRoot, sessionId = null, excludeJobId = null) 
   }));
 }
 
-function assertOldTaskTurnsSettled(workspaceRoot, sessionId, grokSessionId) {
-  if (process.platform !== "linux" || !grokSessionId) return;
-  withStateSnapshot(workspaceRoot, (state, context) => {
-    for (const indexed of state.jobs) {
-      if (indexed.epoch === context.epoch) continue;
-      const indexRelevant = !sessionId || !indexed.sessionId || indexed.sessionId === sessionId || indexed.grokSessionId === grokSessionId;
-      let stored;
-      try { stored = readStoredJob(workspaceRoot, indexed.id, context); }
-      catch (error) {
-        if (indexed.jobClass === "task" && indexRelevant) throw new Error(`Old task ${indexed.id} has unverified turn evidence; resume is unavailable.`, { cause: error });
-        continue;
-      }
-      const isTask = indexed.jobClass === "task" || stored?.jobClass === "task";
-      const related = indexRelevant || stored?.grokSessionId === grokSessionId || (sessionId && stored?.sessionId === sessionId);
-      if (!isTask || !related) continue;
-      if (!stored) throw new Error(`Old task ${indexed.id} has unverified turn evidence; resume is unavailable.`);
-      // 両側が一致して別 Grok session を指す場合、その turn は候補と無関係。
-      if (indexed.grokSessionId && indexed.grokSessionId === stored.grokSessionId && indexed.grokSessionId !== grokSessionId) continue;
-      if (!indexed.epoch || !stored.epoch) throw new Error(`Old task ${indexed.id} has unverified epoch; resume is unavailable.`);
-      const same = ["id", "epoch", "jobClass", "sessionId", "status", "createdAt", "startedAt", "grokSessionId",
-        "grokPromptState", "terminationPending", "grokTransport", "grokBrokerGeneration", "grokDirectGeneration",
-        "grokDirectOwnerPid", "grokDirectOwnerStartKey", "grokDirectStopGeneration", "grokDirectStopKind"]
-        .every(key => (indexed[key] ?? null) === (stored[key] ?? null));
-      const terminal = same && ["completed", "failed", "cancelled"].includes(indexed.status) &&
-        indexed.terminationPending === false && indexed.grokPromptState === "terminal" && indexed.grokSessionId === grokSessionId;
-      const neverSent = same && indexed.grokPromptState === "not-sent" && indexed.grokSessionId == null &&
-        indexed.startedAt == null && indexed.terminationPending === false;
-      if (!terminal && !neverSent) throw new Error(`Old task ${indexed.id} has unverified or pending turn evidence; resume is unavailable.`);
+function assertNonLinuxTaskTurnsSettled(workspaceRoot, state, context, sessionId, grokSessionId, excludeJobId, brokerGeneration) {
+  const keys = ["id", "jobClass", "status", "sessionId", "grokSessionId", "grokTransport", "grokBrokerGeneration",
+    "grokPromptState", "terminationPending", "grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey",
+    "grokDirectStopGeneration", "grokDirectStopKind", "grokDirectStopConfirmedAt"];
+  for (const indexed of state.jobs) {
+    if (indexed.id === excludeJobId) continue;
+    const hostRelated = !sessionId || !indexed.sessionId || indexed.sessionId === sessionId;
+    const stored = readStoredJob(workspaceRoot, indexed.id, context);
+    const related = indexed.grokSessionId === grokSessionId || stored?.grokSessionId === grokSessionId ||
+      (hostRelated && (isActiveJob(indexed) || indexed.terminationPending === true ||
+        (indexed.grokSessionId == null && (indexed.grokTransport === "direct" || indexed.grokDirectGeneration != null))));
+    if (!related) continue;
+    if (!stored || keys.some(key => (indexed[key] ?? null) !== (stored[key] ?? null))) {
+      throw new Error(`Job ${indexed.id} has inconsistent or unverified turn evidence; resume is unavailable.`);
     }
-    context.check();
-  });
+    const noDirectEvidence = ["grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey",
+      "grokDirectStopGeneration", "grokDirectStopKind", "grokDirectStopConfirmedAt"].every(key => indexed[key] == null);
+    const terminal = noDirectEvidence && ["completed", "failed", "cancelled"].includes(indexed.status) &&
+      indexed.terminationPending === false && indexed.grokPromptState === "terminal" &&
+      indexed.grokSessionId === grokSessionId && indexed.grokTransport === "broker" &&
+      typeof brokerGeneration === "string" && brokerGeneration.trim() && indexed.grokBrokerGeneration === brokerGeneration;
+    const neverSent = noDirectEvidence && ["completed", "failed", "cancelled"].includes(indexed.status) &&
+      indexed.terminationPending === false && indexed.grokPromptState === "not-sent" && indexed.grokTransport === "broker" &&
+      indexed.grokSessionId === grokSessionId && typeof brokerGeneration === "string" && Boolean(brokerGeneration.trim()) &&
+      indexed.grokBrokerGeneration === brokerGeneration;
+    if (!terminal && !neverSent) throw new Error(`Job ${indexed.id} has unverified or pending turn evidence; resume is unavailable.`);
+  }
+  context?.check?.();
+}
+
+function assertTaskTurnsSettledInSnapshot(workspaceRoot, state, context, sessionId, grokSessionId, excludeJobId = null, brokerGeneration = null, resumeExecutionId = null) {
+  if (grokSessionId == null) return;
+  assertResumeCandidateInSnapshot(workspaceRoot, state, context, sessionId, grokSessionId, brokerGeneration, resumeExecutionId, excludeJobId);
+  if (process.platform !== "linux") {
+    assertNonLinuxTaskTurnsSettled(workspaceRoot, state, context, sessionId, grokSessionId, excludeJobId, brokerGeneration);
+    return;
+  }
+  if (typeof grokSessionId !== "string" || !grokSessionId.trim()) throw new Error("Resume session identity is invalid.");
+  for (const indexed of state.jobs) {
+    if (indexed.id === excludeJobId) continue;
+    const indexRelevant = !sessionId || !indexed.sessionId || indexed.sessionId === sessionId || indexed.grokSessionId === grokSessionId;
+    let stored;
+    try { stored = readStoredJob(workspaceRoot, indexed.id, context); }
+    catch (error) {
+      if (indexRelevant) throw new Error(`Job ${indexed.id} has unverified turn evidence; resume is unavailable.`, { cause: error });
+      continue;
+    }
+    const related = indexRelevant || stored?.grokSessionId === grokSessionId || (sessionId && stored?.sessionId === sessionId);
+    if (!related) continue;
+    if (!stored) throw new Error(`Job ${indexed.id} has unverified turn evidence; resume is unavailable.`);
+    if (![indexed.grokSessionId, stored.grokSessionId].every(value => value == null || (typeof value === "string" && value.trim()))) {
+      throw new Error(`Job ${indexed.id} has an invalid session identity; resume is unavailable.`);
+    }
+    // 別 session でも、稼働中の worker は後で direct fallback する可能性がある。
+    const otherSession = Boolean(indexed.grokSessionId && indexed.grokSessionId === stored.grokSessionId && indexed.grokSessionId !== grokSessionId);
+    if (!indexed.epoch || !stored.epoch) throw new Error(`Job ${indexed.id} has unverified epoch; resume is unavailable.`);
+    const same = ["id", "epoch", "jobClass", "sessionId", "status", "createdAt", "startedAt", "completedAt", "phase", "grokSessionId", "taskSessionResumable",
+      "grokPromptState", "terminationPending", "grokTransport", "grokBrokerGeneration", "grokDirectGeneration",
+      "grokDirectOwnerPid", "grokDirectOwnerStartKey", "grokDirectStopGeneration", "grokDirectStopKind", "grokDirectStopConfirmedAt",
+      "pid", "processStartKey", "claimToken", "workerStopConfirmed", "workerStopProof", "workerStopLeaseId", "workerStopProcessStartKey"]
+      .every(key => (indexed[key] ?? null) === (stored[key] ?? null)) &&
+      ((indexed.workerLease == null && stored.workerLease == null) || sameLinuxLease(indexed.workerLease, stored.workerLease));
+    if (!same || !["task", "review"].includes(indexed.jobClass)) {
+      throw new Error(`Job ${indexed.id} has inconsistent or unverified turn evidence; resume is unavailable.`);
+    }
+    const directFields = ["grokDirectOwnerPid", "grokDirectOwnerStartKey", "grokDirectStopGeneration", "grokDirectStopKind", "grokDirectStopConfirmedAt"];
+    if (indexed.grokTransport === "direct" || indexed.grokDirectGeneration != null || directFields.some(key => indexed[key] != null)) {
+      if (typeof indexed.grokDirectGeneration !== "string" || !indexed.grokDirectGeneration ||
+          indexed.grokDirectStopGeneration !== indexed.grokDirectGeneration ||
+          !["never-started", "posix-group-empty"].includes(indexed.grokDirectStopKind) ||
+          typeof indexed.grokDirectStopConfirmedAt !== "string" || !indexed.grokDirectStopConfirmedAt ||
+          !Number.isInteger(indexed.grokDirectOwnerPid) || indexed.grokDirectOwnerPid <= 0 ||
+          typeof indexed.grokDirectOwnerStartKey !== "string" || !indexed.grokDirectOwnerStartKey ||
+          indexed.grokDirectOwnerStartKey !== indexed.processStartKey) {
+        throw new Error(`Job ${indexed.id} has unverified direct agent stop evidence; resume is unavailable.`);
+      }
+    }
+    if (!otherSession && indexed.grokSessionId === grokSessionId && indexed.grokTransport === "direct") {
+      throw new Error(`Job ${indexed.id} is a direct session; resume is unavailable.`);
+    }
+    const terminal = ["completed", "failed", "cancelled"].includes(indexed.status) &&
+      indexed.terminationPending === false && indexed.grokPromptState === "terminal" && (indexed.grokSessionId === grokSessionId || otherSession);
+    if (terminal && (indexed.grokTransport !== "broker" && indexed.grokTransport !== "direct")) {
+      throw new Error(`Job ${indexed.id} has an unverified terminal transport; resume is unavailable.`);
+    }
+    if (terminal && indexed.grokTransport === "broker" &&
+        (typeof indexed.grokBrokerGeneration !== "string" || !indexed.grokBrokerGeneration.trim() ||
+          (!otherSession && brokerGeneration && indexed.grokBrokerGeneration !== brokerGeneration))) {
+      throw new Error(`Job ${indexed.id} has an unverified broker generation; resume is unavailable.`);
+    }
+    const neverSent = indexed.grokPromptState === "not-sent" && indexed.terminationPending === false && (
+      (indexed.grokSessionId == null && indexed.startedAt == null && ["queued", "completed", "failed", "cancelled"].includes(indexed.status) &&
+        indexed.grokTransport == null && indexed.grokBrokerGeneration == null && indexed.grokDirectGeneration == null && directFields.every(key => indexed[key] == null)) ||
+      (indexed.epoch === context.epoch && ["completed", "failed", "cancelled"].includes(indexed.status) &&
+        ((indexed.grokSessionId == null && indexed.grokTransport == null && indexed.grokBrokerGeneration == null) ||
+          (indexed.grokSessionId != null && indexed.grokTransport === "broker" &&
+            typeof indexed.grokBrokerGeneration === "string" && indexed.grokBrokerGeneration.trim() &&
+            (otherSession || (typeof brokerGeneration === "string" && brokerGeneration.trim() && indexed.grokBrokerGeneration === brokerGeneration)))) &&
+        indexed.grokDirectGeneration == null && directFields.every(key => indexed[key] == null))
+    );
+    if (!terminal && !neverSent) throw new Error(`Job ${indexed.id} has unverified or pending turn evidence; resume is unavailable.`);
+    if (indexed.epoch === context.epoch) {
+      if (indexed.workerLease != null) {
+        try {
+          verifyPublishedLinuxLeaseRecords({ context, indexed, stored, lease: indexed.workerLease });
+          const released = withAvailableLinuxLease(indexed.workerLease, context, () => {
+            verifyPublishedLinuxLeaseRecords({ context, indexed, stored, lease: indexed.workerLease });
+            context.check();
+            return true;
+          });
+          if (released.status !== "available") throw new Error("worker lease is still held or unavailable");
+        } catch (error) { throw new Error(`Job ${indexed.id} has an unverified worker lease; resume is unavailable.`, { cause: error }); }
+      } else if (indexed.workerStopConfirmed !== true || indexed.workerStopProof !== "linux-lease-released" || indexed.pid != null ||
+          typeof indexed.workerStopLeaseId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(indexed.workerStopLeaseId) ||
+          (indexed.workerStopProcessStartKey ?? null) !== (indexed.processStartKey ?? null)) {
+        throw new Error(`Job ${indexed.id} has no verified worker stop evidence; resume is unavailable.`);
+      }
+    }
+  }
+  context.check();
+}
+
+function assertTaskTurnsSettled(workspaceRoot, sessionId, grokSessionId, excludeJobId = null, brokerGeneration = null, resumeExecutionId = null) {
+  if (grokSessionId == null) return;
+  withStateSnapshot(workspaceRoot, (state, context) =>
+    assertTaskTurnsSettledInSnapshot(workspaceRoot, state, context, sessionId, grokSessionId, excludeJobId, brokerGeneration, resumeExecutionId));
 }
 
 async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
+  const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
+  const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
   const timeoutMs = Math.max(0, Number(options.timeoutMs) || DEFAULT_STATUS_WAIT_TIMEOUT_MS);
   const pollIntervalMs = Math.max(100, Number(options.pollIntervalMs) || DEFAULT_STATUS_POLL_INTERVAL_MS);
   const deadline = Date.now() + timeoutMs;
@@ -577,11 +711,11 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
 
   const trackedTask = findLatestResumableTaskJob(visibleJobs);
   if (trackedTask) {
-    assertOldTaskTurnsSettled(workspaceRoot, sessionId, trackedTask.grokSessionId);
-    return { id: trackedTask.grokSessionId };
+    assertTaskTurnsSettled(workspaceRoot, sessionId, trackedTask.grokSessionId, options.excludeJobId, trackedTask.grokBrokerGeneration, trackedTask.id);
+    return { id: trackedTask.grokSessionId, brokerGeneration: trackedTask.grokBrokerGeneration, executionId: trackedTask.id };
   }
 
-  if (sessionId || process.platform === "linux") {
+  if (sessionId) {
     return null;
   }
 
@@ -589,9 +723,21 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   // 同じsessionを持つ有効な旧履歴があれば、session全体を除外しない。
   const establishedSessionIds = new Set(jobs.filter((job) => job.jobClass === "task" &&
     job.grokSessionId && job.taskSessionResumable !== false && !isActiveJob(job)).map((job) => job.grokSessionId));
+  // 未送信だけでは再開を許さない。broker の候補選択後に index/detail と
+  // worker 停止・generation を検査し、session/load が同 broker の terminal を要求する。
+  const brokerNeverSent = (job) => ["completed", "failed", "cancelled"].includes(job.status) &&
+    job.grokPromptState === "not-sent" && job.terminationPending === false && job.grokTransport === "broker" &&
+    typeof job.grokBrokerGeneration === "string" && Boolean(job.grokBrokerGeneration.trim()) &&
+    ["grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey", "grokDirectStopGeneration",
+      "grokDirectStopKind", "grokDirectStopConfirmedAt"].every(key => job[key] == null);
   const excludeSessionIds = jobs.filter((job) => job.jobClass === "task" && job.grokSessionId &&
-    job.taskSessionResumable === false && !establishedSessionIds.has(job.grokSessionId)).map((job) => job.grokSessionId);
-  return findLatestTaskSession(workspaceRoot, { excludeSessionIds });
+    job.taskSessionResumable === false && !establishedSessionIds.has(job.grokSessionId) &&
+    !brokerNeverSent(job)).map((job) => job.grokSessionId);
+  const latest = await findLatestTaskSession(workspaceRoot, {
+    excludeSessionIds, requireManagedBroker: true
+  });
+  if (latest) assertTaskTurnsSettled(workspaceRoot, sessionId, latest.id, options.excludeJobId, latest.brokerGeneration);
+  return latest;
 }
 
 async function executeReviewRun(request) {
@@ -669,6 +815,7 @@ async function executeReviewRun(request) {
     // 使えないので失敗扱いにする。呼び出し側のゲートがすり抜けないように。
     exitStatus: parsed.parseError || reviewIncomplete ? "failed" : result.status,
     turnStopUnconfirmed: result.turnStopUnconfirmed,
+    promptNotSent: result.promptNotSent,
     grokSessionId: result.sessionId,
     payload,
     rendered: renderReviewResult(parsed, {
@@ -697,6 +844,8 @@ async function executeTaskRun(request) {
   });
 
   let resumeSessionId = null;
+  let resumeBrokerGeneration = null;
+  let resumeExecutionId = null;
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
       excludeJobId: request.jobId
@@ -705,6 +854,8 @@ async function executeTaskRun(request) {
       throw new Error("No previous Grok task thread was found for this repository.");
     }
     resumeSessionId = latestThread.id;
+    resumeBrokerGeneration = latestThread.brokerGeneration ?? null;
+    resumeExecutionId = latestThread.executionId ?? null;
   }
 
   if (!request.prompt && !resumeSessionId) {
@@ -715,8 +866,11 @@ async function executeTaskRun(request) {
   // ここがずれると読み取り専用の判定とセッション再開が黙って無効になる。
   const result = await runGrokTurn(workspaceRoot, {
     executionId: request.jobId,
-    enqueuePrompt: createPromptEnqueuer(workspaceRoot, request.jobId, request.ownerToken),
+    enqueuePrompt: createPromptEnqueuer(workspaceRoot, request.jobId, request.ownerToken, resumeSessionId, resumeBrokerGeneration, resumeExecutionId),
     resumeSessionId,
+    resumeBrokerGeneration,
+    resumeExecutionId,
+    requireManagedBrokerForResume: Boolean(resumeSessionId),
     prompt: request.prompt,
     defaultPrompt: resumeSessionId ? DEFAULT_CONTINUE_PROMPT : "",
     model: request.model,
@@ -768,6 +922,7 @@ async function executeTaskRun(request) {
   return {
     exitStatus: stopGateIncomplete ? "failed" : result.status,
     turnStopUnconfirmed: result.turnStopUnconfirmed,
+    promptNotSent: result.promptNotSent,
     grokSessionId: result.sessionId,
     payload,
     rendered,
@@ -858,13 +1013,14 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   };
 }
 
-function readTaskPrompt(cwd, options, positionals) {
+async function readTaskPrompt(cwd, options, positionals) {
   if (options["prompt-file"]) {
     return fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
   }
 
   const positionalPrompt = positionals.join(" ");
-  return positionalPrompt || readStdinIfPiped();
+  if (positionalPrompt) return positionalPrompt;
+  return await readStdinIfPiped();
 }
 
 function requireTaskRequest(prompt, resumeLast) {
@@ -1003,7 +1159,7 @@ async function handleTask(argv) {
   const workspaceRoot = resolveCommandWorkspace(options);
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
-  const prompt = readTaskPrompt(cwd, options, positionals);
+  const prompt = await readTaskPrompt(cwd, options, positionals);
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
   const fresh = Boolean(options.fresh);
@@ -1080,6 +1236,12 @@ function handleResult(argv) {
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveResultJob(cwd, reference);
   const storedJob = readStoredJob(workspaceRoot, job.id);
+  if (process.platform === "linux" && !storedJob) {
+    throw new Error(`Job ${job.id} is indexed but its result detail is missing; inspect the preserved records before recovery.`);
+  }
+  if (process.platform === "linux" && storedJob.id !== job.id) {
+    throw new Error(`Job ${job.id} has an inconsistent result detail identity; inspect the preserved records before recovery.`);
+  }
   const payload = {
     job,
     storedJob
@@ -1101,7 +1263,7 @@ function handleTaskResumeCandidate(argv) {
     throw new Error("A task is still running or termination is pending; resume is unavailable.");
   }
   const candidate = findLatestResumableTaskJob(jobs);
-  if (candidate) assertOldTaskTurnsSettled(workspaceRoot, sessionId, candidate.grokSessionId);
+  if (candidate) assertTaskTurnsSettled(workspaceRoot, sessionId, candidate.grokSessionId, null, candidate.grokBrokerGeneration, candidate.id);
 
   const payload = {
     available: Boolean(candidate),
@@ -1126,7 +1288,7 @@ function handleTaskResumeCandidate(argv) {
   outputCommandResult(payload, rendered, options.json);
 }
 
-function createPromptEnqueuer(workspaceRoot, jobId, ownerToken) {
+function createPromptEnqueuer(workspaceRoot, jobId, ownerToken, resumeSessionId = null, resumeBrokerGeneration = null, resumeExecutionId = null) {
   if (!jobId) return undefined;
   const verifiedJob = (state, context, action) => {
     const job = state.jobs.find((entry) => entry.id === jobId);
@@ -1160,6 +1322,7 @@ function createPromptEnqueuer(workspaceRoot, jobId, ownerToken) {
     });
     return withStateSnapshot(workspaceRoot, (state, context) => {
       verifiedJob(state, context, "prompt was not sent");
+      if (resumeSessionId) assertTaskTurnsSettledInSnapshot(workspaceRoot, state, context, resolveCurrentSessionId(), resumeSessionId, jobId, resumeBrokerGeneration, resumeExecutionId);
       context?.check?.();
       // 保存後にcancelが割り込んだ場合も、最新状態の検査と同期送信を直列化する。
       return enqueue();
@@ -1182,17 +1345,23 @@ function createPromptEnqueuer(workspaceRoot, jobId, ownerToken) {
       return observeBrokerWorkerCancellation(workspaceRoot, jobId, connection, { ownerToken }).dispose;
     }
   };
-  if (process.platform === "linux" || process.platform === "darwin") enqueuePrompt.guardOwnerEffect = (effect) => {
+  enqueuePrompt.guardOwnerEffect = (effect) => {
     let issued = false;
+    let checkingResume = false;
     try {
       return withStateSnapshot(workspaceRoot, (state, context) => {
         verifiedJob(state, context, "operation was not sent");
-        context.check();
+        if (resumeSessionId) {
+          checkingResume = true;
+          assertTaskTurnsSettledInSnapshot(workspaceRoot, state, context, resolveCurrentSessionId(), resumeSessionId, jobId, resumeBrokerGeneration, resumeExecutionId);
+          checkingResume = false;
+        }
+        context?.check?.();
         issued = true;
         return effect(state, context);
       });
     } catch (error) {
-      if (issued) throw error;
+      if (issued || checkingResume) throw error;
       throw Object.assign(new Error(`Job ${jobId} owner could not be verified; operation was not sent.`, { cause: error }),
         { code: "GROK_JOB_OWNER_GUARD_FAILED" });
     }
@@ -1222,10 +1391,6 @@ async function handleCancel(argv) {
         ["id", "slot", "path", "dev", "ino", "stateGeneration", "directoryDev", "directoryIno"].every(key => current.workerLease[key] === expected.workerLease[key]))))) &&
     ["id", "createdAt", "startedAt", "processStartKey", "sessionId", "grokTransport", "grokBrokerGeneration",
       "grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey"].every(key => current[key] === expected[key]);
-  const hasGenerationIdentity = current => (typeof current.createdAt === "string" && Boolean(current.createdAt.trim())) ||
-    (typeof current.processStartKey === "string" && Boolean(current.processStartKey));
-  const sameTurnEvidence = (left, right) => left && right &&
-    ["grokPromptState", "grokSessionId"].every(key => (left[key] ?? null) === (right[key] ?? null));
   let turnEvidenceConsistent;
   let indexedEvidence;
   // worker の queued→running claim と同じ lock 内で、最新の PID を記録する。
@@ -1409,23 +1574,29 @@ async function handleCancel(argv) {
   const logWarnings = [];
   let warningCount = 0, warningTruncatedCount = 0, warningOmittedCount = 0, warningStderrUnavailable = false;
   function boundedWarning(value) {
-    const limit = 768;
-    if (Buffer.byteLength(JSON.stringify(value), "utf8") <= limit) return { text: value, truncated: false };
-    const suffix = "… [truncated; see stderr for the full diagnostic]";
-    let budget = limit - Buffer.byteLength(JSON.stringify(suffix), "utf8"), prefix = "";
-    for (const character of value) {
-      const size = Buffer.byteLength(JSON.stringify(character), "utf8") - 2;
-      if (size > budget) break;
-      prefix += character;
-      budget -= size;
-    }
-    return { text: prefix + suffix, truncated: true };
+    const text = boundJsonDiagnostic(value);
+    return { text, truncated: text !== value };
   }
   function warningData() {
     if (!warningCount) return {};
     return { logWarnings: [...logWarnings, ...(warningOmittedCount ? [`${warningOmittedCount} additional log warning(s) omitted; see stderr.`] : [])],
       logWarningCount: warningCount, logWarningTruncatedCount: warningTruncatedCount, logWarningOmittedCount: warningOmittedCount,
       ...(warningStderrUnavailable ? { logWarningStderrUnavailable: true } : {}) };
+  }
+  function outputCancellationSuccess(stoppedJob, turnStopConfirmed) {
+    const payload = {
+      jobId: job.id,
+      status: "cancelled",
+      title: job.title,
+      turnInterruptAttempted: interrupt.attempted,
+      turnInterrupted: interrupt.interrupted,
+      turnStopConfirmed: turnStopConfirmed === undefined ? interrupt.stopConfirmed === true : turnStopConfirmed,
+      workerStopConfirmed: true,
+      turnInterruptNotificationSent: interrupt.notificationSent === true,
+      turnCancellationReserved: interrupt.reservationAccepted === true,
+      ...warningData()
+    };
+    outputCommandResult(payload, renderCancelReport({ ...stoppedJob, ...warningData() }), options.json);
   }
   function appendCancellationLog(message) {
     try {
@@ -1515,6 +1686,20 @@ async function handleCancel(argv) {
     interrupt = { attempted: true, interrupted: false, detail: error?.message ?? String(error), sessionId: grokSessionId };
   }
 
+  // broker の never-accepted と予約は、選択時から同じ turn を指し続けた場合だけ使う。
+  // worker の停止確認は後の commit 時に完了させ、保留中の記録は変更しない。
+  const brokerNeverAccepted = turnEvidenceConsistent && sameJobGeneration(selectedJob, job) &&
+    sameTurnEvidence(selectedJob, job) && sameTurnEvidence(indexedEvidence, existing) &&
+    job.grokTransport === "broker" && typeof grokSessionId === "string" && Boolean(grokSessionId.trim()) &&
+    typeof job.grokBrokerGeneration === "string" && Boolean(job.grokBrokerGeneration.trim()) &&
+    [selectedJob, indexedEvidence, existing, job].every(record => record && record.jobClass === job.jobClass &&
+      ["grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey", "grokDirectStopGeneration",
+        "grokDirectStopKind", "grokDirectStopConfirmedAt"].every(key => record[key] == null)) &&
+    interrupt.attempted === true && interrupt.stopConfirmed === true && interrupt.executionState === "never-accepted" &&
+    interrupt.reservationAccepted === true && interrupt.notificationSent === false && interrupt.sessionId === grokSessionId;
+  const confirmedUnsentPatch = brokerNeverAccepted ? { grokPromptState: "not-sent",
+    ...(job.jobClass === "task" ? { taskSessionResumable: false } : {}) } : {};
+
   appendCancellationLog(
     interrupt.notificationSent
       ? `Grok cancellation notification sent on ${grokSessionId}; turn stop is unconfirmed.`
@@ -1530,39 +1715,17 @@ async function handleCancel(argv) {
   }
 
   const processLookupOptions = createProcessLookupDiagnostics(job.logFile);
-  if (process.platform === "linux") {
-    const workerProof = { workerStopConfirmed: true, workerStopProof: "linux-lease-released",
+  if (process.platform === "linux" || (process.platform === "darwin" && job.workerLease)) {
+    const workerProof = { workerStopConfirmed: true, workerStopProof: `${process.platform}-lease-released`,
       workerStopLeaseId: job.workerLease.id, workerStopProcessStartKey: job.processStartKey ?? null };
     if (interrupt.stopConfirmed !== true) {
       await commitAfterWorkerLeaseRelease({ ...workerProof, pid: null, terminationPending: true, phase: "termination-pending", ...warningData() });
       throw new Error(`Worker stopped for job ${job.id}, but Grok turn stop is unconfirmed; cancellation remains pending. Retry /grok:cancel ${job.id}.`);
     }
     const stoppedJob = await commitAfterWorkerLeaseRelease({ ...workerProof, pid: null, phase: "cancelled", terminationPending: false,
-      completedAt: nowIso(), ...warningData() }, cooperativeDirect);
+      completedAt: nowIso(), ...confirmedUnsentPatch, ...warningData() }, cooperativeDirect);
     appendCancellationLog("Cancelled by user.");
-    const payload = { jobId: job.id, status: "cancelled", title: job.title, turnInterruptAttempted: interrupt.attempted,
-      turnInterrupted: interrupt.interrupted, turnStopConfirmed: true, workerStopConfirmed: true,
-      turnInterruptNotificationSent: interrupt.notificationSent === true, turnCancellationReserved: interrupt.reservationAccepted === true,
-      ...warningData() };
-    outputCommandResult(payload, renderCancelReport({ ...stoppedJob, ...warningData() }), options.json);
-    return;
-  }
-  if (process.platform === "darwin" && job.workerLease) {
-    const workerProof = { workerStopConfirmed: true, workerStopProof: "darwin-lease-released",
-      workerStopLeaseId: job.workerLease.id, workerStopProcessStartKey: job.processStartKey ?? null };
-    if (interrupt.stopConfirmed !== true) {
-      await commitAfterWorkerLeaseRelease({ ...workerProof, pid: null, terminationPending: true, phase: "termination-pending", ...warningData() });
-      throw new Error(`Worker stopped for job ${job.id}, but Grok turn stop is unconfirmed; cancellation remains pending. Retry /grok:cancel ${job.id}.`);
-    }
-    const stoppedJob = await commitAfterWorkerLeaseRelease({ ...workerProof, pid: null, phase: "cancelled", terminationPending: false,
-      completedAt: nowIso(), ...warningData() }, cooperativeDirect);
-    appendCancellationLog("Cancelled by user.");
-    const payload = { jobId: job.id, status: "cancelled", title: job.title, turnInterruptAttempted: interrupt.attempted,
-      turnInterrupted: interrupt.interrupted, turnStopConfirmed: interrupt.stopConfirmed === true,
-      workerStopConfirmed: true, turnInterruptNotificationSent: interrupt.notificationSent === true,
-      turnCancellationReserved: interrupt.reservationAccepted === true,
-      ...warningData() };
-    outputCommandResult(payload, renderCancelReport({ ...stoppedJob, ...warningData() }), options.json);
+    outputCancellationSuccess(stoppedJob, true);
     return;
   }
   let workerProof;
@@ -1637,22 +1800,9 @@ async function handleCancel(argv) {
 
   appendCancellationLog("Cancelled by user.");
   const stoppedJob = commitCancellation({ ...workerProof, pid: null, phase: "cancelled", terminationPending: false, completedAt: nowIso(),
-    ...warningData() }, cooperativeDirect);
+    ...confirmedUnsentPatch, ...warningData() }, cooperativeDirect);
 
-  const payload = {
-    jobId: job.id,
-    status: "cancelled",
-    title: job.title,
-    turnInterruptAttempted: interrupt.attempted,
-    turnInterrupted: interrupt.interrupted,
-    turnStopConfirmed: interrupt.stopConfirmed === true,
-    workerStopConfirmed: true,
-    turnInterruptNotificationSent: interrupt.notificationSent === true,
-    turnCancellationReserved: interrupt.reservationAccepted === true,
-    ...warningData()
-  };
-
-  outputCommandResult(payload, renderCancelReport({ ...stoppedJob, ...warningData() }), options.json);
+  outputCancellationSuccess(stoppedJob);
 }
 
 async function main() {

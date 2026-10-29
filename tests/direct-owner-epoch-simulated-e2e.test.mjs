@@ -17,5 +17,6 @@ for (const variant of ["epoch", "pid", "start", "current"]) {
     const [answer] = await once(child, "message");
     assert.equal(answer.type, variant === "current" ? "registered" : "rejected", JSON.stringify(answer));
     assert.equal(answer.writes, variant === "current" ? 1 : 0);
+    if (variant !== "current") assert.match(answer.message, /cancelled or its running worker identity/);
   });
 }

@@ -19,6 +19,14 @@ const registry = path.join(root, "processes");
 const real = Object.fromEntries(["openSync", "closeSync", "readFileSync", "readlinkSync", "statSync", "lstatSync",
   "readdirSync", "opendirSync", "mkdirSync", "linkSync", "renameSync", "unlinkSync", "writeFileSync", "readSync", "writeSync", "fsyncSync", "statfsSync"].map(key => [key, fs[key]]));
 const processRegistry = path.join(registry, `${process.pid}.json`);
+function processImage(pid) {
+  try {
+    const value = childProcess.execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart=", "-o", "comm="], { encoding: "utf8" }).trim();
+    const match = /^(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.+)$/.exec(value);
+    if (!match) throw new Error("fixture process identity is unavailable");
+    return { started: match[1].replace(/\s+/g, " "), executable: match[2] };
+  } catch (error) { throw Object.assign(new Error("fixture process identity is unavailable", { cause: error }), { code: "ESRCH" }); }
+}
 // 実 Mac では同時に同じ PID を持つ process は存在しない。前回死亡した
 // fixture marker は別 inode に原子的に置換し、pin 中の旧 FD と区別する。
 try {
@@ -28,7 +36,9 @@ try {
   }
 } catch (error) { if (error?.code !== "ENOENT") throw error; }
 const freshRegistry = path.join(registry, `${process.pid}.${randomUUID()}.new`);
-real.writeFileSync(freshRegistry, JSON.stringify({ argv: [process.execPath, ...process.argv.slice(1)] }), { flag: "wx", mode: 0o600 });
+const imageStat = real.statSync(process.execPath, { bigint: true });
+const image = { ...processImage(process.pid), dev: String(imageStat.dev), ino: String(imageStat.ino) };
+real.writeFileSync(freshRegistry, JSON.stringify({ argv: [process.execPath, ...process.argv.slice(1)], image }), { flag: "wx", mode: 0o600 });
 real.renameSync(freshRegistry, processRegistry);
 Object.defineProperty(process, "platform", { value: "linux" });
 // 障害試験だけで AggregateError の各原因末尾を出す。製品の例外処理は変更しない。
@@ -106,6 +116,38 @@ function entry(pid) {
   if (!live(pid)) throw Object.assign(new Error("fixture process exited"), { code: "ENOENT" });
   return JSON.parse(real.readFileSync(path.join(registry, `${pid}.json`), "utf8"));
 }
+// registry inode を固定し、実プロセスの生存と fixture の世代を照合する。
+// fixture 未登録の別プロセスへの PID 再利用は識別できず、実 PID 世代の証明ではない。
+// root と mount namespace は同一ホストの固定値を模擬し、Linux namespace の分離は実証しない。
+function imageEntry(pid) {
+  const marker = path.join(registry, `${pid}.json`);
+  const fd = real.openSync(marker, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const pinned = fs.fstatSync(fd, { bigint: true });
+    const check = () => {
+      const named = real.lstatSync(marker, { bigint: true });
+      if (!pinned.isFile() || pinned.dev !== named.dev || pinned.ino !== named.ino) {
+        throw Object.assign(new Error("fixture process generation changed"), { code: "ESRCH" });
+      }
+      realKill(Number(pid), 0);
+    };
+    check();
+    const record = JSON.parse(real.readFileSync(fd, "utf8"));
+    if (!record.image?.started || !/^[1-9]\d*$/.test(record.image.dev) || !/^[1-9]\d*$/.test(record.image.ino) || !path.isAbsolute(record.image.executable) ||
+        fs.realpathSync(record.image.executable) !== fs.realpathSync(record.argv[0])) {
+      throw Object.assign(new Error("fixture process image changed"), { code: "ESRCH" });
+    }
+    check();
+    return record;
+  } finally { real.closeSync(fd); }
+}
+function procRoot(target) {
+  if (typeof target !== "string") return null;
+  const match = /^\/proc\/(\d+)\/root(?:\/(.*))?$/.exec(target);
+  if (!match) return null;
+  if (match[2]) entry(match[1]); else imageEntry(match[1]);
+  return path.join("/", match[2] ?? "");
+}
 function output(value, options) {
   return typeof options === "string" || options?.encoding ? value : Buffer.from(value);
 }
@@ -141,7 +183,7 @@ fs.readSync = function (fd, buffer, offset, length, position) {
 };
 for (const method of ["lstatSync", "opendirSync", "mkdirSync", "unlinkSync"]) {
   fs[method] = function (target, ...options) {
-    const actual = anchored(target), failurePath = process.env.GROK_LINUX_SIM_LOG_FAILURE;
+    const actual = (method === "lstatSync" ? procRoot(target) : null) ?? anchored(target), failurePath = process.env.GROK_LINUX_SIM_LOG_FAILURE;
     if (method === "lstatSync" && failurePath && actual === failurePath) {
       if (!failurePath.startsWith(`${root}${path.sep}`)) throw new Error("log failure fixture is outside its root");
       throw new Error(`fixture long diagnostic: ${'🚨"\\\n'.repeat(6000)}`);
@@ -199,6 +241,17 @@ fs.fsyncSync = function (fd) {
 };
 fs.statSync = function (target, ...options) {
   if (typeof target === "string") {
+    const rootTarget = procRoot(target);
+    if (rootTarget !== null) return real.statSync.call(this, rootTarget, ...options);
+    const executable = /^\/proc\/(\d+)\/exe$/.exec(target);
+    if (executable) {
+      const image = imageEntry(executable[1]).image, current = real.statSync.call(this, process.execPath, ...options);
+      const bigint = options[0]?.bigint === true;
+      return new Proxy(current, { get(target, property, receiver) {
+        if (property === "dev" || property === "ino") return bigint ? BigInt(image[property]) : Number(image[property]);
+        return Reflect.get(target, property, receiver);
+      } });
+    }
     const match = /^\/proc\/(\d+)\/fd\/(3|9)$/.exec(target);
     if (match) {
       const argv = entry(match[1]).argv;
@@ -214,6 +267,10 @@ fs.readdirSync = function (target, ...options) {
   return real.readdirSync.call(this, anchored(target), ...options);
 };
 fs.readlinkSync = function (target, ...options) {
+  const rootTarget = procRoot(target);
+  if (rootTarget !== null) return real.readlinkSync.call(this, rootTarget, ...options);
+  const mount = typeof target === "string" && /^\/proc\/(\d+)\/ns\/mnt$/.exec(target);
+  if (mount) { entry(mount[1]); return "mnt:[12345]"; }
   const match = typeof target === "string" && /^\/proc\/(?:self|\d+)\/ns\/(pid|time|net)$/.exec(target);
   if (match) return `${match[1]}:[12345]`;
   return real.readlinkSync.call(this, anchored(target), ...options);

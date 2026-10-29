@@ -13,13 +13,16 @@ const mountSource = recoverySource.slice(recoverySource.indexOf("function fail("
 // 擬似 Linux の descriptor と fdinfo は別々に追跡する。inode は同じでも mount は異なり得る。
 function model({ mounts = {}, badInfo = {}, baseMount = "41" } = {}) {
   const root = "/state", barrier = `${root}/state.lock`, marker = `${barrier}/protocol.json`, lock = `${barrier}/native.lock`;
-  const names = [root, barrier, marker, lock];
+  const epoch = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const history = `${root}/history-journal-v1`, journal = `${history}/${epoch}`;
+  const names = [root, barrier, marker, lock, history, journal];
   const ids = Object.fromEntries(names.map((name, i) => [name, { dev: "9", ino: String(i + 1) }]));
   const scope = { hostId: "host", fileSystem: "ext4", directoryIdentity: ids[root],
     bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", pidNamespace: "pid:[1]", timeNamespace: "time:[1]", netNamespace: "net:[1]" };
-  const payload = { protocol: "posix-linux-sentinel-v3", localOnly: true, ...scope,
+  const payload = { protocol: "posix-linux-worker-lease-v6", localOnly: true, ...scope,
     barrierIdentity: ids[barrier], markerIdentity: ids[marker], lockIdentity: ids[lock],
-    epoch: "generation", sentinel: { generation: "generation" } };
+    historyJournalIdentity: ids[journal], leaseDirectoryIdentity: { dev: "9", ino: "7" },
+    epoch, sentinel: { generation: epoch } };
   const descriptors = new Map();
   let nextFd = 10;
   function resolve(file) {
@@ -33,7 +36,7 @@ function model({ mounts = {}, badInfo = {}, baseMount = "41" } = {}) {
     file = resolve(file);
     const id = ids[file];
     if (!id) throw Object.assign(new Error(`missing ${file}`), { code: "ENOENT" });
-    const directory = file === root || file === barrier;
+    const directory = [root, barrier, history, journal].includes(file);
     return { dev: BigInt(id.dev), ino: BigInt(id.ino), uid: 1000n, mode: directory ? 0o700n : 0o600n,
       isSymbolicLink: () => false, isDirectory: () => directory, isFile: () => !directory };
   }
@@ -64,9 +67,9 @@ function model({ mounts = {}, badInfo = {}, baseMount = "41" } = {}) {
     readlinkSync(file) { return scope[`${file.split("/").pop()}Namespace`]; }
   };
   const calls = [];
-  const context = vm.createContext({ fs: fakeFs, path: path.posix, process: { platform: "linux", pid: 42, getuid: () => 1000 },
+  const context = vm.createContext({ fs: fakeFs, path: path.posix, process: { platform: "linux", pid: 42, getuid: () => 1000, hrtime: { bigint: () => 0n } },
     performance: { now: () => 0 }, SharedArrayBuffer, Int32Array, Atomics, Buffer,
-    execFileSync(command, args, options) { calls.push({ command, args, options }); return ""; },
+    execFileSync(command, args, options) { calls.push({ command, args, options, lockedFile: descriptors.get(options.stdio[3]) }); return ""; },
     verifyLinuxSentinel() {}, linuxSentinelExited() {}, sentinelScript: "/sentinel.mjs",
     initializeLinuxEpochRecovery() {}, requireLinuxEpochRecovery() {} });
   vm.runInContext(`${mountSource}\n${lockSource}\nglobalThis.enter = withPosixStateLock; globalThis.read = readPosixStateLockProtocol;`, context);
@@ -79,8 +82,9 @@ test("Linux state lock accepts one mount including a root alias and retains its 
     assert.ok([...m.descriptors.values()].includes(m.root), "state directory descriptor must survive the callback");
   }, { timeoutMs: 1000 });
   assert.equal(m.descriptors.size, 0);
-  assert.equal(m.calls.length, 1);
-  assert.equal(m.calls[0].options.stdio.length, 4, "flock inherits the native lock only");
+  assert.equal(m.calls.length, 2);
+  assert.deepEqual(m.calls.map((call) => call.lockedFile), [m.root, m.lock], "root and native locks are acquired in order");
+  for (const call of m.calls) assert.equal(call.options.stdio.length, 4, "flock inherits only its lock descriptor");
 });
 
 for (const name of ["barrier", "marker", "lock"]) {

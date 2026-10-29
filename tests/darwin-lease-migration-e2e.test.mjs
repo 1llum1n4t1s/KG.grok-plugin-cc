@@ -31,14 +31,31 @@ function migrate(workspace, stateDir) {
   return migrateStateLock(workspace, { offlineConfirmed: true, localOnly: true, expectedStateDir: stateDir });
 }
 
-test("explicit offline migration initializes a unique v3 generation that the v1 writer rejects", darwin, async t => {
+function assertFreshLedger(stateDir, epoch) {
+  const ledger = JSON.parse(fs.readFileSync(path.join(stateDir, "darwin-lease-ledger.json"), "utf8"));
+  assert.equal(ledger.protocol, "darwin-lease-ledger-v1");
+  assert.equal(ledger.epoch, epoch);
+  assert.equal(ledger.cursor, 0);
+  assert.deepEqual(ledger.slots, Array.from({ length: 256 }, (_, slot) => ({ slot, state: "free" })));
+  assert.deepEqual(fs.readdirSync(path.join(stateDir, "worker-leases")), []);
+}
+
+test("explicit offline migration initializes a unique v4 generation that the v1 writer rejects", darwin, async t => {
   const { workspace, stateDir, lockDir } = fixture(t);
   const migrated = migrate(workspace, stateDir);
-  assert.equal(migrated.protocol, "posix-local-v3");
+  assert.equal(migrated.protocol, "posix-local-v4");
   assert.match(migrated.epoch, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   const marker = JSON.parse(fs.readFileSync(path.join(lockDir, "protocol.json"), "utf8"));
   assert.equal(marker.protocol, migrated.protocol);
   assert.equal(marker.epoch, migrated.epoch);
+  assertFreshLedger(stateDir, migrated.epoch);
+  const otherWorkspace = fs.realpathSync(makeTempDir("grok-migrate-workspace-other-"));
+  const otherDir = resolveStateDir(otherWorkspace);
+  fs.mkdirSync(otherDir, { recursive: true, mode: 0o700 });
+  const other = migrate(otherWorkspace, otherDir);
+  assert.equal(other.protocol, "posix-local-v4");
+  assert.notEqual(other.epoch, migrated.epoch);
+  assertFreshLedger(otherDir, other.epoch);
   const entered = path.join(workspace, "v1-writer-entered");
   const child = fork(new URL("./fixtures/darwin-v1-state-writer.mjs", import.meta.url), [], {
     stdio: ["ignore", "ignore", "inherit", "ipc"]
@@ -55,10 +72,11 @@ test("explicit offline migration initializes a unique v3 generation that the v1 
   assert.equal(migrate(workspace, stateDir).epoch, migrated.epoch);
 });
 
-test("the experimental v2 runtime refuses a v3 state generation", darwin, async t => {
+test("the experimental v2 runtime refuses a v4 state generation", darwin, async t => {
   const { workspace, stateDir } = fixture(t);
   const migrated = migrate(workspace, stateDir);
-  assert.equal(migrated.protocol, "posix-local-v3");
+  assert.equal(migrated.protocol, "posix-local-v4");
+  assertFreshLedger(stateDir, migrated.epoch);
   const entered = path.join(workspace, "v2-writer-entered");
   const child = fork(new URL("./fixtures/darwin-v2-state-writer.mjs", import.meta.url), [], {
     stdio: ["ignore", "ignore", "inherit", "ipc"]
@@ -74,37 +92,69 @@ test("the experimental v2 runtime refuses a v3 state generation", darwin, async 
   assert.equal(fs.existsSync(entered), false);
 });
 
-test("an experimental v2 marker is preserved and rejected by v3 migration and state writer", darwin, t => {
+test("an experimental v2 marker is preserved and rejected by v4 migration and state writer", darwin, t => {
   const { workspace, stateDir, lockDir } = fixture(t);
   migrateV2(stateDir, { expectedStateDir: stateDir });
   const marker = path.join(lockDir, "protocol.json");
-  const original = fs.readFileSync(marker, "utf8");
+  const original = fs.readFileSync(marker, "utf8"), before = fs.lstatSync(marker, { bigint: true });
   assert.equal(JSON.parse(original).protocol, "posix-local-v2");
   assert.throws(() => migrate(workspace, stateDir));
   assert.throws(() => withStateSnapshot(workspace, () => {}));
   assert.equal(fs.readFileSync(marker, "utf8"), original);
+  const after = fs.lstatSync(marker, { bigint: true });
+  assert.equal(after.dev, before.dev);
+  assert.equal(after.ino, before.ino);
 });
 
-test("an experimental v1 marker is preserved and rejected by the v2 migration and state writer", darwin, t => {
+test("v2 and current runtimes each refuse and preserve an experimental v1 marker", darwin, async t => {
   const { workspace, stateDir, lockDir } = fixture(t);
   migrateV1(stateDir, { expectedStateDir: stateDir });
-  const marker = path.join(lockDir, "protocol.json");
-  const original = fs.readFileSync(marker, "utf8");
+  const marker = path.join(lockDir, "protocol.json"), original = fs.readFileSync(marker);
+  const before = fs.lstatSync(marker, { bigint: true });
   assert.equal(JSON.parse(original).protocol, "posix-local-v1");
+  assert.throws(() => migrateV2(stateDir, { expectedStateDir: stateDir }));
+  const entered = path.join(workspace, "v2-writer-entered");
+  const child = fork(new URL("./fixtures/darwin-v2-state-writer.mjs", import.meta.url), [], {
+    stdio: ["ignore", "ignore", "inherit", "ipc"]
+  });
+  const closed = new Promise(resolve => child.once("close", resolve));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await closed;
+  });
+  child.send({ stateDir, entered });
+  const [answer] = await once(child, "message");
+  assert.equal(answer.accepted, false);
+  assert.equal(fs.existsSync(entered), false);
   assert.throws(() => migrate(workspace, stateDir));
   assert.throws(() => withStateSnapshot(workspace, () => {}));
-  assert.equal(fs.readFileSync(marker, "utf8"), original);
+  const after = fs.lstatSync(marker, { bigint: true });
+  assert.equal(after.dev, before.dev);
+  assert.equal(after.ino, before.ino);
+  assert.deepEqual(fs.readFileSync(marker), original);
 });
 
-test("an old file lock is preserved and prevents migration", darwin, t => {
+test("a confirmed offline migration preserves and refuses an old file lock", darwin, t => {
   const { workspace, stateDir, lockDir } = fixture(t);
-  fs.writeFileSync(lockDir, "legacy owner\n", { mode: 0o600, flag: "wx" });
-  assert.throws(() => migrate(workspace, stateDir));
-  assert.equal(fs.readFileSync(lockDir, "utf8"), "legacy owner\n");
+  const lockBytes = Buffer.from("123456\n"), stateFile = path.join(stateDir, "state.json");
+  const stateBytes = Buffer.from('{"version":1,"jobs":[],"reviewGateSessions":[]}\n');
+  fs.writeFileSync(lockDir, lockBytes, { mode: 0o600, flag: "wx" });
+  fs.writeFileSync(stateFile, stateBytes, { mode: 0o600, flag: "wx" });
+  const lockBefore = fs.lstatSync(lockDir, { bigint: true }), stateBefore = fs.lstatSync(stateFile, { bigint: true });
+  assert.throws(() => migrateStateLock(workspace, { offlineConfirmed: true, localOnly: true,
+    allOldProcessesStopped: true, expectedStateDir: stateDir }), /completion evidence is unavailable/i);
+  for (const [file, bytes, before] of [[lockDir, lockBytes, lockBefore], [stateFile, stateBytes, stateBefore]]) {
+    const after = fs.lstatSync(file, { bigint: true });
+    assert.equal(after.dev, before.dev);
+    assert.equal(after.ino, before.ino);
+    assert.deepEqual(fs.readFileSync(file), bytes);
+  }
+  assert.equal(fs.existsSync(path.join(stateDir, ".darwin-legacy-migration")), false);
+  assert.equal(fs.existsSync(path.join(stateDir, "darwin-lease-ledger.json")), false);
 });
 
 for (const kind of ["unknown root entry", "broker admission", "direct admission", "orphan detail", "missing detail", "old lease"]) {
-  test(`offline v3 migration preserves and refuses ${kind}`, darwin, t => {
+  test(`offline v4 migration preserves and refuses ${kind}`, darwin, t => {
     const { workspace, stateDir } = fixture(t);
     const stateFile = path.join(stateDir, "state.json");
     const jobsDir = path.join(stateDir, "jobs");
@@ -132,7 +182,7 @@ for (const kind of ["unknown root entry", "broker admission", "direct admission"
   });
 }
 
-test("offline v3 migration preserves a consistent legacy terminal result and log", darwin, t => {
+test("offline v4 migration preserves a consistent legacy terminal result and log", darwin, t => {
   const { workspace, stateDir } = fixture(t);
   const jobsDir = path.join(stateDir, "jobs");
   fs.mkdirSync(jobsDir, { mode: 0o700 });
@@ -147,7 +197,9 @@ test("offline v3 migration preserves a consistent legacy terminal result and log
   fs.writeFileSync(stateFile, originalState, { mode: 0o600 });
   fs.writeFileSync(detailFile, originalDetail, { mode: 0o600 });
   fs.writeFileSync(logFile, originalLog, { mode: 0o600 });
-  assert.equal(migrate(workspace, stateDir).protocol, "posix-local-v3");
+  const migrated = migrate(workspace, stateDir);
+  assert.equal(migrated.protocol, "posix-local-v4");
+  assertFreshLedger(stateDir, migrated.epoch);
   assert.equal(fs.readFileSync(stateFile, "utf8"), originalState);
   assert.equal(fs.readFileSync(detailFile, "utf8"), originalDetail);
   assert.equal(fs.readFileSync(logFile, "utf8"), originalLog);
@@ -155,10 +207,11 @@ test("offline v3 migration preserves a consistent legacy terminal result and log
   assert.equal(readJobFile(detailFile).rendered, detail.rendered);
 });
 
-test("the legacy file-lock stale cleanup cannot remove a v3 state-lock directory", darwin, async t => {
+test("the legacy file-lock stale cleanup cannot remove a v4 state-lock directory", darwin, async t => {
   const { workspace, stateDir, lockDir } = fixture(t);
   const migrated = migrate(workspace, stateDir);
-  assert.equal(migrated.protocol, "posix-local-v3");
+  assert.equal(migrated.protocol, "posix-local-v4");
+  assertFreshLedger(stateDir, migrated.epoch);
   const marker = path.join(lockDir, "protocol.json");
   const before = fs.readFileSync(marker, "utf8");
   const old = new Date(Date.now() - 3600000);
@@ -186,7 +239,7 @@ for (const step of ["barrier-created", "lock-file-synced", "marker-prepared", "m
     const child = fork(new URL("./fixtures/darwin-migration-interrupt.mjs", import.meta.url), [], {
       stdio: ["ignore", "ignore", "inherit", "ipc"]
     });
-    const closed = new Promise(resolve => child.once("close", resolve));
+    const closed = new Promise(resolve => child.once("close", (code, signal) => resolve({ code, signal })));
     t.after(async () => {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       await closed;
@@ -198,21 +251,39 @@ for (const step of ["barrier-created", "lock-file-synced", "marker-prepared", "m
     }
     assert.ok(fs.existsSync(ready), `migration did not pause at ${step}`);
     child.kill("SIGKILL");
-    await closed;
+    assert.equal((await closed).signal, "SIGKILL");
     const entries = fs.readdirSync(lockDir).sort();
+    const rootEntries = fs.readdirSync(stateDir).sort();
+    const files = [...entries.map(name => path.join(lockDir, name)), ...rootEntries.map(name => path.join(stateDir, name))]
+      .filter(file => fs.lstatSync(file).isFile())
+      .map(file => ({ file, bytes: fs.readFileSync(file), stat: fs.lstatSync(file, { bigint: true }) }));
     const marker = path.join(lockDir, "protocol.json");
-    if (!fs.existsSync(marker)) {
+    if (step !== "marker-published") {
+      assert.equal(fs.existsSync(marker), false);
       assert.throws(() => withStateSnapshot(workspace, () => {}));
       assert.throws(() => migrate(workspace, stateDir));
-      assert.deepEqual(fs.readdirSync(lockDir).sort(), entries);
     } else {
-      const before = fs.readFileSync(marker, "utf8");
-      const parsed = JSON.parse(before);
-      assert.equal(parsed.protocol, "posix-local-v3");
+      assert.equal(fs.existsSync(marker), true);
+      const parsed = JSON.parse(fs.readFileSync(marker, "utf8"));
+      assert.equal(parsed.protocol, "posix-local-v4");
       assert.ok(parsed.epoch);
-      // 公開済み marker は改めて耐久化・検証できるか、明示的に拒否する。
-      try { withStateSnapshot(workspace, () => {}); } catch { /* incomplete remains unavailable */ }
-      assert.equal(fs.readFileSync(marker, "utf8"), before);
+      assertFreshLedger(stateDir, parsed.epoch);
+      withStateSnapshot(workspace, (_state, context) => {
+        assert.equal(context.protocol, "posix-local-v4");
+        assert.equal(context.epoch, parsed.epoch);
+      });
+    }
+    assert.deepEqual(fs.readdirSync(lockDir).sort(), entries);
+    // 正常 snapshot は既定の jobs directory を初めて作成する。
+    const expectedRootEntries = step === "marker-published" && !rootEntries.includes("jobs")
+      ? [...rootEntries, "jobs"].sort() : rootEntries;
+    assert.deepEqual(fs.readdirSync(stateDir).sort(), expectedRootEntries);
+    if (step === "marker-published") assert.deepEqual(fs.readdirSync(path.join(stateDir, "jobs")), []);
+    for (const { file, bytes, stat } of files) {
+      const after = fs.lstatSync(file, { bigint: true });
+      assert.equal(after.dev, stat.dev);
+      assert.equal(after.ino, stat.ino);
+      assert.deepEqual(fs.readFileSync(file), bytes);
     }
   });
 }

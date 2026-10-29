@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
 
 const stateModule = pathToFileURL(fileURLToPath(new URL("../plugins/grok/scripts/lib/state.mjs", import.meta.url))).href;
 
@@ -19,7 +20,13 @@ const readerChild = `
   const stateDir = resolveStateDir(cwd);
   const relative = path.relative(root, stateDir);
   if (!path.isAbsolute(root) || !relative || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error("State directory escaped fixture");
+  const rootStat = fs.lstatSync(root, { bigint: true });
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || fs.existsSync(stateDir)) throw new Error("Fixture ownership was not established before migration");
+  process.stdout.write("FIXTURE_PRE " + JSON.stringify({stateDir,rootDev:String(rootStat.dev),rootIno:String(rootStat.ino)}) + "\\n");
   migrateStateLock(cwd, { offlineConfirmed: true, localOnly: true, expectedStateDir: stateDir });
+  const stateStat = fs.lstatSync(stateDir, { bigint: true });
+  const epoch = process.platform === "linux" ? JSON.parse(fs.readFileSync(path.join(stateDir,"state.lock","protocol.json"),"utf8")).epoch : null;
+  process.stdout.write("FIXTURE_READY " + JSON.stringify({stateDir,epoch,stateDev:String(stateStat.dev),stateIno:String(stateStat.ino)}) + "\\n");
   const jobsDir = path.join(stateDir, "jobs");
   const stateFile = path.join(stateDir, "state.json");
   const jobFile = path.join(jobsDir, "fixture.json");
@@ -68,22 +75,45 @@ for (const record of ["state", "job"]) {
     const created = fs.lstatSync(root);
     fs.mkdirSync(path.join(root, "workspace"));
     fs.mkdirSync(path.join(root, "data"));
+    let child, result, stdout = "", stderr = "", timedOut = false;
     t.after(() => {
-      const current = fs.lstatSync(root);
-      assert.equal(path.dirname(root), parent);
-      assert.equal(fs.realpathSync.native(root), root);
-      assert.ok(current.isDirectory() && !current.isSymbolicLink());
-      assert.equal(current.dev, created.dev);
-      assert.equal(current.ino, created.ino);
-      fs.rmSync(root, { recursive: true, force: true });
+      try {
+        const current = fs.lstatSync(root);
+        assert.equal(path.dirname(root), parent);
+        assert.equal(fs.realpathSync.native(root), root);
+        assert.ok(current.isDirectory() && !current.isSymbolicLink());
+        assert.equal(current.dev, created.dev);
+        assert.equal(current.ino, created.ino);
+        if (process.platform === "linux" && child) {
+          assert.ok(result && (child.exitCode !== null || child.signalCode !== null) && !timedOut, "fixture child exit is unconfirmed");
+          const preLine = stdout.split("\n").find(line => line.startsWith("FIXTURE_PRE "));
+          const readyLine = stdout.split("\n").find(line => line.startsWith("FIXTURE_READY "));
+          assert.ok(preLine && readyLine, "migration identity is unconfirmed");
+          const pre = JSON.parse(preLine.slice("FIXTURE_PRE ".length));
+          const ready = JSON.parse(readyLine.slice("FIXTURE_READY ".length));
+          assert.equal(pre.rootDev, String(created.dev)); assert.equal(pre.rootIno, String(created.ino));
+          assert.equal(pre.stateDir, ready.stateDir);
+          assert.ok(path.isAbsolute(ready.stateDir) && ready.stateDir.startsWith(path.join(root, "data") + path.sep));
+          const state = fs.lstatSync(ready.stateDir, { bigint: true });
+          assert.ok(state.isDirectory() && !state.isSymbolicLink());
+          assert.equal(String(state.dev), ready.stateDev); assert.equal(String(state.ino), ready.stateIno);
+          const protocol = JSON.parse(fs.readFileSync(path.join(ready.stateDir, "state.lock", "protocol.json"), "utf8"));
+          assert.ok(ready.epoch); assert.equal(protocol.epoch, ready.epoch);
+          const stopped = shutdownPosixStateLockSentinel(ready.stateDir, { offlineConfirmed: true, expectedStateDir: pre.stateDir });
+          assert.equal(stopped.epoch, ready.epoch); assert.equal(stopped.stopped, true);
+        }
+        fs.rmSync(root, { recursive: true, force: true });
+      } catch (error) {
+        t.diagnostic(`Fixture retained because cleanup could not be confirmed: ${root}`);
+        throw error;
+      }
     });
 
-    const child = spawn(process.execPath, ["--input-type=module", "--eval", readerChild], {
+    child = spawn(process.execPath, ["--input-type=module", "--eval", readerChild], {
       cwd: path.join(root, "workspace"),
       env: { ...process.env, CLAUDE_PLUGIN_DATA: path.join(root, "data"), PLUGIN_DATA: "", FIFO_FIXTURE_ROOT: root, FIFO_FIXTURE_RECORD: record },
       stdio: ["ignore", "pipe", "pipe"]
     });
-    let stdout = "", stderr = "", timedOut = false;
     child.stdout.on("data", chunk => { stdout += chunk; });
     child.stderr.on("data", chunk => { stderr += chunk; });
     const closed = new Promise((resolve, reject) => {
@@ -94,7 +124,6 @@ for (const record of ["state", "job"]) {
       timedOut = true;
       child.kill();
     }, 15000);
-    let result;
     try { result = await closed; } finally { clearTimeout(timer); }
     assert.match(stdout, /FIFO_SWAPPED/, `FIFO replacement was not reached: ${stderr}`);
     assert.equal(timedOut, false, `candidate reader blocked on the replacement FIFO: ${stderr}`);

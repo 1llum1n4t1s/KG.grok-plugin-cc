@@ -8,9 +8,10 @@ import test from "node:test";
 import { resolveStateDir } from "../plugins/grok/scripts/lib/state.mjs";
 import { makeTempDir, removeTempFixture } from "./helpers.mjs";
 
-// 故障条件: detail のみ確定した回収を放置、または不正な証拠から回収する。
+// 故障条件: detailのみ確定した片側の証拠や不正な証拠から、推測で回収・変更する。
+// 両保存先と停止証拠が一致する、完全な証拠からの通常回収とは区別する。
 // Mac の実プロセスによる模擬であり、Linux kernel や電源断は検証しない。
-test("Linux reclaim resumes after deadline between detail and index", {
+test("Linux reclaim preserves mismatched detail and index after a deadline", {
   skip: process.platform !== "darwin", timeout: 360000
 }, t => runRecovery(t, false));
 
@@ -26,7 +27,7 @@ test("Linux reclaim preserves evidence when binding disappears before lease unli
   skip: process.platform !== "darwin", timeout: 360000
 }, t => runRecovery(t, "missing-binding"));
 
-test("Linux recovers a confirmed prepared ledger cursor after a crash", {
+test("Linux reclaim refuses an unconfirmed prepared ledger cursor after a crash", {
   skip: process.platform !== "darwin", timeout: 360000
 }, t => runRecovery(t, false, true));
 
@@ -85,6 +86,11 @@ function runRecovery(t, altered, prepared = false) {
   const originalDetail = fs.readFileSync(detailFile);
   const leaseFile = original.workerLease.path, bindingFile = leaseFile.replace(/\.lease$/, ".binding");
   const ledgerFile = path.join(path.dirname(leaseFile), "ledger.json"), marker = path.join(root, "index-inventory-fault");
+  const fileEvidence = file => {
+    const stat = fs.lstatSync(file, { bigint: true });
+    assert.ok(stat.isFile() && !stat.isSymbolicLink(), `fixture evidence is not a regular file: ${file}`);
+    return { dev: stat.dev, ino: stat.ino, mode: stat.mode, uid: stat.uid, nlink: stat.nlink, bytes: fs.readFileSync(file) };
+  };
   // 完了 worker の停止を確認した隔離 fixture で、次の sweep 対象をその slot に固定する。
   const ledger = JSON.parse(fs.readFileSync(ledgerFile, "utf8"));
   assert.equal(ledger.slots[original.workerLease.slot].state, "published");
@@ -109,20 +115,19 @@ function runRecovery(t, altered, prepared = false) {
     if (altered) fs.writeFileSync(preparedFile, "invalid prepared ledger\n");
     const savedPrepared = fs.readFileSync(preparedFile), savedState = fs.readFileSync(stateFile);
     const savedDetail = fs.readFileSync(detailFile);
+    const savedLease = fileEvidence(leaseFile), savedBinding = fileEvidence(bindingFile);
     const retry = spawnSync(process.execPath, [sweep, workspace, "256", "180000"], { env, encoding: "utf8", timeout: 200000 });
-    if (altered) {
-      assert.notEqual(retry.status, 0, "invalid prepared evidence must block recovery");
-      assert.deepEqual(fs.readFileSync(preparedFile), savedPrepared);
-      assert.deepEqual(fs.readFileSync(ledgerFile), beforeLedger);
-      assert.deepEqual(fs.readFileSync(stateFile), savedState);
-      assert.deepEqual(fs.readFileSync(detailFile), savedDetail);
-      assert.ok(fs.existsSync(leaseFile) && fs.existsSync(bindingFile));
-    } else {
-      assert.equal(retry.status, 0, retry.stderr);
-      assert.equal(JSON.parse(retry.stdout).reclaimed, 1, "confirmed cursor update must recover");
-      assert.equal(fs.existsSync(preparedFile), false);
-      assert.equal(JSON.parse(fs.readFileSync(ledgerFile, "utf8")).slots[original.workerLease.slot].state, "free");
-    }
+    // prepared が正常な形でも、その公開と耐久化は証明できないため再利用しない。
+    assert.equal(retry.error, undefined, retry.error?.message);
+    assert.equal(retry.signal, null);
+    assert.ok(Number.isInteger(retry.status) && retry.status !== 0, "unconfirmed prepared evidence must block recovery");
+    assert.match(retry.stderr, /Linux lease ledger has an unconfirmed prepared update/);
+    assert.deepEqual(fs.readFileSync(preparedFile), savedPrepared);
+    assert.deepEqual(fs.readFileSync(ledgerFile), beforeLedger);
+    assert.deepEqual(fs.readFileSync(stateFile), savedState);
+    assert.deepEqual(fs.readFileSync(detailFile), savedDetail);
+    assert.deepEqual(fileEvidence(leaseFile), savedLease);
+    assert.deepEqual(fileEvidence(bindingFile), savedBinding);
     finished = true;
     return;
   }
@@ -130,9 +135,11 @@ function runRecovery(t, altered, prepared = false) {
     GROK_RECLAIM_FAULT_MODE: altered ? "crash" : "deadline",
     NODE_OPTIONS: `${env.NODE_OPTIONS} --import ${JSON.stringify(faultPreload)}` };
   const failed = spawnSync(process.execPath, [sweep, workspace, "1", "5000"], { env: faultEnv, encoding: "utf8", timeout: 30000 });
+  assert.equal(failed.error, undefined, failed.error?.message);
+  assert.equal(failed.signal, null);
   if (altered) assert.equal(failed.status, 74, failed.stderr);
   else {
-    assert.notEqual(failed.status, 0);
+    assert.ok(Number.isInteger(failed.status) && failed.status !== 0, "the injected deadline must exit with an error");
     assert.match(failed.stderr, /State commit outcome is unknown.*Timed out acquiring Grok state lock/);
   }
   assert.ok(fs.existsSync(marker), "failure must occur in index inventory after detail publication");
@@ -163,29 +170,38 @@ function runRecovery(t, altered, prepared = false) {
     }
   }
   const preservedState = fs.readFileSync(stateFile), preservedDetail = fs.readFileSync(detailFile);
+  const savedLease = fileEvidence(leaseFile);
+  const savedBindingPath = altered === "missing-binding" ? path.join(root, "held-binding") : bindingFile;
+  const savedBinding = fileEvidence(savedBindingPath);
+  const savedSlot = JSON.parse(fs.readFileSync(ledgerFile, "utf8")).slots[original.workerLease.slot];
   const retry = spawnSync(process.execPath, [sweep, workspace, "256", "180000"], { env, encoding: "utf8", timeout: 200000 });
+  assert.equal(retry.error, undefined, retry.error?.message);
+  assert.equal(retry.signal, null);
+  assert.ok(Number.isInteger(retry.status), "sweep must exit normally");
   if (altered) {
-    if (retry.status === 0) assert.equal(JSON.parse(retry.stdout).reclaimed, 0);
+    assert.equal(retry.status, 0, retry.stderr);
+    const report = JSON.parse(retry.stdout);
+    assert.equal(report.reclaimed, 0);
+    assert.ok(report.uncertain >= 1, "the mismatched evidence must be reported as uncertain");
     assert.deepEqual(fs.readFileSync(stateFile), preservedState);
     assert.deepEqual(fs.readFileSync(detailFile), preservedDetail);
-    assert.ok(fs.existsSync(leaseFile));
+    assert.deepEqual(fileEvidence(leaseFile), savedLease);
     if (altered === "missing-binding") {
       assert.equal(fs.existsSync(bindingFile), false);
       assert.ok(fs.existsSync(path.join(root, "held-binding")));
-    } else assert.ok(fs.existsSync(bindingFile));
-    assert.equal(JSON.parse(fs.readFileSync(ledgerFile, "utf8")).slots[original.workerLease.slot].state, "reclaiming");
+    }
+    assert.deepEqual(fileEvidence(savedBindingPath), savedBinding);
+    assert.deepEqual(JSON.parse(fs.readFileSync(ledgerFile, "utf8")).slots[original.workerLease.slot], savedSlot);
   } else {
     assert.equal(retry.status, 0, retry.stderr);
-    assert.equal(JSON.parse(retry.stdout).reclaimed, 1, "confirmed interrupted reclaim must resume");
-    assert.equal(JSON.parse(fs.readFileSync(ledgerFile, "utf8")).slots[original.workerLease.slot].state, "free");
-    const latestIndex = JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.find(job => job.id === original.id);
-    const latestDetail = JSON.parse(fs.readFileSync(detailFile, "utf8"));
-    for (const record of [latestIndex, latestDetail]) {
-      assert.equal(record.workerLease, null);
-      assert.equal(record.workerStopLeaseId, original.workerLease.id);
-    }
-    assert.equal(fs.existsSync(leaseFile), false);
-    assert.equal(fs.existsSync(bindingFile), false);
+    const report = JSON.parse(retry.stdout);
+    assert.equal(report.reclaimed, 0, "mismatched records cannot prove a completed reclaim");
+    assert.ok(report.uncertain >= 1, "the unconfirmed slot must be reported");
+    assert.deepEqual(fs.readFileSync(stateFile), preservedState);
+    assert.deepEqual(fs.readFileSync(detailFile), preservedDetail);
+    assert.deepEqual(JSON.parse(fs.readFileSync(ledgerFile, "utf8")).slots[original.workerLease.slot], savedSlot);
+    assert.deepEqual(fileEvidence(leaseFile), savedLease);
+    assert.deepEqual(fileEvidence(bindingFile), savedBinding);
   }
   assert.equal(fs.readFileSync(path.join(root, "settings.log"), "utf8").split("\n").filter(line => line === "session/prompt").length, 1);
   finished = true;

@@ -140,7 +140,7 @@ for (const missing of ["missing-epoch", "old-epoch", "terminationPending", "grok
   });
 }
 
-test("macOS prunes a current terminal record with matching explicit evidence", macOnly, t => {
+test("macOS retains current terminal records with matching explicit evidence", macOnly, t => {
   const f = fixture(t); assert.equal(migrate(f).ok, true);
   const epoch = JSON.parse(fs.readFileSync(path.join(f.stateDir, "state.lock", "protocol.json"), "utf8")).epoch;
   const jobs = Array.from({ length: 51 }, (_, i) => ({ id: `job-${i}`, status: "completed", createdAt: "2020-01-01",
@@ -149,9 +149,11 @@ test("macOS prunes a current terminal record with matching explicit evidence", m
   for (const job of jobs) files(f, job, job);
   const stateFile = path.join(f.stateDir, "state.json"); writeJson(stateFile, { version: 1, jobs });
   assert.equal(f.run("try { updateState(workspace,s=>{s.config.test=true;}); console.log(JSON.stringify({ok:true})); } catch(e) { console.log(JSON.stringify({ok:false,error:e.message})); }").ok, true);
-  assert.equal(JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.length, 50);
-  assert.equal(fs.existsSync(path.join(f.jobsDir, "job-0.json")), false);
-  assert.equal(fs.existsSync(path.join(f.jobsDir, "job-0.log")), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs, jobs);
+  for (const job of jobs) {
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.jobsDir, `${job.id}.json`), "utf8")), job);
+    assert.equal(fs.readFileSync(path.join(f.jobsDir, `${job.id}.log`), "utf8"), "log evidence");
+  }
 });
 
 for (const damage of ["completedAt", "invalid-stop-proof", "false-lease", "empty-lease"]) {
@@ -178,7 +180,7 @@ for (const damage of ["completedAt", "invalid-stop-proof", "false-lease", "empty
   });
 }
 
-test("macOS prunes a terminal record with matching released-lease evidence", macOnly, t => {
+test("macOS retains terminal records with matching released-lease evidence", macOnly, t => {
   const f = fixture(t); assert.equal(migrate(f).ok, true);
   const epoch = JSON.parse(fs.readFileSync(path.join(f.stateDir, "state.lock", "protocol.json"), "utf8")).epoch;
   const jobs = Array.from({ length: 51 }, (_, i) => ({ id: `job-${i}`, status: "completed", createdAt: "2020-01-01",
@@ -190,6 +192,9 @@ test("macOS prunes a terminal record with matching released-lease evidence", mac
   for (const job of jobs) files(f, job, job);
   const stateFile = path.join(f.stateDir, "state.json"); writeJson(stateFile, { version: 1, jobs });
   assert.equal(f.run("try { updateState(workspace,s=>{s.config.test=true;}); console.log(JSON.stringify({ok:true})); } catch(e) { console.log(JSON.stringify({ok:false,error:e.message})); }").ok, true);
-  assert.equal(JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.length, 50);
-  assert.equal(fs.existsSync(path.join(f.jobsDir, "job-0.json")), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs, jobs);
+  for (const job of jobs) {
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.jobsDir, `${job.id}.json`), "utf8")), job);
+    assert.equal(fs.readFileSync(path.join(f.jobsDir, `${job.id}.log`), "utf8"), "log evidence");
+  }
 });

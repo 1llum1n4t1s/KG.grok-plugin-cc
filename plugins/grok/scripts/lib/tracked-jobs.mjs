@@ -11,6 +11,10 @@ import { publishLinuxLeaseSlot, reserveLinuxLeaseSlot, sweepLinuxWorkerLeases, v
 
 export const SESSION_ID_ENV = "GROK_COMPANION_SESSION_ID";
 export const CODEX_SESSION_ID_ENV = "CODEX_THREAD_ID";
+export const hasGenerationIdentity = current => (typeof current.createdAt === "string" && Boolean(current.createdAt.trim())) ||
+  (typeof current.processStartKey === "string" && Boolean(current.processStartKey));
+export const sameTurnEvidence = (left, right) => left && right &&
+  ["grokPromptState", "grokSessionId"].every(key => (left[key] ?? null) === (right[key] ?? null));
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 // 公開後の lease は worker process の終了を証明する。出力後も FD を閉じず、
 // process 終了時に OS が回収するまで owner を強参照する。長寿命 process が
@@ -35,6 +39,8 @@ function boundedLinuxStateError(value) {
   }
   return prefix + suffix;
 }
+
+export { boundedLinuxStateError as boundJsonDiagnostic };
 
 /** agentの応答に依存せず、このworkerが所有するbroker接続だけを閉じる。 */
 export function observeBrokerWorkerCancellation(workspaceRoot, jobId, control, options = {}) {
@@ -615,13 +621,14 @@ async function runTrackedJobWithReservation(job, runner, options, reservation) {
     const completedAt = nowIso();
     const completion = commitNonTerminalTransition(job.workspaceRoot, job.id, (current) => {
       const stopUnconfirmed = execution.turnStopUnconfirmed === true || current.grokPromptState === "starting";
+      const promptNotSent = execution.promptNotSent === true && !stopUnconfirmed;
       return {
         ...current,
         status: completionStatus,
         terminationPending: stopUnconfirmed,
-        grokPromptState: stopUnconfirmed ? "pending" : "terminal",
+        grokPromptState: stopUnconfirmed ? "pending" : promptNotSent ? "not-sent" : "terminal",
         grokSessionId: execution.grokSessionId ?? null,
-        ...(current.jobClass === "task" ? { taskSessionResumable: !stopUnconfirmed && Boolean(execution.grokSessionId) } : {}),
+        ...(current.jobClass === "task" ? { taskSessionResumable: !stopUnconfirmed && !promptNotSent && Boolean(execution.grokSessionId) } : {}),
         pid: null,
         phase: stopUnconfirmed ? "termination-pending" : completionStatus === "completed" ? "done" : "failed",
         completedAt,

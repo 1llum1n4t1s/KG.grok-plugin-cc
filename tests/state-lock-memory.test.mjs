@@ -35,7 +35,7 @@ function memoryLock(initial) {
     existsSync(file) { return files.has(file); },
     rmSync(file) { removals.push(file); files.delete(file); }
   };
-  const guardSource = source.slice(source.indexOf("function assertStateLockBarrier("), source.indexOf("function requireStateLockMigration("));
+  const guardSource = source.slice(source.indexOf("function acquireExistingDarwinMigrationGuard("), source.indexOf("function requireStateLockMigration("));
   const lock = vm.runInNewContext(`${lockSource}; ${guardSource}; withStateLock`, {
     fs: fakeFs, path: path.posix,
     resolveStateDir: () => "/state", ensureStateDir() {},

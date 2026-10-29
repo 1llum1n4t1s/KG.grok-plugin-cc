@@ -428,9 +428,12 @@ function records(scope, jobId) {
   const state = readJson(scope, root, "state.json").value;
   if (!state || !Array.isArray(state.jobs) || state.jobs.length > 4096) throw new Error("Linux lease state is invalid");
   const ids = new Set();
+  let indexed = null;
   for (const job of state.jobs) {
-    if (!validId(job?.id) || ids.has(job.id)) throw new Error("Linux lease state has invalid job IDs");
-    ids.add(job.id);
+    const id = job?.id;
+    if (!validId(id) || ids.has(id)) throw new Error("Linux lease state has invalid job IDs");
+    ids.add(id);
+    if (id === jobId) indexed = job;
   }
   const jobs = openDir(scope.context.rootFd, "jobs", scope.mount);
   try {
@@ -444,7 +447,7 @@ function records(scope, jobId) {
     const stored = exists(target) ? readJson(scope, jobs, name).value : null;
     if (!stored) { fs.fsyncSync(jobs.fd); if (exists(target)) throw new Error("Linux lease detail appeared"); }
     checkJobs();
-    return { indexed: state.jobs.find(job => job.id === jobId) ?? null, stored };
+    return { indexed, stored };
   } finally { fs.closeSync(jobs.fd); }
 }
 function binding(scope, entry) {

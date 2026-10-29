@@ -121,47 +121,39 @@ try { withStateSnapshot(${JSON.stringify(cwd)}, (_state, context) => {
 catch (e) { console.error(e.message); process.exitCode=1; }`;
 }
 
-test("offline migration retains a lock held by the 1.0.26-derived fixture and publishes an exclusive v4 state mutex", darwin, async t => {
+test("offline migration refuses a stopped legacy writer and retains the old lock", darwin, async t => {
   const f = fixture(t), old = await preserveRealOldLock(f);
-  const result = migrate(f);
-  assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.deepEqual(fs.readFileSync(f.stateFile), f.state);
-  assert.ok(retainedOldInode(f.stateDir, old.before, old.bytes), "old lock inode and bytes were not retained");
-  assert.ok(fs.lstatSync(f.lock).isDirectory());
-  const marker = JSON.parse(fs.readFileSync(path.join(f.lock, "protocol.json"), "utf8"));
-  assert.equal(marker.protocol, "posix-local-v4");
-
-  const first = start(f, ["--input-type=module", "-e", probeSource(f.cwd, "hold")]);
-  await waitFor(first, "STATE_MUTEX_HELD");
-  const second = start(f, ["--input-type=module", "-e", probeSource(f.cwd, "once")]);
-  const contender = await second.child.closed;
-  assert.notEqual(contender.code, 0, contender.output);
-  assert.doesNotMatch(contender.output, /STATE_MUTEX_HELD/);
-  assert.match(contender.errors, /timed out|lock/i);
-  first.child.kill("SIGKILL");
-  assert.equal((await first.child.closed).signal, "SIGKILL");
-  const after = await start(f, ["--input-type=module", "-e", probeSource(f.cwd, "once")]).child.closed;
-  assert.equal(after.code, 0, after.errors);
-  assert.match(after.output, /STATE_MUTEX_HELD/);
-  assert.ok(retainedOldInode(f.stateDir, old.before, old.bytes));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = migrate(f);
+    assert.ifError(result.error);
+    assert.notEqual(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stderr + result.stdout, /completion evidence is unavailable/i);
+    assert.deepEqual(fs.readFileSync(f.stateFile), f.state);
+    const after = fs.lstatSync(f.lock, { bigint: true });
+    assert.equal(after.dev, old.before.dev);
+    assert.equal(after.ino, old.before.ino);
+    assert.deepEqual(fs.readFileSync(f.lock), old.bytes);
+    assert.equal(fs.existsSync(path.join(f.stateDir, ".darwin-legacy-migration")), false);
+  }
 });
 
-test("runtime refuses modified completion evidence and preserves the old inode", darwin, async t => {
+test("runtime refuses unverified completion evidence and preserves the old lock", darwin, async t => {
   const f = fixture(t), old = await preserveRealOldLock(f);
-  const result = migrate(f);
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  const file = path.join(f.stateDir, ".darwin-legacy-migration", "completion.json");
-  const completion = JSON.parse(fs.readFileSync(file, "utf8"));
-  completion.epoch = "00000000-0000-4000-8000-000000000000";
-  const bytes = Buffer.from(`${JSON.stringify(completion)}\n`);
-  fs.writeFileSync(file, bytes);
-  const before = fs.lstatSync(file, { bigint: true });
+  const directory = path.join(f.stateDir, ".darwin-legacy-migration");
+  fs.mkdirSync(directory, { mode: 0o700 });
+  const completion = path.join(directory, "completion.json"), bytes = Buffer.from('{"epoch":"00000000-0000-4000-8000-000000000000"}\n');
+  fs.writeFileSync(completion, bytes, { mode: 0o600 });
+  const before = fs.lstatSync(completion, { bigint: true });
   const runtime = await start(f, ["--input-type=module", "-e", probeSource(f.cwd, "once")]).child.closed;
   assert.notEqual(runtime.code, 0, runtime.output);
-  assert.deepEqual(fs.readFileSync(file), bytes);
-  assert.equal(fs.lstatSync(file, { bigint: true }).ino, before.ino);
-  assert.ok(retainedOldInode(f.stateDir, old.before, old.bytes));
+  assert.doesNotMatch(runtime.output, /STATE_MUTEX_HELD/);
+  assert.deepEqual(fs.readFileSync(f.lock), old.bytes);
+  const after = fs.lstatSync(f.lock, { bigint: true });
+  assert.equal(after.dev, old.before.dev);
+  assert.equal(after.ino, old.before.ino);
+  assert.deepEqual(fs.readFileSync(f.stateFile), f.state);
+  assert.equal(fs.lstatSync(completion, { bigint: true }).ino, before.ino);
+  assert.deepEqual(fs.readFileSync(completion), bytes);
 });
 
 test("forged migration callbacks cannot inspect or remove the actual legacy lock", darwin, async t => {

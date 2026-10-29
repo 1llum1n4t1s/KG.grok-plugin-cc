@@ -82,11 +82,12 @@ try {
   $create = $native.GetMethod('CreateFileW')
   $finalMethod = $native.GetMethod('GetFinalPathNameByHandleW')
   $infoMethod = $native.GetMethod('GetFileInformationByHandle')
+  $finalPathBuffer = [Text.StringBuilder]::new(32768)
   function FinalPath($handle) {
-    $buffer = [Text.StringBuilder]::new(32768)
-    $length = $finalMethod.Invoke($null, @($handle, $buffer, [uint32]32768, [uint32]0))
+    $null = $finalPathBuffer.Clear()
+    $length = $finalMethod.Invoke($null, @($handle, $finalPathBuffer, [uint32]32768, [uint32]0))
     if ($length -eq 0 -or $length -ge 32768) { throw 'Unavailable final path' }
-    $value = $buffer.ToString()
+    $value = $finalPathBuffer.ToString()
     if ($value -notmatch '^\\\\\?\\[A-Za-z]:\\') { throw 'Unsupported filesystem location' }
     return $value
   }
@@ -563,14 +564,15 @@ function workingTreeMetadata(repoRoot, options = {}) {
 }
 
 function immutableBlob(repoRoot, oid, objectFormat, cache, options = {}) {
-  if (cache.has(oid)) return cache.get(oid);
+  if (cache.entries.has(oid)) return cache.entries.get(oid);
   const content = Buffer.from(gitChecked(repoRoot, ["cat-file", "blob", oid], {
     ...options, maxBuffer: MAX_FINGERPRINT_TOTAL_BYTES + 1024
   }).stdout, "utf8");
   const actual = createHash(objectFormat).update(`blob ${content.length}\0`).update(content).digest("hex");
   if (actual !== oid) throw incompleteSnapshot("blob content is not complete lossless UTF-8.");
-  if ([...cache.values()].reduce((total, bytes) => total + bytes.length, content.length) > MAX_FINGERPRINT_TOTAL_BYTES) throw incompleteSnapshot("immutable blob evidence exceeds the snapshot size limit.");
-  cache.set(oid, content);
+  if (cache.totalBytes + content.length > MAX_FINGERPRINT_TOTAL_BYTES) throw incompleteSnapshot("immutable blob evidence exceeds the snapshot size limit.");
+  cache.entries.set(oid, content);
+  cache.totalBytes += content.length;
   return content;
 }
 
@@ -627,7 +629,7 @@ export function collectWorkingTreeSnapshot(cwd, options = {}) {
     workingTreeMetadata(repoRoot, options).identity !== metadata.identity) throw incompleteSnapshot("working tree or metadata changed during collection.");
   const staged = [];
   const unstaged = [];
-  const blobs = new Map();
+  const blobs = { entries: new Map(), totalBytes: 0 };
   const cleanFiles = new Map(files);
   for (const name of listUniqueFiles([...metadata.headFiles.keys()], [...metadata.index.keys()])) {
     checkDeadline();
@@ -700,11 +702,14 @@ export function buildWorkingTreeSnapshotDiff(before, after, options = {}) {
   });
   if (before.indexFingerprint !== after.indexFingerprint || before.head !== after.head) throw incompleteSnapshot("HEAD, index or conversion metadata changed during the turn.");
   let context = "";
+  let contextBytes = 0;
   for (const name of listUniqueFiles([...snapshots[0].keys()], [...snapshots[1].keys()])) {
     const previous = snapshots[0].get(name);
     const current = snapshots[1].get(name);
-    context += replacementPatch(name, previous?.bytes ?? null, current?.bytes ?? null, previous?.mode, current?.mode);
-    if (Buffer.byteLength(context) > normalizeMaxInlineDiffBytes(options.maxInlineDiffBytes)) throw incompleteSnapshot("complete turn evidence exceeds the inline size limit.");
+    const patch = replacementPatch(name, previous?.bytes ?? null, current?.bytes ?? null, previous?.mode, current?.mode);
+    context += patch;
+    contextBytes += Buffer.byteLength(patch);
+    if (contextBytes > normalizeMaxInlineDiffBytes(options.maxInlineDiffBytes)) throw incompleteSnapshot("complete turn evidence exceeds the inline size limit.");
   }
   if (!context && before.fingerprint !== after.fingerprint) throw incompleteSnapshot("fingerprint changed without a complete physical file delta.");
   return { fingerprint: after.fingerprint, context, complete: true };
@@ -713,7 +718,8 @@ export function buildWorkingTreeSnapshotDiff(before, after, options = {}) {
 export function captureWorkingTreeReviewSnapshot(cwd, options = {}) {
   const snapshot = collectWorkingTreeSnapshot(cwd);
   const { stagedDiff, unstagedDiff } = snapshot.buildDiffs();
-  const untracked = snapshot.files.filter((file) => snapshot.state.untracked.includes(file.path)).map((file) =>
+  const untrackedPaths = new Set(snapshot.state.untracked);
+  const untracked = snapshot.files.filter((file) => untrackedPaths.has(file.path)).map((file) =>
     replacementPatch(file.path, null, Buffer.from(file.content, "base64"), "100644", file.mode)).join("\n");
   const context = [formatSection("Staged Diff", stagedDiff), formatSection("Unstaged Diff", unstagedDiff),
     formatSection("Untracked Files", untracked)].join("\n");

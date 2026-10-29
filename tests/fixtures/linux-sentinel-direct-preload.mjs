@@ -17,6 +17,8 @@ let verification;
 
 function anchored(target) {
   if (typeof target !== "string") return target;
+  const root = verification && new RegExp(`^/proc/${process.pid}/root(?:/(.*))?$`).exec(target);
+  if (root) return path.join("/", root[1] ?? "");
   const match = /^\/proc\/self\/fd\/3(?:\/(.*))?$/.exec(target);
   if (!match) return target;
   const held = fs.fstatSync(3, { bigint: true });
@@ -27,6 +29,14 @@ function anchored(target) {
 fs.lstatSync = function (target, ...options) { return lstatSync.call(this, anchored(target), ...options); };
 fs.statSync = function (target, ...options) {
   if (verification && typeof target === "string") {
+    if (target === `/proc/${process.pid}/exe`) {
+      const stat = statSync.call(this, process.execPath, ...options);
+      if (!verification.imageMismatch) return stat;
+      return new Proxy(stat, { get(target, property, receiver) {
+        if (property === "ino") return target.ino + (typeof target.ino === "bigint" ? 1n : 1);
+        return Reflect.get(target, property, receiver);
+      } });
+    }
     const match = new RegExp(`^/proc/${process.pid}/fd/(\\d+)$`).exec(target);
     if (match) {
       const fd = Number(match[1]);
@@ -46,9 +56,10 @@ fs.readdirSync = function (target, ...options) {
 };
 fs.readlinkSync = function (target, ...options) {
   if (verification && typeof target === "string" && target.startsWith(`/proc/${process.pid}/ns/`)) {
+    if (target === `/proc/${process.pid}/ns/mnt`) return "mnt:[12345]";
     return `fixture-${target.slice(target.lastIndexOf("/") + 1)}`;
   }
-  return readlinkSync.call(this, target, ...options);
+  return readlinkSync.call(this, anchored(target), ...options);
 };
 fs.openSync = function (target, flags, ...options) {
   const resolved = anchored(target);
@@ -63,7 +74,8 @@ fs.readFileSync = function (target, ...options) {
     return "mnt_id:\t41\n";
   }
   if (target === `/proc/${process.pid}/stat`) {
-    return `${process.pid} (sentinel fixture) S ${Array(19).fill("123456").join(" ")}\n`;
+    const tick = verification?.generationMismatch ? "123457" : "123456";
+    return `${process.pid} (sentinel fixture) S ${Array(19).fill(tick).join(" ")}\n`;
   }
   if (verification && target === `/proc/${process.pid}/status`) return `State:\tS\nNSpid:\t${process.pid}\n`;
   if (verification && typeof target === "string" && new RegExp(`^/proc/${process.pid}/fdinfo/\\d+$`).test(target)) return "flags:\t0\n";

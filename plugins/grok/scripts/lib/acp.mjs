@@ -993,9 +993,13 @@ export class GrokAcpClient {
     let managedGeneration = null;
     if (!options.disableBroker) {
       brokerEndpoint = options.brokerEndpoint ?? options.env?.[BROKER_ENDPOINT_ENV] ?? process.env[BROKER_ENDPOINT_ENV] ?? null;
-      if (brokerEndpoint && process.platform === "linux") {
-        const known = findExplicitManagedSession(cwd, brokerEndpoint);
+      if (brokerEndpoint && (process.platform === "linux" || options.requireManagedBroker)) {
+        const known = process.platform === "linux" ? findExplicitManagedSession(cwd, brokerEndpoint) : (() => {
+          const session = loadBrokerSession(cwd);
+          return session?.endpoint === brokerEndpoint ? { session, legacy: false } : null;
+        })();
         if (known?.legacy) throw new Error("Explicit managed broker belongs to a legacy epoch; offline recovery is required.");
+        if (options.requireManagedBroker && !known) throw new Error("Cannot resume through an unverified broker endpoint.");
         if (known) {
           if (options.cancellationOnly) {
             if (known.session.generation !== options.cancellationGeneration) throw new Error("Recorded broker generation changed before cancellation.");
@@ -1027,8 +1031,13 @@ export class GrokAcpClient {
         }
       }
     }
+    if (options.requireManagedBroker && brokerEndpoint && !managedGeneration) {
+      throw new Error("Cannot resume without a verified managed broker generation.");
+    }
     if (!brokerEndpoint) {
-      if (options.brokerOnly) throw new Error("No existing Grok broker is available for cancellation.");
+      if (options.brokerOnly || options.requireManagedBroker) throw new Error(options.requireManagedBroker
+        ? "No existing managed Grok broker is available for session resumption."
+        : "No existing Grok broker is available for cancellation.");
       return connectDirectClient(cwd, options);
     }
 
@@ -1063,7 +1072,7 @@ export class GrokAcpClient {
         }
         catch (releaseError) { error.cause ??= releaseError; throw error; }
       }
-      if (options.brokerOnly || brokerInitialized) throw error;
+      if (options.brokerOnly || options.requireManagedBroker || brokerInitialized) throw error;
       // タイムアウトに限らず、接続失敗（消えたソケット等）でも直接起動へ落とす。
       // 直接起動まで失敗したときだけ、元の失敗理由を添えて投げ直す。
       try {

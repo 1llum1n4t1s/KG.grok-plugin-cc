@@ -252,12 +252,12 @@ function readRecords(context, jobId) {
   const state = readDurableJson(path.join(context.stateDir, "state.json"), context.stateDir, context.directoryIdentity).value;
   if (!state || !Array.isArray(state.jobs)) throw new Error("Darwin lease state is invalid");
   const ids = new Set();
+  let indexed = null;
   for (const record of state.jobs) {
     if (!record || !validJobId(record.id) || ids.has(record.id)) throw new Error("Darwin lease state has malformed or duplicate job IDs");
     ids.add(record.id);
+    if (record.id === jobId) indexed = record;
   }
-  const matches = state.jobs.filter(record => record?.id === jobId);
-  if (matches.length > 1) throw new Error("Darwin lease state contains duplicate job IDs");
   const jobs = path.join(context.stateDir, "jobs");
   const jobsIdentity = dirIdentity(jobs);
   if (jobsIdentity.dev !== context.directoryIdentity.dev) throw new Error("Darwin jobs directory is on another device");
@@ -275,7 +275,7 @@ function readRecords(context, jobId) {
     throw new SlotUncertain("Darwin lease detail is uncertain", { cause: error });
   }
   context.check();
-  return { indexed: matches[0] ?? null, stored: detail };
+  return { indexed, stored: detail };
 }
 
 // 逆参照の証明は全 detail を上限付きで列挙する。上限超過や片側・

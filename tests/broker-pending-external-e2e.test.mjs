@@ -9,7 +9,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { GrokAcpClient } from "../plugins/grok/scripts/lib/acp.mjs";
 import { resolveStateDir, migrateStateLock } from "../plugins/grok/scripts/lib/state.mjs";
 import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
-import { ensureBrokerSession, resolveBrokerStateDir } from "../plugins/grok/scripts/lib/broker-lifecycle.mjs";
+import { ensureBrokerSession, resolveBrokerStateDir, saveBrokerSession } from "../plugins/grok/scripts/lib/broker-lifecycle.mjs";
 import { createBrokerEndpoint } from "../plugins/grok/scripts/lib/broker-endpoint.mjs";
 
 const posix = process.platform === "linux" || process.platform === "darwin";
@@ -73,33 +73,63 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
     platform: process.platform, lockToken: "isolated-owner", endpoint: "unix:/isolated/pending.sock", sessionDir: root,
     pidFile: path.join(root, "pending.pid"), logFile: path.join(root, "pending.log"), ...(epoch ? { epoch } : {}) }) + "\n";
   t.diagnostic(`Isolated fixture: ${root}`);
-  const f = { root, cwd, data, fake, log, broker, journal, pending, retain: false, offlineConfirmed: false };
+  const f = { root, cwd, data, fake, log, broker, journal, pending, epoch, retain: false,
+    offlineConfirmed: false, owners: [], brokerPids: new Set(), restoreProtocol: null };
   t.after(() => {
     for (const key of keys) previous[key] === undefined ? delete process.env[key] : process.env[key] = previous[key];
     assert.equal(path.dirname(root), parent);
-    if (process.platform === "linux") {
-      assert.ok(!f.retain && f.offlineConfirmed, `owned process exit unconfirmed; fixture retained: ${root}`);
-      assert.equal(shutdownPosixStateLockSentinel(state, { offlineConfirmed: true, expectedStateDir: state }).stopped, true);
+    try {
+      assert.ok(!f.retain && f.owners.every(child => child.exitCode !== null || child.signalCode !== null), "owner exit is unconfirmed");
+      const groups = new Set();
+      if (fs.existsSync(journal)) {
+        for (const line of fs.readFileSync(journal, "utf8").split("\n")) {
+          try {
+            const record = JSON.parse(line);
+            if (record.event === "spawned" && Number.isInteger(record.pid) && record.pid > 0) {
+              f.brokerPids.add(record.pid);
+              if (Number.isInteger(record.pgid) && record.pgid > 0) groups.add(record.pgid);
+            }
+          } catch { /* corrupt journal tests have no managed broker */ }
+        }
+      }
+      if (f.owners.length) assert.ok(f.brokerPids.size, "broker identity was not recorded");
+      for (const pid of f.brokerPids) groups.add(pid);
+      const pids = new Set(f.brokerPids);
+      if (fs.existsSync(log)) pids.add(JSON.parse(fs.readFileSync(log, "utf8")).pid);
+      const ps = spawnSync("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8" });
+      assert.equal(ps.status, 0, ps.stderr);
+      const live = ps.stdout.split("\n").map(line => line.trim().split(/\s+/)).filter(parts => parts.length === 3 && !parts[2].startsWith("Z"));
+      assert.ok(!live.some(([pid, pgid]) => pids.has(Number(pid)) || groups.has(Number(pgid))), "broker, agent or process group still running");
+      f.offlineConfirmed = true;
+      if (process.platform === "linux") {
+        if (f.restoreProtocol) fs.writeFileSync(path.join(state, "state.lock", "protocol.json"), f.restoreProtocol);
+        assert.equal(shutdownPosixStateLockSentinel(state, { offlineConfirmed: true, expectedStateDir: state }).stopped, true);
+      }
+      fs.rmSync(root, { recursive: true, force: true });
+    } catch (error) {
+      f.retain = true;
+      throw new Error(`Fixture retained because offline cleanup could not be confirmed: ${root}; ${error.message}`, { cause: error });
     }
-    if (!f.retain) fs.rmSync(root, { recursive: true, force: true });
-    else t.diagnostic(`Retained fixture pending process cleanup: ${root}`);
   });
   return f;
 }
 
+function rawBrokerRequest(endpoint, method, params) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(endpoint.slice("unix:".length));
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error(`Broker ${method} response timed out`)); }, 3000);
+    let buffer = "";
+    socket.once("connect", () => socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })}\n`));
+    socket.on("data", chunk => {
+      buffer += chunk;
+      if (buffer.includes("\n")) { clearTimeout(timer); socket.end(); try { resolve(JSON.parse(buffer.slice(0, buffer.indexOf("\n")))); } catch (error) { reject(error); } }
+    });
+    socket.once("error", error => { clearTimeout(timer); reject(error); });
+  });
+}
+
 test("explicit managed endpoint cannot prompt before its ready admission is confirmed", { skip: !posix }, async t => {
-  const f = fixture(t), fifo = path.join(f.root, "confirm.fifo"), entered = path.join(f.root, "confirm-entered");
-  const preload = path.join(f.root, "confirm-gate.cjs");
-  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
-  fs.writeFileSync(preload, `const fs=require('node:fs'), original=fs.writeSync;
-    fs.writeSync=function(fd,buffer,...args) {
-      if (Buffer.isBuffer(buffer) && buffer.toString().includes('"event":"confirmed"') && !fs.existsSync(process.env.CONFIRM_GATE_ENTERED)) {
-        fs.writeFileSync(process.env.CONFIRM_GATE_ENTERED,'entered');
-        const gate=fs.openSync(process.env.CONFIRM_GATE_FIFO,'r'), byte=Buffer.alloc(1);
-        fs.readSync(gate,byte,0,1,null); fs.closeSync(gate);
-      }
-      return original.call(this,fd,buffer,...args);
-    }; require('node:module').syncBuiltinESMExports();`);
+  const f = fixture(t);
   const lifecycle = new URL("../plugins/grok/scripts/lib/broker-lifecycle.mjs", import.meta.url).href;
   const source = `import {ensureBrokerSession,cleanupIdleBrokerSession} from ${JSON.stringify(lifecycle)};
     let session; try {
@@ -114,10 +144,11 @@ test("explicit managed endpoint cannot prompt before its ready admission is conf
       console.log(JSON.stringify({cleaned}));
     } catch(e) { console.error(e.stack); process.exitCode=1; }`;
   const owner = spawn(process.execPath, ["--input-type=module", "-e", source], { cwd: f.cwd,
-    env: { ...process.env, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, CONFIRM_GATE_FIFO: fifo, CONFIRM_GATE_ENTERED: entered },
+    env: { ...process.env },
     stdio: ["pipe", "pipe", "pipe"] });
+  f.owners.push(owner);
   owner.stdin.on("error", () => {});
-  let stdout = "", stderr = "", released = false, ownerClosed = false;
+  let stdout = "", stderr = "", ownerClosed = false, confirmedJournal;
   owner.stdout.on("data", chunk => { stdout += chunk; });
   owner.stderr.on("data", chunk => { stderr += chunk; });
   const closed = new Promise(resolve => owner.once("close", code => { ownerClosed = true; resolve(code); }));
@@ -139,41 +170,41 @@ test("explicit managed endpoint cannot prompt before its ready admission is conf
     } catch (error) { return { error: error.message }; }
     finally { if (client) await client.close(); }
   };
-  let beforeOptions, beforeEnv, after;
+  let after;
   try {
-    await waitFor(() => fs.existsSync(entered), "Parent did not reach the confirmed-record gate");
-    const records = fs.readFileSync(f.journal, "utf8").trim().split("\n").map(JSON.parse);
-    assert.deepEqual(records.map(record => record.event), ["pending", "spawned", "settled"]);
+    await waitFor(() => stdout.includes('"ready":true'), "Owner did not confirm readiness");
+    confirmedJournal = fs.readFileSync(f.journal, "utf8");
+    const records = confirmedJournal.trim().split("\n").map(JSON.parse);
+    assert.deepEqual(records.map(record => record.event), ["pending", "spawned", "settled", "confirmed"]);
     assert.equal(records[2].outcome, "ready");
+    assert.equal(records[3].outcome, "ready");
+    // 確認行を一時退避し、state lock を保持せず未確定状態を再現する。
+    fs.writeFileSync(f.journal, records.slice(0, 3).map(record => JSON.stringify(record)).join("\n") + "\n");
     const endpoint = records[0].endpoint;
     assert.equal(endpoint, createBrokerEndpoint(records[0].sessionDir));
     t.diagnostic(`Managed endpoint: ${endpoint}`);
+    const before = await prompt({ brokerEndpoint: endpoint });
+    const expectedRejection = process.platform === "linux"
+      ? /broker admission journal has pending generation/i
+      : /^Broker readiness is not confirmed\.$/;
+    assert.match(before.error ?? "", expectedRejection, JSON.stringify(before));
     const cancellation = { generation: records[0].generation, sessionId: "unstarted-session", executionId: "unstarted-execution" };
-    const cancelClient = await GrokAcpClient.connect(f.cwd, { brokerEndpoint: endpoint, brokerOnly: true,
-      cancellationOnly: true, cancellationGeneration: cancellation.generation,
-      cancellationSessionId: cancellation.sessionId, cancellationExecutionId: cancellation.executionId, rpcTimeoutMs: 1000 });
-    try {
-      const result = await cancelClient.request("broker/cancelTurn", cancellation);
-      assert.equal(result.reservationAccepted, true);
-      assert.equal(result.executionState, "never-accepted");
-    } finally { await cancelClient.close(); }
-    beforeOptions = await prompt({ brokerEndpoint: endpoint });
-    beforeEnv = await prompt({ env: { ...process.env, GROK_COMPANION_ACP_ENDPOINT: endpoint } });
+    const cancellationReply = await rawBrokerRequest(endpoint, "broker/cancelTurn", cancellation);
+    assert.deepEqual(cancellationReply.result, { reservationAccepted: true, notificationSent: false,
+      executionState: "never-accepted", generation: records[0].generation }, JSON.stringify(cancellationReply));
+    const promptReply = await rawBrokerRequest(endpoint, "session/prompt", {
+      sessionId: "unconfirmed-session", executionId: "unconfirmed-execution", prompt: [{ type: "text", text: "must not forward" }]
+    });
+    assert.match(promptReply.error?.message ?? "", /readiness is not confirmed/i, JSON.stringify(promptReply));
     const earlyEvents = fs.existsSync(`${f.log}.events`) ? fs.readFileSync(`${f.log}.events`, "utf8").trim().split("\n").filter(Boolean) : [];
-    const fd = fs.openSync(fifo, "w"); try { fs.writeSync(fd, "1"); } finally { fs.closeSync(fd); }
-    released = true;
-    await waitFor(() => stdout.includes('"ready":true'), "Owner did not confirm readiness");
+    fs.writeFileSync(f.journal, confirmedJournal);
+    confirmedJournal = null;
     after = await prompt({ brokerEndpoint: endpoint });
     assert.equal(after.result?.stopReason, "end_turn", JSON.stringify(after));
     assert.equal(earlyEvents.length, 0, `Unconfirmed broker delivered ${earlyEvents.length} prompt(s) to its agent`);
-    assert.ok(beforeOptions.error, "brokerEndpoint must reject unconfirmed managed broker");
-    assert.ok(beforeEnv.error, "environment endpoint must reject unconfirmed managed broker");
   } finally {
-    if (!released && !ownerClosed && fs.existsSync(entered)) {
-      const fd = fs.openSync(fifo, "w"); try { fs.writeSync(fd, "1"); } finally { fs.closeSync(fd); }
-      released = true;
-    }
-    if (released && !ownerClosed) owner.stdin.end("cleanup\n");
+    if (confirmedJournal) fs.writeFileSync(f.journal, confirmedJournal);
+    if (!ownerClosed) owner.stdin.end("cleanup\n");
     let timer;
     const code = await Promise.race([closed, new Promise(resolve => { timer = setTimeout(() => resolve(null), 12000); })]);
     clearTimeout(timer);
@@ -184,6 +215,26 @@ test("explicit managed endpoint cannot prompt before its ready admission is conf
       throw new Error(`Owned broker cleanup was not confirmed; fixture retained: ${f.root}; ${stdout} ${stderr}`);
     }
   }
+});
+
+test("Linux explicit managed endpoints reject an unlocked unconfirmed journal", { skip: process.platform !== "linux" }, async t => {
+  const f = fixture(t), socketPath = path.join(f.root, "unconfirmed.sock"), endpoint = `unix:${socketPath}`;
+  const pending = { ...JSON.parse(f.pending), endpoint };
+  let connections = 0;
+  const server = net.createServer(socket => { connections++; socket.destroy(); });
+  await new Promise((resolve, reject) => server.once("error", reject).listen(socketPath, resolve));
+  try {
+    saveBrokerSession(f.cwd, { generation: pending.generation, endpoint, pid: process.pid, epoch: f.epoch, authMode: "browser" });
+    const journal = `${JSON.stringify(pending)}\n`;
+    fs.writeFileSync(f.journal, journal);
+    for (const options of [{ brokerEndpoint: endpoint }, { env: { ...process.env, GROK_COMPANION_ACP_ENDPOINT: endpoint } }]) {
+      await assert.rejects(GrokAcpClient.connect(f.cwd, { ...options, brokerOnly: true, rpcTimeoutMs: 1000 }),
+        /broker admission journal has pending generation/i);
+    }
+    assert.equal(connections, 0, "unconfirmed managed endpoint was contacted");
+    assert.equal(fs.readFileSync(f.journal, "utf8"), journal);
+    assert.equal(fs.existsSync(f.log), false);
+  } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
 for (const method of ["broker/shutdown", "broker/shutdownIfIdle"]) {
@@ -210,7 +261,8 @@ for (const method of ["broker/shutdown", "broker/shutdownIfIdle"]) {
     const owner = spawn(process.execPath, ["--input-type=module", "-e", source], { cwd: f.cwd,
       env: { ...process.env, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, CONFIRM_GATE_FIFO: fifo, CONFIRM_GATE_ENTERED: entered },
       stdio: ["pipe", "pipe", "pipe"] });
-    owner.stdin.on("error", () => {});
+    f.owners.push(owner);
+  owner.stdin.on("error", () => {});
     let stdout = "", stderr = "", ownerClosed = false, released = false, brokerPid, agentPid, response, aliveBeforeRelease;
     owner.stdout.on("data", chunk => { stdout += chunk; });
     owner.stderr.on("data", chunk => { stderr += chunk; });
@@ -273,6 +325,7 @@ for (const phase of ["before-fstat", "during-read"]) {
 test(`broker state marker growth ${phase} is bounded and fails closed`, { skip: !posix }, async t => {
   const f = fixture(t), preload = path.join(f.root, "marker-growth.cjs"), observed = path.join(f.root, "marker-observed"), after = path.join(f.root, "marker-after");
   const marker = path.join(resolveStateDir(f.cwd), "state.lock", "protocol.json");
+  if (process.platform === "linux") f.restoreProtocol = fs.readFileSync(marker);
   fs.writeFileSync(preload, `const fs=require('node:fs'), open=fs.openSync, close=fs.closeSync, read=fs.readSync, readFile=fs.readFileSync, fstat=fs.fstatSync;
     const descriptors=new Map(); let injected=false;
     fs.openSync=function(name,...args) { const fd=open.call(this,name,...args); if(String(name)===process.env.MARKER_PATH) descriptors.set(fd,true); else descriptors.delete(fd); return fd; };
@@ -297,11 +350,13 @@ test(`broker state marker growth ${phase} is bounded and fails closed`, { skip: 
     if(child && child.exitCode===null && child.signalCode===null) { child.kill(); await new Promise(resolve=>child.once('exit',resolve)); }`;
   const owner = spawn(process.execPath, ["--input-type=module", "-e", source], { cwd: f.cwd,
     env: { ...process.env, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, MARKER_PATH: marker, MARKER_OBSERVED: observed, MARKER_AFTER: after, MARKER_PHASE: phase }, stdio: ["ignore", "pipe", "pipe"] });
+  f.owners.push(owner);
   let stdout = "", stderr = "";
   owner.stdout.on("data", chunk => { stdout += chunk; }); owner.stderr.on("data", chunk => { stderr += chunk; });
   const code = await new Promise(resolve => owner.once("close", resolve));
   assert.equal(code, 0, stderr);
   const result = JSON.parse(stdout.trim());
+  if (result.pid) f.brokerPids.add(result.pid);
   if (result.pid) {
     try { process.kill(result.pid, 0); f.retain = true; throw new Error(`Owned broker is still running: ${result.pid}`); }
     catch (error) { if (error.code !== "ESRCH") throw error; }
@@ -342,7 +397,8 @@ for (const action of ["cancel", "disconnect"]) {
     const owner = spawn(process.execPath, ["--input-type=module", "-e", source], { cwd: f.cwd,
       env: { ...process.env, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, READ_TRIGGER: trigger, READ_ENTERED: entered, READ_FIFO: fifo },
       stdio: ["pipe", "pipe", "pipe"] });
-    owner.stdin.on("error", () => {});
+    f.owners.push(owner);
+  owner.stdin.on("error", () => {});
     let stdout = "", stderr = "", ownerClosed = false, released = false, client;
     owner.stdout.on("data", chunk => { stdout += chunk; }); owner.stderr.on("data", chunk => { stderr += chunk; });
     const closed = new Promise(resolve => owner.once("close", code => { ownerClosed = true; resolve(code); }));
@@ -408,6 +464,7 @@ closeGate.on('data',()=>process.exit(0));
     const session = await ensureBrokerSession(f.cwd, { timeoutMs: 30000,
       env: { ...process.env, FAKE_CLOSE_GATE: gatePath }, onBrokerSpawn(value) {
         child = value;
+        f.brokerPids.add(value.pid);
         exited = new Promise(resolve => value.once("exit", (code, signal) => resolve({ code, signal })));
       } });
     assert.ok(session && child, "owned broker did not start");
@@ -469,7 +526,6 @@ for (const journalKind of ["pending", "corrupt"]) {
       if (client) await client.close();
       await new Promise(resolve => server.close(resolve));
       // 明示的な外部 endpoint と brokerOnly だけを使い、fixture は子を起動しない。
-      f.offlineConfirmed = true;
     }
   });
 }

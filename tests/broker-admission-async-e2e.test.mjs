@@ -96,6 +96,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
   // The broker inherits this preload; only asynchronous journal opens after the trigger are delayed.
   fs.writeFileSync(preload, String.raw`
 const fs=require('node:fs'), original=fs.promises.open.bind(fs.promises);
+let tracking=false;
 fs.promises.open=async function(name,...args) {
   if (process.env.GROK_COMPANION_BROKER_GENERATION && String(name).endsWith('broker-admission.jsonl') && fs.existsSync(process.env.GATE_TRIGGER) && fs.readFileSync(process.env.GATE_TRIGGER,'utf8')==='2') {
     const handle=await original(name,...args), close=handle.close.bind(handle);
@@ -107,7 +108,9 @@ fs.promises.open=async function(name,...args) {
     return handle;
   }
   if (process.env.GROK_COMPANION_BROKER_GENERATION && String(name).endsWith('broker-admission.jsonl') && fs.existsSync(process.env.GATE_TRIGGER) && fs.readFileSync(process.env.GATE_TRIGGER,'utf8')==='1') {
+    tracking=true;
     fs.appendFileSync(process.env.GATE_COUNT,'open\n');
+    fs.appendFileSync(process.env.GATE_ENTERED,'entered\n');
     const gate=await original(process.env.GATE_FIFO,'r');
     try { await gate.read(Buffer.alloc(1),0,1,null); } finally { await gate.close(); }
     fs.appendFileSync(process.env.GATE_RELEASED,'released\n');
@@ -115,6 +118,7 @@ fs.promises.open=async function(name,...args) {
     handle.close=async function() { await close(); setImmediate(()=>fs.appendFileSync(process.env.GATE_FINISHED,'finished\n')); };
     return handle;
   }
+  if (tracking && process.env.GROK_COMPANION_BROKER_GENERATION && String(name).endsWith('broker-admission.jsonl')) fs.appendFileSync(process.env.GATE_COUNT,'open\n');
   return original(name,...args);
 };`);
   const keys = ["CLAUDE_PLUGIN_DATA", "PLUGIN_DATA", "GROK_BIN", "FAKE_LOG", "HOME", "USERPROFILE", "TMPDIR", "TEMP", "TMP", "GROK_COMPANION_ACP_ENDPOINT", "XAI_API_KEY"];
@@ -122,7 +126,7 @@ fs.promises.open=async function(name,...args) {
   Object.assign(process.env, { CLAUDE_PLUGIN_DATA: data, PLUGIN_DATA: data, GROK_BIN: fake, FAKE_LOG: log, HOME: root, USERPROFILE: root, TMPDIR: temp, TEMP: temp, TMP: temp });
   delete process.env.GROK_COMPANION_ACP_ENDPOINT; delete process.env.XAI_API_KEY;
   const state = resolveStateDir(cwd);
-  const fifo = path.join(root, "gate"), trigger = path.join(root, "trigger"), count = path.join(root, "count"), released = path.join(root, "released"), finished = path.join(root, "finished"), stalled = path.join(root, "stalled");
+  const fifo = path.join(root, "gate"), trigger = path.join(root, "trigger"), count = path.join(root, "count"), entered = path.join(root, "entered"), released = path.join(root, "released"), finished = path.join(root, "finished"), stalled = path.join(root, "stalled");
   const lifecycle = new URL("../plugins/grok/scripts/lib/broker-lifecycle.mjs", import.meta.url).href;
   const source = `import {ensureBrokerSession,cleanupIdleBrokerSession} from ${JSON.stringify(lifecycle)};
     try { const session=await ensureBrokerSession(${JSON.stringify(cwd)}, {timeoutMs:30000});
@@ -132,13 +136,22 @@ fs.promises.open=async function(name,...args) {
   let stdout = "", stderr = "", closed = false, session, journalOriginal, retained = false;
   let owner, exit, journal, migrationAttempted = false, migrated = false, ownedProcesses;
   const clients = [];
+  const lineCount = file => fs.existsSync(file) ? fs.readFileSync(file, "utf8").split("\n").filter(Boolean).length : 0;
+  async function drainGate() {
+    fs.writeFileSync(trigger, "0");
+    await until(() => {
+      if (lineCount(released) === lineCount(entered) && lineCount(finished) === lineCount(entered)) return true;
+      let fd;
+      try { fd = fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK); fs.writeSync(fd, Buffer.alloc(256, 49)); }
+      catch (error) { if (!["ENXIO", "EPIPE"].includes(error.code)) throw error; }
+      finally { if (fd !== undefined) fs.closeSync(fd); }
+      return false;
+    }, "FIFO journal reads did not finish", 8000);
+  }
   t.after(async () => {
     for (const client of clients) client.close();
-    // A nonblocking FIFO writer releases every pending read without hanging cleanup.
-    if (fs.existsSync(count)) {
-      let fd;
-      try { fd = fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK); fs.writeSync(fd, Buffer.alloc(256, 49)); } catch {} finally { if (fd !== undefined) fs.closeSync(fd); }
-    }
+    try { await drainGate(); }
+    catch (error) { retained = true; t.diagnostic(`FIFO cleanup unconfirmed, retained ${root}: ${error.message}`); }
     if (journalOriginal) fs.writeFileSync(journal, journalOriginal);
     if (owner) {
       if (!closed) owner.stdin.end("cleanup\n");
@@ -155,11 +168,14 @@ fs.promises.open=async function(name,...args) {
     if (agent) {
       assert.equal(agent.home, root); assert.equal(agent.tmp, temp);
       if (process.platform === "linux") {
-        for (const identity of ownedProcesses ?? []) {
+        const alive = () => (ownedProcesses ?? []).filter(identity => {
           const current = linuxProcessIdentity(identity.pid);
-          if (current && current.startTick === identity.startTick && !["Z", "X", "x"].includes(current.state)) {
-            retained = true; t.diagnostic(`Owned process exit unconfirmed: ${identity.pid}`);
-          }
+          return current && current.startTick === identity.startTick && !["Z", "X", "x"].includes(current.state);
+        });
+        try { await until(() => alive().length === 0, "Owned processes did not exit", 3000); }
+        catch (error) {
+          retained = true;
+          t.diagnostic(`Owned process exit unconfirmed: ${alive().map(identity => identity.pid).join(", ")}: ${error.message}`);
         }
       } else {
         for (const pid of [agent.pid, session?.pid, owner?.pid].filter(Boolean)) {
@@ -188,7 +204,7 @@ fs.promises.open=async function(name,...args) {
   migrated = true;
   journal = path.join(resolveBrokerStateDir(cwd), "broker-admission.jsonl");
   owner = spawn(process.execPath, ["--input-type=module", "-e", source], { cwd, stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, GATE_TRIGGER: trigger, GATE_FIFO: fifo, GATE_COUNT: count, GATE_RELEASED: released, GATE_FINISHED: finished, GATE_STALLED: stalled } });
+    env: { ...process.env, NODE_OPTIONS: `--require=${JSON.stringify(preload)}`, GATE_TRIGGER: trigger, GATE_FIFO: fifo, GATE_COUNT: count, GATE_ENTERED: entered, GATE_RELEASED: released, GATE_FINISHED: finished, GATE_STALLED: stalled } });
   owner.stdin.on("error", () => {});
   owner.stdout.on("data", chunk => { stdout += chunk; }); owner.stderr.on("data", chunk => { stderr += chunk; });
   exit = new Promise(resolve => owner.once("close", code => { closed = true; resolve(code); }));
@@ -201,7 +217,7 @@ fs.promises.open=async function(name,...args) {
   assert.equal(agent.ppid, session.pid, "fake agent must belong to this broker");
   if (process.platform === "linux") {
     const brokerProcess = linuxProcessIdentity(session.pid), agentProcess = linuxProcessIdentity(agent.pid);
-    assert.ok(brokerProcess && agentProcess, "owned broker and agent must be alive during setup");
+    assert.ok(brokerProcess && agentProcess && !["Z", "X", "x"].includes(brokerProcess.state) && !["Z", "X", "x"].includes(agentProcess.state), "owned broker and agent must be alive during setup");
     assert.equal(brokerProcess.ppid, owner.pid, "broker must belong to this fixture owner");
     assert.equal(agentProcess.ppid, session.pid, "agent must belong to this fixture broker");
     ownedProcesses = [brokerProcess, agentProcess];
@@ -210,9 +226,9 @@ fs.promises.open=async function(name,...args) {
     assert.equal(Number(brokerParent.stdout.trim()), owner.pid, "broker must belong to this fixture owner");
   }
   t.diagnostic(`fixture ${root}; endpoint ${session.endpoint}; owner ${owner.pid}; broker ${session.pid}; agent ${agent.pid}`);
-  return { root, cwd, journal, journalOriginal, log, fifo, trigger, count, released, finished, stalled, session,
+  return { root, cwd, journal, journalOriginal, log, fifo, trigger, count, entered, released, finished, stalled, session,
     client() { const client = rpc(session.endpoint); clients.push(client); return client; },
-    release() { const fd = fs.openSync(fifo, "w"); try { fs.writeSync(fd, Buffer.alloc(256, 49)); } finally { fs.closeSync(fd); } },
+    drainGate, lineCount,
     events() { return fs.existsSync(`${log}.events`) ? fs.readFileSync(`${log}.events`, "utf8") : ""; } };
 }
 
@@ -240,9 +256,7 @@ test("late successful admission check cannot open cache after its timeout", { sk
   await until(() => fs.existsSync(f.count), "Async journal read did not start", 2000);
   const timedOut = await first;
   assert.ok(timedOut.error, "pending check must fail within its deadline");
-  f.release();
-  await until(() => fs.existsSync(f.finished), "Delayed read did not finish");
-  fs.writeFileSync(f.trigger, "0");
+  await f.drainGate();
   fs.writeFileSync(f.journal, "{broken\n");
   const second = await client.request("session/prompt", prompt("late", "second"));
   assert.ok(second.error, "late completion must not cache success");
@@ -250,17 +264,29 @@ test("late successful admission check cannot open cache after its timeout", { sk
 });
 
 test("simultaneous admission checks share bounded journal I/O", { skip: !posix }, async t => {
-  const f = await fixture(t), clients = Array.from({ length: 12 }, () => f.client());
-  await Promise.all(clients.map(client => client.connected));
+  const f = await fixture(t), anchor = f.client(), clients = Array.from({ length: 12 }, () => f.client());
+  await Promise.all([anchor.connected, ...clients.map(client => client.connected)]);
   fs.writeFileSync(f.trigger, "1");
+  let anchorResponse;
+  const initial = anchor.request("session/prompt", prompt("anchor", "anchor"), 8000).then(response => { anchorResponse = response; return response; });
+  void initial.catch(() => {});
+  await until(() => fs.existsSync(f.entered) || anchorResponse, "Async journal read did not start", 2000);
+  assert.ok(fs.existsSync(f.entered), `Initial admission did not reach the journal gate: ${JSON.stringify(anchorResponse)}`);
   const pending = clients.map((client, index) => client.request("session/prompt", prompt(`parallel-${index}`, `run-${index}`), 8000));
   for (const request of pending) void request.catch(() => {});
-  await until(() => fs.existsSync(f.count), "Async journal read did not start", 2000);
-  await pause(200);
-  const opens = fs.readFileSync(f.count, "utf8").trim().split("\n").length;
-  f.release();
-  await Promise.all(pending);
-  assert.ok(opens <= 1, `Expected one shared journal read, saw ${opens}`);
+  const [first, ...responses] = await Promise.all([initial, ...pending]);
+  assert.equal(responses.length, 12);
+  for (const response of [first, ...responses]) {
+    assert.equal(response.jsonrpc, "2.0");
+    assert.equal(response.id, 1);
+    assert.equal(response.error?.code, -32002);
+    assert.equal(response.error?.message, "Broker readiness is not confirmed.");
+  }
+  assert.equal(f.events(), "", "timed-out checks must not forward prompts to the agent");
+  assert.equal(f.lineCount(f.entered), 1, "all requests must share the same gated journal read");
+  assert.equal(f.lineCount(f.count), 1, "only one journal open may start while the read is gated");
+  await f.drainGate();
+  assert.equal(f.lineCount(f.count), 1, "releasing the read must not start another journal open");
 });
 
 for (const kind of ["partial", "corrupt", "oversized", "generation"]) {

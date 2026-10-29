@@ -13,7 +13,7 @@ import {
   loadBrokerSession,
 } from "./lib/broker-lifecycle.mjs";
 import { listJobs, loadState, readJobFile, resolveJobFile, resolveStateFile, updateState, withStateSnapshot, writeJobFile } from "./lib/state.mjs";
-import { appendLogLine, createProcessLookupDiagnostics, nowIso, resolveSessionIdWithFallback, sameDarwinLease, sameLinuxLease, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
+import { appendLogLine, createProcessLookupDiagnostics, hasGenerationIdentity, nowIso, resolveSessionIdWithFallback, sameDarwinLease, sameLinuxLease, sameTurnEvidence, SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { verifyPublishedDarwinLeaseRecords } from "./lib/darwin-lease-sweep.mjs";
 import { verifyPublishedLinuxLeaseRecords } from "./lib/linux-lease-ledger.mjs";
 import { resolveWorkspaceRoot, withWorkspaceDeadline } from "./lib/workspace.mjs";
@@ -45,10 +45,6 @@ async function cleanupOwnedSessionJobs(cwd, workspaceRoot, sessionId, appendClea
       ((!current.workerLease && !expected.workerLease) || sameDarwinLease(current.workerLease, expected.workerLease)))) &&
     ["id", "sessionId", "createdAt", "startedAt", "processStartKey", "grokTransport", "grokBrokerGeneration",
       "grokDirectGeneration", "grokDirectOwnerPid", "grokDirectOwnerStartKey"].every(key => current[key] === expected[key]);
-  const hasGenerationIdentity = current => (typeof current.createdAt === "string" && Boolean(current.createdAt.trim())) ||
-    (typeof current.processStartKey === "string" && Boolean(current.processStartKey));
-  const sameTurnEvidence = (left, right) => left && right &&
-    ["grokPromptState", "grokSessionId"].every(key => (left[key] ?? null) === (right[key] ?? null));
   const matchesGeneration = (current, expected) => sameGenerationIdentity(current, expected) && current.sessionId === sessionId &&
     current.status === expected.status && current.terminationPending === expected.terminationPending;
   const directStopped = (current, expected) => current.grokDirectOwnerPid === expected.grokDirectOwnerPid &&
@@ -299,13 +295,13 @@ async function handleSessionEnd(input) {
       return;
     }
 
-    // hook 全体の5秒枠へ起動の余裕を残し、終了不明なら記録を次回へ保持する。
+    // hook 全体の3秒枠へ起動の余裕を残し、終了不明なら記録を次回へ保持する。
     await cleanupIdleBrokerSession(cwd, brokerSession, { timeoutMs: Math.min(1800, Math.max(0, 2200 - (performance.now() - started))) });
   });
 }
 
 async function main() {
-  const input = readHookInput();
+  const input = await readHookInput();
   const eventName = process.argv[2] ?? input.hook_event_name ?? "";
 
   if (eventName === "SessionStart") {

@@ -19,7 +19,7 @@ async function waitForOwnedExit(record, timeoutMs = 4000) {
 
 test("failed direct ACP initialization closes the spawned agent", async (t) => {
   const cwd = makeTempDir("grok-acp-failed-init-");
-  prepareFixtureState(t, cwd, cwd);
+  const fixture = prepareFixtureState(t, cwd, cwd, { cleanupLinux: true });
   const fake = installFakeGrok({ initializeError: "fixture initialization failed" });
   const childProcess = createRequire(import.meta.url)("node:child_process");
   const originalSpawn = childProcess.spawn;
@@ -71,6 +71,12 @@ test("failed direct ACP initialization closes the spawned agent", async (t) => {
     if (!owned.length && Number.isInteger(fake.readState()?.pid)) throw new Error(`Fixture child handle was not observed; preserve ${cwd} and ${fake.binDir}`);
     if (process.platform === "win32" && Number.isInteger(fake.readState()?.pid) && stopProof !== "job-empty") {
       throw new Error(`Fixture Windows Job termination was not confirmed; preserve ${cwd} and ${fake.binDir}`);
+    }
+    if (process.platform === "linux") {
+      assert.equal(owned.length, 1, "owned agent handle was not confirmed");
+      assert.ok(owned[0].exited && Number.isInteger(owned[0].child.pid));
+      assert.equal(stopProof, "posix-group-empty");
+      fixture.confirmStopped();
     }
   }
 });

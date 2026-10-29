@@ -162,8 +162,16 @@ export function parseLinuxReclaimJournalJson(input) {
   return validated;
 }
 
-const DIR_FLAGS = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
-const FILE_FLAGS = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
+function reclaimOpenFlags() {
+  const { O_RDONLY, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+  const required = [O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK];
+  // LinuxのO_RDONLYは0。bitwise演算で消える値や重複するbitは防御にならない。
+  if (O_RDONLY !== 0 || required.some(flag => !Number.isSafeInteger(flag) || flag <= 0 || flag > 0x7fffffff || (flag & (flag - 1)) !== 0) ||
+      new Set(required).size !== required.length) {
+    throw new Error("Linux reclaim safety flags are unavailable");
+  }
+  return { dir: O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK, file: O_RDONLY | O_NOFOLLOW | O_NONBLOCK };
+}
 const at = (fd, name) => `/proc/self/fd/${fd}/${name}`;
 function checkedStat(stat, directory) {
   if (typeof process.getuid !== "function" || stat.isSymbolicLink() || !(directory ? stat.isDirectory() : stat.isFile()) ||
@@ -185,6 +193,8 @@ function matchesIdentity(stat, expected) { return String(stat.dev) === expected.
  * @param {unknown} input
  */
 export function inspectLinuxReclaimSnapshotFiles(input) {
+  // 必須flagが欠落した状態では、検証用の読み取りも始めない。
+  const flags = reclaimOpenFlags();
   if (!input || typeof input !== "object" || types.isProxy(input)) throw new Error("Linux reclaim inspection input is invalid");
   const args = fields(input, ["rootFd", "jobsFd", "journalFd", "journal",
     ...(Object.hasOwn(input, "maxBytes") ? ["maxBytes"] : []), ...(Object.hasOwn(input, "timeoutMs") ? ["timeoutMs"] : [])]);
@@ -210,7 +220,7 @@ export function inspectLinuxReclaimSnapshotFiles(input) {
   }
   const namespacePath = at(args.rootFd, "reclaim-journal-v1");
   const namespaceBefore = checkedStat(fs.lstatSync(namespacePath, { bigint: true }), true);
-  const namespaceFd = fs.openSync(namespacePath, DIR_FLAGS);
+  const namespaceFd = fs.openSync(namespacePath, flags.dir);
   const opened = [];
   const namedDirectories = [];
   try {
@@ -219,9 +229,9 @@ export function inspectLinuxReclaimSnapshotFiles(input) {
         !sameIdentity(journalDir, checkedStat(fs.lstatSync(at(namespaceFd, journal.epoch), { bigint: true }), true))) {
       throw new Error("Linux reclaim journal namespace differs");
     }
-    const namedJobsFd = fs.openSync(at(args.rootFd, "jobs"), DIR_FLAGS);
+    const namedJobsFd = fs.openSync(at(args.rootFd, "jobs"), flags.dir);
     namedDirectories.push(namedJobsFd);
-    const namedJournalFd = fs.openSync(at(namespaceFd, journal.epoch), DIR_FLAGS);
+    const namedJournalFd = fs.openSync(at(namespaceFd, journal.epoch), flags.dir);
     namedDirectories.push(namedJournalFd);
     if (!sameIdentity(jobs, checkedStat(fs.fstatSync(namedJobsFd, { bigint: true }), true)) || fdMountId(namedJobsFd) !== mount ||
         !sameIdentity(journalDir, checkedStat(fs.fstatSync(namedJournalFd, { bigint: true }), true)) || fdMountId(namedJournalFd) !== mount) {
@@ -230,7 +240,7 @@ export function inspectLinuxReclaimSnapshotFiles(input) {
     const checkFile = (directoryFd, name, expected, expectedIdentity) => {
       checkDeadline();
       const target = at(directoryFd, name), before = checkedStat(fs.lstatSync(target, { bigint: true }), false);
-      const fd = fs.openSync(target, FILE_FLAGS);
+      const fd = fs.openSync(target, flags.file);
       opened.push({ fd, target, stat: before });
       const initial = checkedStat(fs.fstatSync(fd, { bigint: true }), false);
       if (!sameStamp(before, initial) || initial.dev !== root.dev || fdMountId(fd) !== mount || !matchesIdentity(initial, expectedIdentity) ||
@@ -294,11 +304,11 @@ export function inspectLinuxReclaimSnapshotFiles(input) {
     }
     // 同 inode の bind mount 差替えは lstat と先に開いた FD の再検査だけでは検出できない。
     // 最後に named path から別 FD を開き、現在の mount と identity を照合する。
-    const finalJobsFd = fs.openSync(at(args.rootFd, "jobs"), DIR_FLAGS);
+    const finalJobsFd = fs.openSync(at(args.rootFd, "jobs"), flags.dir);
     namedDirectories.push(finalJobsFd);
-    const finalNamespaceFd = fs.openSync(namespacePath, DIR_FLAGS);
+    const finalNamespaceFd = fs.openSync(namespacePath, flags.dir);
     namedDirectories.push(finalNamespaceFd);
-    const finalJournalFd = fs.openSync(at(finalNamespaceFd, journal.epoch), DIR_FLAGS);
+    const finalJournalFd = fs.openSync(at(finalNamespaceFd, journal.epoch), flags.dir);
     namedDirectories.push(finalJournalFd);
     if (fdMountId(finalJobsFd) !== mount || fdMountId(finalNamespaceFd) !== mount || fdMountId(finalJournalFd) !== mount ||
         !sameIdentity(jobs, checkedStat(fs.fstatSync(finalJobsFd, { bigint: true }), true)) ||

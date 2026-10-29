@@ -10,7 +10,7 @@ import { migrateStateLock, resolveJobFile, resolveStateDir, resolveStateFile, sa
 
 const script = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
 
-test("status checks a running worker's generation before reconciling it", { skip: process.platform !== "darwin", timeout: 30000 }, async t => {
+test("status preserves unleased workers regardless of process generation or exit", { skip: process.platform !== "darwin", timeout: 30000 }, async t => {
   const parent = fs.realpathSync.native(process.env.GROK_STATUS_IDENTITY_TEST_ROOT || os.tmpdir());
   const repository = fs.realpathSync.native(fileURLToPath(new URL("..", import.meta.url)));
   const relative = path.relative(repository, parent);
@@ -53,6 +53,7 @@ test("status checks a running worker's generation before reconciling it", { skip
   const currentKey = getProcessSnapshot(current.pid)?.startKey;
   assert.ok(currentKey && currentKey !== oldKey);
   assert.equal(inspectTrackedJobProcess(current.pid, currentKey), "match");
+  assert.equal(inspectTrackedJobProcess(current.pid, oldKey), "mismatch");
   migrateStateLock(cwd, { offlineConfirmed: true, localOnly: true, expectedStateDir: resolveStateDir(cwd) });
   const now = new Date().toISOString();
   const job = (id, key, promptState = "not-sent") => ({ id, status: "running", pid: current.pid, processStartKey: key,
@@ -65,21 +66,18 @@ test("status checks a running worker's generation before reconciling it", { skip
   const jobs = [job("reused", oldKey, "pending"), job("matching", currentKey), job("legacy", "old-lstart"), job("missing", null),
     conflictPending, conflictMissing, conflictSession, missingDetail];
   saveState(cwd, { version: 1, config: {}, jobs });
-  for (const value of jobs) if (value.id !== missingDetail.id) writeJobFile(cwd, value.id, value);
-  writeJobFile(cwd, conflictPending.id, { ...conflictPending, grokPromptState: "not-sent" });
-  writeJobFile(cwd, conflictMissing.id, { ...conflictMissing, grokPromptState: "not-sent" });
-  writeJobFile(cwd, conflictSession.id, { ...conflictSession, grokSessionId: "turn-b" });
+  updateState(cwd, () => {
+    for (const value of jobs) if (value.id !== missingDetail.id) writeJobFile(cwd, value.id, value);
+    writeJobFile(cwd, conflictPending.id, { ...conflictPending, grokPromptState: "not-sent" });
+    writeJobFile(cwd, conflictMissing.id, { ...conflictMissing, grokPromptState: "not-sent" });
+    writeJobFile(cwd, conflictSession.id, { ...conflictSession, grokSessionId: "turn-b" });
+  });
   const env = { ...process.env, CLAUDE_PLUGIN_DATA: data, CODEX_THREAD_ID: "", GROK_COMPANION_SESSION_ID: "" };
   const preload = path.join(root, "lookup-failure.cjs");
-  fs.writeFileSync(preload, `const fs=require('node:fs'), cp=require('node:child_process'), original=cp.spawnSync, kill=process.kill; let gated=false;
+  fs.writeFileSync(preload, `const fs=require('node:fs'), cp=require('node:child_process'), original=cp.spawnSync, kill=process.kill;
     cp.spawnSync=function(command,args,options) {
       if(command==='ps') {
         if(process.env.STATUS_TRACE_PATH) fs.appendFileSync(process.env.STATUS_TRACE_PATH,'ps\\n');
-        if(process.env.STATUS_GATE_PATH && !gated) {
-          gated=true; fs.writeFileSync(process.env.STATUS_GATE_PATH+'.entered','ready');
-          const deadline=Date.now()+8000, sleep=new Int32Array(new SharedArrayBuffer(4));
-          while(!fs.existsSync(process.env.STATUS_GATE_PATH+'.release') && Date.now()<deadline) Atomics.wait(sleep,0,0,20);
-        }
         if(process.env.STATUS_FAULT==='malformed' && args.includes('lstart=')) return {status:0,stdout:'not-a-date\\n',stderr:''};
         if(process.env.STATUS_FAULT==='malformed' && args.includes('command=')) return {status:0,stdout:'node grok-companion.mjs\\n',stderr:''};
         return {status:1,stdout:'',stderr:''};
@@ -87,7 +85,10 @@ test("status checks a running worker's generation before reconciling it", { skip
       return original.call(this,command,args,options);
     };
     process.kill=function(pid,signal) {
-      if(process.env.STATUS_FAULT==='eio' && pid===Number(process.env.STATUS_FAULT_PID) && signal===0) throw Object.assign(Error('fixture lookup failed'),{code:'EIO'});
+      if(pid===Number(process.env.STATUS_FAULT_PID) && signal===0) {
+        if(process.env.STATUS_TRACE_PATH) fs.appendFileSync(process.env.STATUS_TRACE_PATH,'kill-0\\n');
+        if(process.env.STATUS_FAULT==='eio') throw Object.assign(Error('fixture lookup failed'),{code:'EIO'});
+      }
       return kill.call(this,pid,signal);
     };
     require('node:module').syncBuiltinESMExports();`);
@@ -96,8 +97,8 @@ test("status checks a running worker's generation before reconciling it", { skip
   process.env.CLAUDE_PLUGIN_DATA = unstartedData;
   try {
     const stateFile = resolveStateFile(unstartedCwd);
-    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    fs.writeFileSync(stateFile, JSON.stringify({ version: 1, config: {}, jobs: [jobs[0]] }));
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(stateFile, JSON.stringify({ version: 1, config: {}, jobs: [jobs[0]] }), { mode: 0o600 });
   }
   finally { process.env.CLAUDE_PLUGIN_DATA = data; }
   const trace = path.join(root, "unmigrated-lookup-trace");
@@ -107,59 +108,29 @@ test("status checks a running worker's generation before reconciling it", { skip
   assert.notEqual(blocked.status, 0);
   assert.match(blocked.stderr, /explicit offline migration/);
   assert.equal(fs.existsSync(trace), false, "unverified state must not trigger a PID lookup");
+  const stateBefore = fs.readFileSync(resolveStateFile(cwd), "utf8");
+  const detailsBefore = new Map(jobs.filter(value => value.id !== missingDetail.id)
+    .map(value => [value.id, fs.readFileSync(resolveJobFile(cwd, value.id), "utf8")]));
+  // 旧 unleased 記録では lookup 自体を呼ばないため、fault は発火しない。
   for (const fault of ["eio", "malformed"]) {
+    const faultTrace = path.join(root, `unleased-${fault}-lookup-trace`);
     const check = spawnSync(process.execPath, ["--require", preload, script, "status", "--json", "--all"], {
-      cwd, env: { ...env, STATUS_FAULT: fault, STATUS_FAULT_PID: String(current.pid) }, encoding: "utf8"
+      cwd, env: { ...env, STATUS_FAULT: fault, STATUS_FAULT_PID: String(current.pid), STATUS_TRACE_PATH: faultTrace }, encoding: "utf8"
     });
     assert.equal(check.status, 0, check.stderr);
-    assert.ok(JSON.parse(check.stdout).running.some(value => value.id === "matching" && value.status === "running"), `${fault} must not prove worker exit`);
-  }
-  const gate = path.join(root, "lookup-gate"), gateRelease = `${gate}.release`;
-  const gated = spawn(process.execPath, ["--require", preload, script, "status", "--json", "--all"], {
-    cwd, env: { ...env, STATUS_GATE_PATH: gate }, stdio: ["ignore", "pipe", "pipe"]
-  });
-  let stdout = "", stderr = "";
-  gated.stdout.on("data", chunk => { stdout += chunk; }); gated.stderr.on("data", chunk => { stderr += chunk; });
-  const gatedClosed = new Promise(resolve => gated.once("close", resolve));
-  try {
-    const deadline = Date.now() + 5000;
-    while (!fs.existsSync(`${gate}.entered`) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-    assert.ok(fs.existsSync(`${gate}.entered`), "status must reach the process lookup");
-    const changedCreatedAt = "2000-01-01T00:00:00.000Z";
-    const beforeUpdate = performance.now();
-    updateState(cwd, state => {
-      const indexed = state.jobs.find(value => value.id === "reused");
-      indexed.createdAt = changedCreatedAt;
-      writeJobFile(cwd, indexed.id, indexed);
-    });
-    const updateMs = performance.now() - beforeUpdate;
-    t.diagnostic(`state update while process lookup is gated: ${updateMs.toFixed(0)} ms`);
-    assert.ok(updateMs < 3000, "the process lookup must not hold the state mutex");
-    fs.writeFileSync(gateRelease, "release");
-    assert.equal(await gatedClosed, 0, stderr);
-    const gatedReport = JSON.parse(stdout);
-    assert.ok(gatedReport.running.some(value => value.id === "reused" && value.status === "running" && value.createdAt === changedCreatedAt));
-  } finally {
-    if (!fs.existsSync(gateRelease)) fs.writeFileSync(gateRelease, "release");
-    await gatedClosed;
+    assert.equal(fs.existsSync(faultTrace), false, `${fault}: unleased status must not invoke process lookup`);
+    assert.ok(JSON.parse(check.stdout).running.some(value => value.id === "matching" && value.status === "running"), `${fault}: unleased worker must remain unconfirmed`);
   }
   const started = performance.now();
-  const result = spawnSync(process.execPath, [script, "status", "--json", "--all"], { cwd, env, encoding: "utf8" });
+  const result = spawnSync(process.execPath, ["--require", preload, script, "status", "--json", "--all"], { cwd, env: { ...env, STATUS_TRACE_PATH: trace }, encoding: "utf8" });
   t.diagnostic(`status with two verifiable live records: ${(performance.now() - started).toFixed(0)} ms`);
   assert.equal(result.status, 0, result.stderr);
   const report = JSON.parse(result.stdout);
   assert.ok(report.running.some(value => value.id === "matching"));
   assert.ok(report.running.some(value => value.id === "legacy"));
   assert.ok(report.running.some(value => value.id === "missing"));
-  const reconciled = [report.latestFinished, ...report.recent, ...report.running].find(value => value?.id === "reused");
-  assert.equal(reconciled.status, "failed");
-  assert.equal(reconciled.terminationPending, true);
-  assert.equal(reconciled.pid, null);
-  for (const id of ["conflict-pending", "conflict-missing", "conflict-session", "missing-detail"]) {
-    const result = [report.latestFinished, ...report.recent, ...report.running].find(value => value?.id === id);
-    assert.equal(result.status, "failed");
-    assert.equal(result.terminationPending, true, `inconsistent turn evidence for ${id} must remain pending`);
-  }
+  for (const job of jobs) assert.ok(report.running.some(value => value.id === job.id && value.status === "running"), `${job.id} must remain unconfirmed`);
+  assert.equal(fs.existsSync(trace), false, "unleased status must not consult PID as stop evidence");
   const storedState = JSON.parse(fs.readFileSync(resolveStateFile(cwd), "utf8"));
   assert.equal(storedState.jobs.find(value => value.id === "conflict-pending").grokPromptState, "pending");
   assert.equal(storedState.jobs.find(value => value.id === "conflict-session").grokSessionId, "turn-a");
@@ -168,12 +139,12 @@ test("status checks a running worker's generation before reconciling it", { skip
   assert.equal(fs.existsSync(resolveJobFile(cwd, missingDetail.id)), false, "missing evidence must not be recreated");
   assert.equal(current.exitCode, null, "status must not stop the unrelated process");
   current.send("exit"); await current.closed;
-  const afterExit = spawnSync(process.execPath, [script, "status", "--json", "--all"], { cwd, env, encoding: "utf8" });
+  const afterExit = spawnSync(process.execPath, ["--require", preload, script, "status", "--json", "--all"], { cwd, env: { ...env, STATUS_TRACE_PATH: trace }, encoding: "utf8" });
   assert.equal(afterExit.status, 0, afterExit.stderr);
   const afterReport = JSON.parse(afterExit.stdout);
-  const all = [afterReport.latestFinished, ...afterReport.recent, ...afterReport.running];
-  assert.equal(all.find(value => value?.id === "matching").status, "failed");
-  assert.equal(all.find(value => value?.id === "matching").terminationPending, false);
-  assert.ok(afterReport.running.some(value => value.id === "legacy"));
-  assert.ok(afterReport.running.some(value => value.id === "missing"));
+  for (const job of jobs) assert.ok(afterReport.running.some(value => value.id === job.id && value.status === "running"), `${job.id} must remain unconfirmed after exit`);
+  assert.equal(fs.existsSync(trace), false, "process exit must not trigger PID-based reconciliation");
+  assert.equal(fs.readFileSync(resolveStateFile(cwd), "utf8"), stateBefore);
+  for (const [id, contents] of detailsBefore) assert.equal(fs.readFileSync(resolveJobFile(cwd, id), "utf8"), contents);
+  assert.equal(fs.existsSync(resolveJobFile(cwd, missingDetail.id)), false);
 });

@@ -1425,12 +1425,24 @@ function prepareBrokerStart(cwd, options, lock, onOwned, onPendingAttempt = () =
   const prepared = { endpoint, pidFile, logFile, sessionDir, child, ownedPid, authMode, generation, epoch: ownerIdentity.epoch,
     stop: stopOwnedPosixBroker, stopOnError, readySettlementDurable: false };
   onOwned(prepared); // scope末尾の検証がthrowしても、所有するchild handleを外側に残す。
+  let observerFailed = false, observerError;
+  try {
+    if (options.onBrokerSpawn) {
+      const hookResult = options.onBrokerSpawn(child);
+      if (hookResult && typeof hookResult.then === "function") {
+        // 同期契約の拒否とは別に、返された Promise の未処理 rejection を防ぐ。
+        void Promise.resolve(hookResult).catch(() => {});
+        throw new TypeError("Broker spawn observation must be synchronous");
+      }
+    }
+  } catch (error) {
+    observerFailed = true;
+    observerError = error;
+  }
+  // 通知失敗でも従来どおり spawned の記録を試みる。append 失敗は記録の不確定を優先する。
   appendBrokerAdmission(cwd, { event: "spawned", generation, pid: ownedPid,
     pgid: process.platform === "win32" ? null : ownedPid }, lock);
-  if (options.onBrokerSpawn) {
-    const hookResult = options.onBrokerSpawn(child);
-    if (hookResult && typeof hookResult.then === "function") throw new TypeError("Broker spawn observation must be synchronous");
-  }
+  if (observerFailed) throw observerError;
   if (!Number.isInteger(ownedPid) || ownedPid <= 0) {
     prepared.admissionChannel = /** @type {import("node:stream").Duplex | null} */ (child.stdio?.[3] ?? null);
     prepared.readyAck = Promise.resolve(false);

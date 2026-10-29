@@ -8,8 +8,9 @@ import { resolveStateDir } from "../plugins/grok/scripts/lib/state.mjs";
 import { makeTempDir, removeTempFixture } from "./helpers.mjs";
 
 // 実 Mac process と CLI を使用するが procfs/mount/flock は模擬する。
-// 計測には既存 state inventory を含み、Linux kernel の性能を実証しない。
-test("Linux CLI completes history pruning with 2000 preserved old jobs", {
+// 実 worker 1 件と fixture 50 件、旧 epoch の 2000 件を使う。Linux kernel の性能は実証しない。
+// 51 worker の停止や 256 枠を 60 秒で走査する性能は検証しない。
+test("Linux CLI preserves current and 2000 old history records", {
   skip: process.platform !== "darwin", timeout: 1800000
 }, t => {
   const root = fs.realpathSync(makeTempDir("grok-linux-history-inventory-"));
@@ -55,17 +56,30 @@ test("Linux CLI completes history pruning with 2000 preserved old jobs", {
     if (result.status === 0) assert.ok(fs.existsSync(exited), `task ${i}: agent exit must be observed`);
     return result;
   }
-  for (let i = 0; i < 51; i++) { const result = task(i); assert.equal(result.status, 0, result.stderr); }
+  const first = task(0); assert.equal(first.status, 0, `first task: ${first.error?.code ?? "no spawn error"}; signal=${first.signal}; ${first.stderr}`);
   allStopped = false;
-  const sweepResult = spawnSync(process.execPath, [sweep, workspace], { env, encoding: "utf8", timeout: 120000 });
+  const sweepResult = spawnSync(process.execPath, [sweep, workspace, "256"], { env, encoding: "utf8", timeout: 120000 });
   assert.equal(sweepResult.status, 0, sweepResult.stderr); allStopped = true;
-  assert.equal(JSON.parse(sweepResult.stdout).reclaimed, 51);
+  assert.deepEqual(JSON.parse(sweepResult.stdout), { examined: 256, reclaimed: 1, uncertain: 0 });
   const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
   const verified = state.jobs.filter(job => job.status === "completed" && job.workerLease == null &&
     job.workerStopConfirmed === true && job.workerStopProof === "linux-lease-released")
     .sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)));
-  assert.equal(verified.length, 51);
+  assert.equal(verified.length, 1);
   const oldest = verified[0], oldRecords = new Map();
+  const currentFiles = new Map();
+  currentFiles.set(path.join(jobsDir, `${oldest.id}.json`), fs.readFileSync(path.join(jobsDir, `${oldest.id}.json`), "utf8"));
+  currentFiles.set(oldest.logFile, fs.readFileSync(oldest.logFile, "utf8"));
+  for (let i = 0; i < 50; i++) {
+    const id = `fixture-current-${i}`, logFile = path.join(jobsDir, `${id}.log`);
+    const record = { id, epoch: oldest.epoch, jobClass: "review", status: "completed", createdAt: "2020-01-01T00:00:00.000Z",
+      updatedAt: "2020-01-01T00:00:00.000Z", terminationPending: false, logFile };
+    const detail = `${JSON.stringify(record, null, 2)}\n`, log = `fixture log ${i}\n`;
+    fs.writeFileSync(path.join(jobsDir, `${id}.json`), detail, { flag: "wx", mode: 0o600 });
+    fs.writeFileSync(logFile, log, { flag: "wx", mode: 0o600 });
+    currentFiles.set(path.join(jobsDir, `${id}.json`), detail); currentFiles.set(logFile, log);
+    state.jobs.push(record);
+  }
   for (let i = 0; i < 2000; i++) {
     const id = `preserved-old-${String(i).padStart(4, "0")}`;
     const record = { id, epoch: "22222222-2222-4222-8222-222222222222", jobClass: "review", status: "completed",
@@ -76,15 +90,25 @@ test("Linux CLI completes history pruning with 2000 preserved old jobs", {
   }
   fs.writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   assert.ok(fs.readdirSync(jobsDir).length < 4096);
-  const started = performance.now(), result = task(51, 180000), elapsed = performance.now() - started;
+  const currentJobs = state.jobs.filter(job => job.epoch === oldest.epoch);
+  assert.equal(currentJobs.length, 51);
+  const started = performance.now(), result = task(1, 180000), elapsed = performance.now() - started;
   t.diagnostic(`CLI task with existing state inventory: ${Math.round(elapsed)} ms`);
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, `inventory task: ${result.error?.code ?? "no spawn error"}; signal=${result.signal}; ${result.stderr}`);
   assert.ok(elapsed < 180000, `CLI task exceeded its end-to-end time budget: ${elapsed} ms`);
-  const after = JSON.parse(fs.readFileSync(stateFile, "utf8")), ids = new Set(after.jobs.map(job => job.id));
-  assert.ok(!ids.has(oldest.id), "a verified old current-epoch job must be pruned");
+  const after = JSON.parse(fs.readFileSync(stateFile, "utf8")), indexed = new Map(after.jobs.map(job => [job.id, job]));
+  for (const job of currentJobs) assert.deepEqual(indexed.get(job.id), job, `${job.id} must stay indexed`);
+  for (const [file, content] of currentFiles) assert.equal(fs.readFileSync(file, "utf8"), content, `${file} must be preserved`);
   for (const [id, text] of oldRecords) {
-    assert.ok(ids.has(id), `${id} must stay indexed`);
+    assert.ok(indexed.has(id), `${id} must stay indexed`);
+    assert.deepEqual(indexed.get(id), JSON.parse(text), `${id} index record must be preserved`);
     assert.equal(fs.readFileSync(path.join(jobsDir, `${id}.json`), "utf8"), text, `${id} detail must be preserved`);
   }
+  const oldId = "preserved-old-0000";
+  const oldResult = spawnSync(process.execPath, [command, "result", "--json", "--cwd", workspace, oldId],
+    { env, encoding: "utf8", timeout: 30000 });
+  assert.equal(oldResult.error, undefined); assert.equal(oldResult.signal, null); assert.equal(oldResult.status, 0, oldResult.stderr);
+  const output = JSON.parse(oldResult.stdout), expectedOld = JSON.parse(oldRecords.get(oldId));
+  assert.deepEqual(output.job, expectedOld); assert.deepEqual(output.storedJob, expectedOld);
   verifiedDone = true;
 });

@@ -24,7 +24,7 @@ test("a Git I/O failure during worker lease wait remains visible and preserves p
   const release = path.join(f.cwd, "lease-hold-release");
   const marker = path.join(f.cwd, "lease-io-injected");
   const worker = spawn(process.execPath, [companion, "task", "--json", "hold before prompt"], {
-    cwd: f.cwd, env: { ...env, CANCEL_LEASE_STATE_MUTEX: path.join(stateDir, "state.lock", "native.lock"),
+    cwd: f.cwd, env: { ...env, CANCEL_LEASE_STATE_MUTEX: process.platform === "linux" ? stateDir : path.join(stateDir, "state.lock", "native.lock"),
       CANCEL_LEASE_HOLD_READY: ready, CANCEL_LEASE_HOLD_RELEASE: release,
       NODE_OPTIONS: [env.NODE_OPTIONS, `--require="${holdPreload}"`].filter(Boolean).join(" ") },
     stdio: ["ignore", "pipe", "pipe"]

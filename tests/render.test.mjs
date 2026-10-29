@@ -110,7 +110,8 @@ test("renderSetupReport explains why Grok is unusable when agent stdio is missin
 
   assert.match(output, /Status: needs attention/);
   assert.match(output, /`grok agent stdio` is unavailable/);
-  assert.match(output, /auth: not signed in/);
+  assert.match(output, /auth: could not be checked/i);
+  assert.doesNotMatch(output, /not signed in|grok login/i);
   assert.match(output, /Update Grok Build/);
 });
 

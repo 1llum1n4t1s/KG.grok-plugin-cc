@@ -16,6 +16,7 @@ if (scenario && process.argv[1]?.endsWith("grok-companion.mjs") && process.argv[
   const realOpen = fs.openSync, realClose = fs.closeSync, realReadFile = fs.readFileSync, realRead = fs.readSync;
   const realExec = childProcess.execFileSync;
   const held = new Set();
+  const reused = new Set();
   let acknowledged = false;
   let truncated = false;
   const log = line => fs.appendFileSync(audit, `${line}\n`);
@@ -38,21 +39,23 @@ if (scenario && process.argv[1]?.endsWith("grok-companion.mjs") && process.argv[
     if (scenario === "open-denied") fail("EACCES");
     const fd = realOpen.call(this, path.join(root, "processes", `${pid}.json`), "r");
     held.add(fd);
+    if (acknowledged) { reused.add(fd); log("read-reused-path"); }
     return fd;
   };
   fs.closeSync = function (fd) {
     if (held.delete(fd)) log("close");
+    reused.delete(fd);
     return realClose.call(this, fd);
   };
   fs.readFileSync = function (target, options) {
-    if (held.has(target)) { log("read-fd"); const value = pinnedStat(); return typeof options === "string" || options?.encoding ? value : Buffer.from(value); }
+    if (held.has(target)) { log("read-fd"); const value = reused.has(target) ? stat() : pinnedStat(); return typeof options === "string" || options?.encoding ? value : Buffer.from(value); }
     if (target === statPath && acknowledged) { log("read-reused-path"); return typeof options === "string" || options?.encoding ? stat() : Buffer.from(stat()); }
     return realReadFile.call(this, target, options);
   };
   fs.readSync = function (fd, buffer, offset, length, position) {
     if (!held.has(fd)) return realRead.call(this, fd, buffer, offset, length, position);
     log("read-fd");
-    const data = Buffer.from(pinnedStat());
+    const data = Buffer.from(reused.has(fd) ? stat() : pinnedStat());
     const n = Math.min(length, Math.max(0, data.length - (position ?? 0)));
     data.copy(buffer, offset, position ?? 0, (position ?? 0) + n);
     return n;

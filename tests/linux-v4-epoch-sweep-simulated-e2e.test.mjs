@@ -10,8 +10,9 @@ import { makeTempDir, removeTempFixture } from "./helpers.mjs";
 // 実 CLI で前 v6 epoch の job を作り、旧 sentinel を停止・barrier 保全後、
 // 新 epoch へ明示移行・recover して現 job を回収する。procfs/mount/flock は
 // Mac 上の模擬値であり Linux kernel や電源断の durability は実証しない。
+// 一巡は独立した bounded sweep に分ける。単一 256 枠呼出しの性能は別ケースで扱う。
 test("Linux CLI preserves a real prior v6 lease across offline migration and new epoch sweep", {
-  skip: process.platform !== "darwin", timeout: 240000
+  skip: process.platform !== "darwin", timeout: 360000
 }, t => {
   const root = fs.realpathSync(makeTempDir("grok-linux-v4-epoch-sweep-"));
   const data = path.join(root, "data"), workspace = path.join(root, "workspace");
@@ -59,7 +60,8 @@ test("Linux CLI preserves a real prior v6 lease across offline migration and new
     const stateFile = path.join(stateDir, "state.json");
     const before = new Set(JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.map(item => item.id));
     agentsConfirmed = false;
-    const result = run([command, "task", "--cwd", workspace, "--json", label], { SETTINGS_EXIT: exitFile });
+    const result = run([command, "task", "--cwd", workspace, "--json", label], { SETTINGS_EXIT: exitFile }, 80000);
+    assert.equal(result.error, undefined); assert.equal(result.signal, null);
     assert.equal(result.status, 0, result.stderr);
     assert.ok(fs.existsSync(exitFile), `${label}: agent exit must be observed`);
     const jobs = JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs;
@@ -90,9 +92,20 @@ test("Linux CLI preserves a real prior v6 lease across offline migration and new
   assert.equal(recovered.status, 0, recovered.stderr);
   const current = task("new v6 task", path.join(root, "new-agent-exited"));
   assert.equal(current.epoch, nextEpoch);
-  const swept = run([sweep, workspace], {}, 75000);
-  assert.equal(swept.status, 0, swept.stderr);
-  assert.equal(JSON.parse(swept.stdout).reclaimed, 1);
+  const ledgerFile = path.join(stateDir, "worker-leases-v1", nextEpoch, "ledger.json");
+  const initialCursor = JSON.parse(fs.readFileSync(ledgerFile, "utf8")).cursor;
+  let examined = 0, reclaimed = 0, cursor = initialCursor;
+  for (let i = 0; i < 16; i++) {
+    const swept = run([sweep, workspace, "16"], {}, 75000);
+    assert.equal(swept.error, undefined); assert.equal(swept.signal, null); assert.equal(swept.status, 0, swept.stderr);
+    const result = JSON.parse(swept.stdout);
+    assert.equal(result.examined, 16); assert.equal(result.uncertain, 0);
+    examined += result.examined; reclaimed += result.reclaimed;
+    const nextCursor = JSON.parse(fs.readFileSync(ledgerFile, "utf8")).cursor;
+    assert.equal(nextCursor, (cursor + result.examined) % 256);
+    cursor = nextCursor;
+  }
+  assert.equal(examined, 256); assert.equal(cursor, initialCursor); assert.equal(reclaimed, 1);
   for (const [file, contents] of evidence) assert.deepEqual(fs.readFileSync(file), contents, `old evidence changed: ${file}`);
   const jobs = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs;
   assert.deepEqual(jobs.find(job => job.id === old.id).workerLease, old.workerLease);

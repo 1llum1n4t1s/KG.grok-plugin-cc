@@ -28,10 +28,12 @@ function fixture({ platform = "win32", initial = [], failMarker = false, failWri
     ...initial
   ]);
   const before = JSON.stringify([...files].filter(([name]) => !name.startsWith(barrier)));
-  const events = [];
+  const events = [], reads = [];
   let interrupt = failMarker;
   const error = code => Object.assign(new Error(code), { code });
   const entry = name => {
+    const match = typeof name === "string" && /^\/proc\/self\/fd\/(\d+)\/(.+)$/.exec(name);
+    if (match && handles.has(Number(match[1]))) name = path.posix.join(handles.get(Number(match[1])), match[2]);
     if (!files.has(name)) throw error("ENOENT");
     return files.get(name);
   };
@@ -40,12 +42,15 @@ function fixture({ platform = "win32", initial = [], failMarker = false, failWri
     return {
       dev: Object.hasOwn(item, "dev") ? item.dev : 7n,
       ino: Object.hasOwn(item, "ino") ? item.ino : 9007199254740993n,
+      uid: Object.hasOwn(item, "uid") ? item.uid : 1000n,
+      mode: Object.hasOwn(item, "mode") ? item.mode : item.kind === "directory" ? 0o700n : 0o600n,
+      nlink: 1n,
       isDirectory: () => item.kind === "directory",
       isFile: () => item.kind === "file",
       isSymbolicLink: () => item.kind === "symlink"
     };
   };
-  const handles = new Map();
+  const handles = new Map(), readHandles = new Set();
   let nextHandle = 1;
   let generation = 0;
   const forbiddenRemoval = name => {
@@ -53,7 +58,8 @@ function fixture({ platform = "win32", initial = [], failMarker = false, failWri
     throw new Error("Migration must never remove its permanent barrier or old artifacts");
   };
   const fakeFs = {
-    constants: fs.constants,
+    constants: { ...fs.constants, O_RDONLY: 0, O_DIRECTORY: fs.constants.O_DIRECTORY || 0x10000,
+      O_NOFOLLOW: fs.constants.O_NOFOLLOW || 0x20000, O_NONBLOCK: fs.constants.O_NONBLOCK || 0x800 },
     existsSync: name => files.has(name),
     lstatSync: metadata,
     statSync(name, options) {
@@ -91,6 +97,16 @@ function fixture({ platform = "win32", initial = [], failMarker = false, failWri
       files.delete(from);
     },
     openSync(name, flags) {
+      if (name === "/state" && ["linux", "darwin"].includes(platform) && typeof flags === "number") {
+        const expected = fakeFs.constants.O_RDONLY | fakeFs.constants.O_DIRECTORY | fakeFs.constants.O_NOFOLLOW | fakeFs.constants.O_NONBLOCK;
+        assert.equal(flags, expected);
+        entry(name);
+        const handle = nextHandle++;
+        handles.set(handle, name);
+        readHandles.add(handle);
+        reads.push(["open", name, flags]);
+        return handle;
+      }
       events.push(["open", name]);
       if (flags !== "wx" || files.has(name)) throw error("EEXIST");
       files.set(name, { kind: "file", text: "" });
@@ -98,12 +114,19 @@ function fixture({ platform = "win32", initial = [], failMarker = false, failWri
       handles.set(handle, name);
       return handle;
     },
+    fstatSync(handle, options) {
+      assert.equal(options?.bigint, true);
+      if (!readHandles.has(handle)) throw error("EBADF");
+      reads.push(["fstat", handles.get(handle)]);
+      return metadata(handles.get(handle));
+    },
     fsyncSync(handle) {
       events.push(["fsync", handles.get(handle)]);
       if (failSync) throw new Error("injected fsync failure");
     },
     closeSync(handle) {
-      events.push(["close", handles.get(handle)]);
+      if (readHandles.delete(handle)) reads.push(["close", handles.get(handle)]);
+      else events.push(["close", handles.get(handle)]);
       handles.delete(handle);
     },
     linkSync(from, to) {
@@ -149,7 +172,12 @@ function fixture({ platform = "win32", initial = [], failMarker = false, failWri
   const context = vm.createContext({
     fs: fakeFs, path: { ...path.posix, win32: path.win32 }, createHash, randomUUID: () => `attempt-${++generation}`, net, types,
     os: { tmpdir: () => "/tmp", hostname: () => "same-hostname" },
-    process: { platform, pid: 100, env: {}, versions: { node: "22.0.0" } },
+    process: { platform, pid: 100, env: {}, versions: { node: "22.0.0" }, getuid: () => 1000 },
+    fdMountId(handle) {
+      if (!readHandles.has(handle)) throw error("EBADF");
+      reads.push(["mount", handles.get(handle)]);
+      return 7;
+    },
     resolveWorkspaceRoot: value => value, isActiveJob: () => false,
     SharedArrayBuffer, Int32Array, Atomics, Buffer, performance,
     execFileSync(_file, _args, options) {
@@ -169,7 +197,7 @@ function fixture({ platform = "win32", initial = [], failMarker = false, failWri
   // 拒否試験のassert.throwsが「API未実装」の例外を誤って受理しないよう外側で確認する。
   assert.equal(typeof context[requiredApi], "function", `Missing implementation: ${requiredApi}`);
   return {
-    files, events, context, hooks,
+    files, events, reads, context, hooks,
     legacyAcquire() {
       fakeFs.writeFileSync(barrier, "legacy-owner\n", { flag: "wx" });
     },
@@ -499,6 +527,9 @@ for (const platform of ["linux", "darwin"]) {
       assert.throws(() => f.context[api]("/workspace", ...args), /requires explicit offline migration/i);
     }
     assert.deepEqual(f.events, []);
+    assert.equal(f.reads.filter(([kind]) => kind === "open").length, 3);
+    assert.equal(f.reads.filter(([kind]) => kind === "close").length, 3);
+    assert.ok(f.reads.filter(([kind]) => kind === "fstat").length >= 3);
     assert.equal(JSON.stringify([...f.files]), before);
   });
 }

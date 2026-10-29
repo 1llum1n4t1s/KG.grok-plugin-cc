@@ -84,11 +84,11 @@ function hookHarness(options = {}) {
     },
     emitDecision: (decision) => decisions.push(decision)
   };
-  const body = source.slice(source.indexOf("function getTurnKey("), source.indexOf("\ntry {\n  main();"));
+  const body = source.slice(source.indexOf("function getTurnKey("), source.indexOf("\ntry {\n  main(await readHookInput());"));
   const main = vm.runInNewContext(`${body}; main`, context);
   return {
     snapshotOptions, cryptoTimeouts, stateTimeouts,
-    event(name) { input = { hook_event_name: name, turn_id: "turn", session_id: "session" }; main(); },
+    event(name) { input = { hook_event_name: name, turn_id: "turn", session_id: "session" }; main(input); },
     edit() { snapshot = makeSnapshot(true); },
     editAgain() { snapshot = { ...makeSnapshot(true), fingerprint: "changed-again" }; },
     decisions, reviews, session: () => session,
