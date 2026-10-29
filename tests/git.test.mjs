@@ -8,7 +8,6 @@ import assert from "node:assert/strict";
 import {
   collectReviewContext,
   ensureGitRepository,
-  getWorkingTreeFingerprint,
   resolveReviewTarget
 } from "../plugins/grok/scripts/lib/git.mjs";
 import { initGitRepo as initBaseGitRepo, makeTempDir, run } from "./helpers.mjs";
@@ -25,51 +24,6 @@ function workingTreeValue(operation) {
   assert.throws(operation, /Review incomplete/);
   return null;
 }
-
-test("getWorkingTreeFingerprint tracks commits, tracked changes, and untracked content with safe snapshots", () => {
-  const cwd = makeTempDir();
-  initGitRepo(cwd);
-  const tracked = path.join(cwd, "app.js");
-  const untracked = path.join(cwd, "notes.txt");
-  fs.writeFileSync(tracked, "console.log('v1');\n");
-  run("git", ["add", "app.js"], { cwd });
-  run("git", ["commit", "-m", "init"], { cwd });
-
-  const initial = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
-  fs.writeFileSync(tracked, "console.log('v2');\n");
-  const changed = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
-  if (initial !== null) assert.notEqual(changed, initial);
-
-  run("git", ["add", "app.js"], { cwd });
-  run("git", ["commit", "-m", "change"], { cwd });
-  const committed = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
-  if (initial !== null) assert.notEqual(committed, changed);
-
-  fs.writeFileSync(untracked, "first\n");
-  const firstUntracked = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
-  fs.writeFileSync(untracked, "second\n");
-  const secondUntracked = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
-  if (initial !== null) assert.notEqual(firstUntracked, secondUntracked);
-});
-
-test("getWorkingTreeFingerprint reads all bytes within the aggregate snapshot bound", () => {
-  const cwd = makeTempDir();
-  initGitRepo(cwd);
-  const tracked = path.join(cwd, "large.bin");
-  const untracked = path.join(cwd, "untracked.bin");
-  fs.writeFileSync(tracked, Buffer.alloc(4 * 1024 * 1024, 0x41));
-  run("git", ["add", "large.bin"], { cwd });
-  run("git", ["commit", "-m", "large base"], { cwd });
-
-  const original = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
-  fs.writeFileSync(tracked, Buffer.alloc(4 * 1024 * 1024, 0x42));
-  fs.writeFileSync(untracked, Buffer.alloc(4 * 1024 * 1024, 0x43));
-  const first = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
-
-  fs.writeFileSync(untracked, Buffer.alloc(4 * 1024 * 1024, 0x44));
-  const second = workingTreeValue(() => getWorkingTreeFingerprint(cwd));
-  if (original !== null) { assert.notEqual(first, original); assert.notEqual(second, first); }
-});
 
 test("resolveReviewTarget prefers working tree when repo is dirty", () => {
   const cwd = makeTempDir();
@@ -317,7 +271,6 @@ test("Git safety: every internal call suppresses config execution and diff drive
   });
   syncBuiltinESMExports();
   try {
-    assert.throws(() => getWorkingTreeFingerprint(process.cwd()), /Review incomplete/);
     for (const mode of ["repo", "branch"]) {
       for (const includeDiff of [true, false]) {
         collectReviewContext(process.cwd(), { mode, baseRef: "main" }, { includeDiff });
@@ -348,7 +301,6 @@ test("Git compatibility: unsupported no-lazy-fetch fails explicitly on every rev
   try {
     for (const invoke of [
       () => ensureGitRepository(process.cwd()),
-      () => getWorkingTreeFingerprint(process.cwd()),
       () => collectReviewContext(process.cwd(), { mode: "repo" }),
       () => resolveReviewTarget(process.cwd(), {})
     ]) {

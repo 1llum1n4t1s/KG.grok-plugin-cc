@@ -6,19 +6,18 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 
 import { getGrokAuthStatus, getGrokAvailability, runGrokTurn } from "../plugins/grok/scripts/lib/grok.mjs";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
-import { makeTempDir } from "./helpers.mjs";
-import { prepareFixtureState } from "./broker-fixture-helper.mjs";
+import { makeTempDir, removeTempFixture } from "./helpers.mjs";
 
 test("injected Grok environment is used for preflight, authentication and model selection", async (t) => {
   const cwd = makeTempDir("grok-env-override-");
-  const fixture = prepareFixtureState(t, cwd, cwd, { cleanupLinux: true });
   const fake = installFakeGrok({ replies: [{ text: "ok" }] });
   const env = { ...fake.env, GROK_PLUGIN_MODEL: "grok-4.5" };
   const childProcess = createRequire(import.meta.url)("node:child_process");
   const originalSpawn = childProcess.spawn, owned = [];
   const observedSpawn = function(command, args, options) {
     const child = originalSpawn.apply(this, arguments);
-    if (process.platform === "linux" && command === fake.env.GROK_BIN && options?.env?.FAKE_GROK_STATE === fake.env.FAKE_GROK_STATE) {
+    if (process.platform === "linux" && command === process.execPath && args?.[0]?.endsWith("posix-agent-supervisor.mjs") &&
+        args?.[1] === fake.env.GROK_BIN && options?.env?.FAKE_GROK_STATE === fake.env.FAKE_GROK_STATE) {
       const record = { child, identity: null, closed: false, error: null };
       owned.push(record);
       record.close = new Promise(resolve => child.once("close", (code, signal) => { record.closed = true; resolve({ code, signal }); }));
@@ -62,7 +61,7 @@ test("injected Grok environment is used for preflight, authentication and model 
             throw new Error("owned agent process group is still present");
           } catch (error) { if (error.code !== "ESRCH") throw error; }
         }
-        fixture.confirmStopped();
+
       }
     } finally {
       if (process.platform === "linux" && childProcess.spawn === observedSpawn) { childProcess.spawn = originalSpawn; syncBuiltinESMExports(); }
@@ -70,6 +69,7 @@ test("injected Grok environment is used for preflight, authentication and model 
       else process.env.GROK_BIN = previousBin;
       if (previousModel === undefined) delete process.env.GROK_PLUGIN_MODEL;
       else process.env.GROK_PLUGIN_MODEL = previousModel;
+      removeTempFixture(cwd, { recursive: true, force: true });
     }
   }
 });

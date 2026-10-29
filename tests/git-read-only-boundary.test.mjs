@@ -6,7 +6,6 @@ import test from "node:test";
 
 import {
   collectReviewContext,
-  getWorkingTreeFingerprint,
   getWorkingTreeState,
   resolveReviewTarget
 } from "../plugins/grok/scripts/lib/git.mjs";
@@ -44,7 +43,6 @@ for (const [name, invoke] of [
   ["working-tree state", () => getWorkingTreeState(process.cwd())],
   ["automatic review scope", () => resolveReviewTarget(process.cwd())],
   ["working-tree review context", () => collectReviewContext(process.cwd(), { mode: "working-tree" })],
-  ["stop fingerprint", () => getWorkingTreeFingerprint(process.cwd())]
 ]) {
   test(`Git execution boundary: ${name} fails closed before filter-capable queries`, (t) => {
     const calls = fakeGit(t);

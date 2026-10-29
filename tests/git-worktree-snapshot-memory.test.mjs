@@ -9,7 +9,6 @@ import test from "node:test";
 import {
   collectWorkingTreeSnapshot,
   collectReviewContext,
-  getWorkingTreeFingerprint,
   getWorkingTreeState,
   resolveReviewTarget
 } from "../plugins/grok/scripts/lib/git.mjs";
@@ -130,7 +129,6 @@ const entryPoints = [
   ["state", () => getWorkingTreeState(process.cwd())],
   ["auto", () => resolveReviewTarget(process.cwd())],
   ["context", () => collectReviewContext(process.cwd(), { mode: "working-tree" })],
-  ["fingerprint", () => getWorkingTreeFingerprint(process.cwd())]
 ];
 
 for (const fixture of cases) {
@@ -170,12 +168,6 @@ test("Worktree snapshot recovery: ordinary staged repository remains usable", (t
   assert.deepEqual(getWorkingTreeState(process.cwd()), {
     staged: ["app.js"], unstaged: [], untracked: [], isDirty: true
   });
-  assert.deepEqual(unsafe, []);
-});
-
-test("Worktree snapshot recovery: ordinary repository has a stop fingerprint", (t) => {
-  const unsafe = installMemoryGit(t, {});
-  assert.match(getWorkingTreeFingerprint(process.cwd()), /^[a-f0-9]{64}$/);
   assert.deepEqual(unsafe, []);
 });
 
@@ -240,7 +232,7 @@ test("Worktree snapshot failure boundary: skip-worktree index", (t) => {
 
 test("Worktree snapshot failure boundary: changing contents are refused", (t) => {
   installMemoryGit(t, { changeDuringRead: true });
-  assert.throws(() => getWorkingTreeFingerprint(process.cwd()), /incomplete/i);
+  assert.throws(() => collectReviewContext(process.cwd(), { mode: "working-tree" }), /incomplete/i);
 });
 
 for (const content of [Buffer.from([0xff, 0xfe]), Buffer.from("binary\0data"), Buffer.from("a".repeat(5000) + "\0tail")]) {
@@ -250,12 +242,12 @@ for (const content of [Buffer.from([0xff, 0xfe]), Buffer.from("binary\0data"), B
   });
 }
 
-test("Worktree snapshot recovery: fingerprint includes the entire file content", (t) => {
+test("Worktree snapshot recovery: captured file includes the entire content", (t) => {
   const fixture = { content: "a".repeat(600000) };
   installMemoryGit(t, fixture);
-  const first = getWorkingTreeFingerprint(process.cwd());
   fixture.content = "a".repeat(300000) + "b" + "a".repeat(299999);
-  assert.notEqual(getWorkingTreeFingerprint(process.cwd()), first);
+  const file = collectWorkingTreeSnapshot(process.cwd()).files.find(entry => entry.path === "app.js");
+  assert.equal(Buffer.from(file.content, "base64").toString(), fixture.content);
 });
 
 for (const autocrlf of ["true", "input"]) {
@@ -296,19 +288,11 @@ for (const autocrlf of ["true", "input"]) {
       assert.equal(applyReplacementPatch("base\n", patch), "base\r\n");
     });
   }
-  test(`Auto CRLF ${autocrlf}: fingerprints retain raw line endings`, (t) => {
-    const fixture = { config, content: "base\n" };
-    installMemoryGit(t, fixture);
-    const first = getWorkingTreeFingerprint(process.cwd());
-    fixture.content = "base\r\n";
-    assert.notEqual(getWorkingTreeFingerprint(process.cwd()), first);
-  });
   for (const content of [Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 255]), Buffer.from("base\r\n"), Buffer.from("日本語\n")]) {
     test(`Auto CRLF ${autocrlf}: raw-identical index bytes prove clean without conversion ${content.toString("base64")}`, (t) => {
       const sameOid = createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
       const unsafe = installMemoryGit(t, { config, head: `100644 blob ${sameOid}\tapp.js\0`, indexContent: content, content, rejectBlobRead: true });
       assert.equal(getWorkingTreeState(process.cwd()).isDirty, false);
-      assert.match(getWorkingTreeFingerprint(process.cwd()), /^[a-f0-9]{64}$/);
       assert.equal(collectReviewContext(process.cwd(), { mode: "working-tree" }).inputMode, "inline-diff");
       assert.deepEqual(unsafe, []);
     });

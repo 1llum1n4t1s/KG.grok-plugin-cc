@@ -107,8 +107,15 @@ test("外部実行や書き込みができる検索・整形コマンドを拒�
     "sed 's/a/b/woutput.txt' auth.js",
     "sort -o output.txt input.txt",
     "uniq input.txt output.txt",
+    "file input.txt",
+    "file -C -m magic",
+    "file --compile --magic-file magic",
+    "file -Cm magic",
+    "file -bC -m magic",
     "rg --pre helper TODO .",
     "rg --pre=helper --pre-glob '*.js' TODO .",
+    "rg --hostname-bin helper TODO .",
+    "rg --hostname-bin=helper TODO .",
     "rg --\"pre\" helper TODO .",
     "git diff --\"ext-diff\"",
     "git diff --\"textconv\"",
@@ -276,24 +283,26 @@ test("Git blame execution: explicit disabling cannot establish safe blame inspec
   }
 });
 
-for (const sub of ["diff", "log", "show", "whatchanged"]) {
-  test("Git diff guard position: " + sub + " requires both guards before other arguments", () => {
+test("Git diff guard position requires both guards before other arguments", () => {
+  for (const sub of ["diff", "log", "show", "whatchanged"]) {
     for (const args of [
       "-S --no-textconv --no-ext-diff", "-n --no-textconv --no-ext-diff",
       "--stat --no-ext-diff --no-textconv", "-- --no-ext-diff --no-textconv",
       "--no-ext-diff -- --no-textconv", "--no-ext-diff -S --no-textconv"
-    ]) assert.equal(classifyShellCommand(safeGit + " " + sub + " " + args + (sub === "diff" ? " --cached" : "")).allowed, false, args);
-  });
-  test("Git diff guard position: " + sub + " preserves both leading orders and rejects overrides", () => {
+    ]) assert.equal(classifyShellCommand(safeGit + " " + sub + " " + args + (sub === "diff" ? " --cached" : "")).allowed, false, `${sub}: ${args}`);
+  }
+});
+test("Git diff guard position preserves both leading orders and rejects overrides", () => {
+  for (const sub of ["diff", "log", "show", "whatchanged"]) {
     for (const guards of ["--no-ext-diff --no-textconv", "--no-textconv --no-ext-diff"]) {
       const comparison = sub === "diff" ? " --cached" : "";
-      assert.equal(classifyShellCommand(safeGit + " " + sub + " " + guards + comparison + " HEAD -- auth.js").allowed, true);
+      assert.equal(classifyShellCommand(safeGit + " " + sub + " " + guards + comparison + " HEAD -- auth.js").allowed, true, `${sub}: ${guards}`);
       for (const override of ["--ext-diff", "--textconv", "--no-no-textconv"]) {
-        assert.equal(classifyShellCommand(safeGit + " " + sub + " " + guards + comparison + " " + override).allowed, false, override);
+        assert.equal(classifyShellCommand(safeGit + " " + sub + " " + guards + comparison + " " + override).allowed, false, `${sub}: ${guards}: ${override}`);
       }
     }
-  });
-}
+  }
+});
 test("Git diff guard position: ordinary pickaxe and log counts follow the guards", () => {
   assert.equal(classifyShellCommand(safeGit + " diff " + safeDiff + " --cached -S needle -- auth.js").allowed, true);
   assert.equal(classifyShellCommand(safeGit + " log " + safeDiff + " -n 5 -- auth.js").allowed, true);
@@ -334,4 +343,38 @@ test("Git option compatibility: grep supports its complete color option with saf
     assert.equal(classifyShellCommand(safeGit + " grep --cached --color=" + value + " needle -- auth.js").allowed, true, value);
   }
   assert.equal(classifyShellCommand(safeGit + " cat-file --color=auto HEAD:auth.js").allowed, false);
+});
+
+// 同じ分類境界の異なる worktree 参照を検証する。
+test("Git shell boundary rejects unproven worktree execution", () => {
+  for (const args of [
+    "status --porcelain", "diff " + safeDiff, "diff " + safeDiff + " HEAD",
+    "diff " + safeDiff + " auth.js", "diff " + safeDiff + " --cached --submodule=diff",
+    "grep -n needle -- src", "grep --cached --no-index needle -- src",
+    "ls-files --modified", "ls-files -m", "blame --no-textconv auth.js",
+    "blame --no-textconv HEAD -- auth.js"
+  ]) assert.equal(classifyShellCommand(safeGit + " " + args).allowed, false, args);
+});
+
+const prefix = `${safeGit} diff ${safeDiff}`;
+const range = `${"a".repeat(40)}..${"b".repeat(40)}`;
+
+test("Fixed object range: exact SHA-1 and SHA-256 comparisons remain inspectable", () => {
+  for (const oidLength of [40, 64]) {
+    const target = `${"a".repeat(oidLength)}..${"b".repeat(oidLength)}`;
+    for (const suffix of ["", " --stat", " --binary --no-renames", " --unified=5 -- src/app.js"]) {
+      assert.equal(classifyShellCommand(`${prefix} ${target}${suffix}`).allowed, true, suffix);
+    }
+  }
+});
+
+test("Fixed object range: revisions, worktree modes and ambiguous paths fail closed", () => {
+  for (const suffix of [
+    "HEAD..main", `${"a".repeat(39)}..${"b".repeat(40)}`, `${"a".repeat(40)}..${"b".repeat(64)}`,
+    `${range} HEAD`, `${range} src/app.js`, `${range} --no-index old new`,
+    `${range} --cached`, `--stat ${range}`, `${range} --stat HEAD`,
+    `${range} -S HEAD`, `${range} --submodule=diff`, `${range} --`,
+    `${range} -- src/app.js --no-index`, `${range} -- :(attr:filter)`,
+    `${range} --no-ext-diff --textconv`, `${range} -- -- ../outside`
+  ]) assert.equal(classifyShellCommand(`${prefix} ${suffix}`).allowed, false, suffix);
 });

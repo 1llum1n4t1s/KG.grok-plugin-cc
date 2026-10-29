@@ -16,7 +16,7 @@ if (process.argv.includes("--grandchild")) {
     const message = JSON.parse(line);
     if (message.method !== "initialize") return;
     if (process.env.POSIX_OWNED_MODE === "handshake") return;
-    if (process.env.POSIX_OWNED_MODE === "remaining") {
+    if (["remaining", "natural"].includes(process.env.POSIX_OWNED_MODE)) {
       const child = spawn(process.execPath, [process.argv[1], "--grandchild"], {
         env: process.env, stdio: ["ignore", "ignore", "inherit", "ipc"]
       });
@@ -30,5 +30,6 @@ if (process.argv.includes("--grandchild")) {
     }
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id,
       result: { protocolVersion: 1, agentCapabilities: {} } }) + "\n");
+    if (process.env.POSIX_OWNED_MODE === "natural") setTimeout(() => process.exit(0), 100);
   });
 }

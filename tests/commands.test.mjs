@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
 import { parseArgs } from "../plugins/grok/scripts/lib/args.mjs";
+import { classifyShellCommand } from "../plugins/grok/scripts/lib/grok.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "grok");
@@ -43,12 +44,9 @@ function listSkills(relativePath) {
 const PUBLIC_WORKFLOWS = [
   "adversarial-review",
   "audit",
-  "cancel",
   "rescue",
-  "result",
   "review",
   "setup",
-  "status",
   "x"
 ];
 
@@ -67,18 +65,18 @@ test("Codex exposes the same workflows as native skills", () => {
     assert.match(source, new RegExp(`^name: ${name}$`, "m"), `${name} has the wrong skill name`);
     assert.match(source, /^description: .+$/m, `${name} is missing a skill description`);
     assert.match(source, /references\/codex-runtime\.md/, `${name} does not load the shared runtime contract`);
-    assert.match(source, /grok-companion\.mjs/, `${name} does not call the companion script`);
+    if (name === "source-command-x") assert.match(source, /one foreground task --json without --write/i);
+    else assert.match(source, /grok-companion\.mjs/, `${name} does not call the companion script`);
     assert.doesNotMatch(source, /AskUserQuestion|run_in_background|CLAUDE_PLUGIN_ROOT/);
   }
 
   const audit = read("skills/source-command-audit/SKILL.md");
   assert.match(audit, /subcommand.*`audit`|`audit`\s*subcommand/i);
-  assert.match(audit, /--background/);
   assert.match(audit, /review-only/i);
 });
 
 test("Claude-only helpers stay outside Codex skill discovery", () => {
-  const helperNames = ["grok-cli-runtime", "grok-prompting", "grok-result-handling"];
+  const helperNames = ["grok-cli-runtime", "grok-prompting"];
   const claudeManifest = JSON.parse(read(".claude-plugin/plugin.json"));
 
   assert.equal(claudeManifest.skills, "./claude-skills/");
@@ -88,6 +86,7 @@ test("Claude-only helpers stay outside Codex skill discovery", () => {
   for (const name of helperNames) {
     const source = read(`claude-skills/${name}/SKILL.md`);
     assert.match(source, new RegExp(`^name: ${name}$`, "m"), `${name} has the wrong skill name`);
+    assert.match(source, /^description: .+$/m, `${name} is missing a description`);
     assert.match(source, /^user-invocable: false$/m, `${name} is not marked as an internal helper`);
   }
 
@@ -96,9 +95,7 @@ test("Claude-only helpers stay outside Codex skill discovery", () => {
     assert.match(rescueAgent, new RegExp(`^\\s+- ${name}$`, "m"), `${name} is not wired to the Claude rescue agent`);
   }
 
-  const resultHandling = read("claude-skills/grok-result-handling/SKILL.md");
-  assert.match(resultHandling, /review-only `review`, `adversarial-review`, and `audit` workflows/);
-  assert.match(resultHandling, /explicit implementation request routed through `grok:grok-rescue`/);
+  assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, "claude-skills/grok-result-handling")), false);
 
   for (const reference of ["prompt-blocks.md", "grok-prompt-recipes.md", "grok-prompt-antipatterns.md"]) {
     assert.ok(
@@ -110,39 +107,35 @@ test("Claude-only helpers stay outside Codex skill discovery", () => {
 
 test("Codex runs every Grok workflow in the foreground", () => {
   const runtime = read("references/codex-runtime.md");
-  assert.match(runtime, /Foreground execution/i);
-  assert.match(runtime, /Always invoke the companion in the foreground/i);
-  assert.match(runtime, /Reject `--background`/i);
-  assert.match(runtime, /completed JSON object's `jobId` field/i);
-  assert.match(runtime, /Never infer it from\s+status ordering/i);
-  assert.match(runtime, /result <job-id>/i);
-  assert.match(runtime, /source-command-status --wait[\s\S]*synchronous status-polling/i);
-  assert.match(runtime, /without repeated[\s\S]*commentary or status polling/i);
+  assert.match(runtime, /once in the foreground with a new direct ACP connection/i);
+  assert.match(runtime, /Do not detach or poll a separate job/i);
+  assert.match(runtime, /Reject --background/i);
+  assert.match(runtime, /reviews return reviewText and tasks return finalMessage/i);
+  assert.match(runtime, /does not resume tasks or retrieve stored jobs/i);
 
   for (const name of ["review", "adversarial-review", "audit", "rescue", "x"]) {
     const source = read(`skills/source-command-${name}/SKILL.md`);
-    assert.match(source, /shared foreground execution contract/i, `${name} ignores the foreground contract`);
-    assert.match(source, /Reject `--background`/i, `${name} does not reject background execution`);
-    assert.match(source, /grok-companion\.mjs[^\n]*--json/i, `${name} does not use quiet JSON execution`);
-    assert.doesNotMatch(source, /surface concise progress/i, `${name} still asks Codex to narrate progress`);
+    assert.match(source, /references\/codex-runtime\.md/i, `${name} ignores the foreground contract`);
+    if (name === "x") assert.match(source, /one foreground task --json without --write/i);
+    else assert.match(source, /grok-companion\.mjs/i, `${name} does not invoke the companion`);
+    assert.doesNotMatch(source, /run_in_background|source-command-status|source-command-result/i);
   }
 });
 
-test("cancel without a job id never guesses when multiple jobs are active", () => {
-  for (const relativePath of ["commands/cancel.md", "skills/source-command-cancel/SKILL.md"]) {
-    const source = read(relativePath);
-    assert.match(source, /only active job[\s\S]*current session/i, `${relativePath} does not document the safe default`);
-    assert.match(source, /multiple[\s\S]*job id/i, `${relativePath} does not require disambiguation`);
-    assert.doesNotMatch(source, /most recent active|latest active/i, `${relativePath} still promises arbitrary latest-job selection`);
+test("removed job controls have no published entries and are rejected by the companion", () => {
+  for (const name of ["status", "result", "cancel"]) {
+    assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, `commands/${name}.md`)), false);
+    assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, `skills/source-command-${name}`)), false);
+    assert.match(read("scripts/grok-companion.mjs"), new RegExp(`"${name}"`));
   }
+  assert.match(read("scripts/grok-companion.mjs"), /\["status", "result", "cancel", "state-lock", "task-resume-candidate"\]\.includes\(command\)\) disabled\(command\)/);
 });
 
-test("Claude workflows retrieve the exact job they launched", () => {
-  for (const name of ["review", "adversarial-review", "audit", "x"]) {
+test("Claude workflows return the foreground output rather than retrieving a job", () => {
+  for (const name of ["review", "adversarial-review", "audit", "rescue", "x"]) {
     const source = read(`commands/${name}.md`);
-    assert.match(source, /result "<job-id>"/i, `${name} does not pass the captured job id`);
-    assert.doesNotMatch(source, /grok-companion\.mjs" result\s*\n```/, `${name} still documents bare result`);
-    assert.match(source, /exact job id|exact id/i, `${name} does not explain job identity`);
+    assert.match(source, /return completed stdout faithfully/i, `${name} must return its own output`);
+    assert.doesNotMatch(source, /grok-companion\.mjs" (?:status|result|cancel)/i);
   }
 });
 
@@ -154,14 +147,14 @@ test("transfer is gone because Grok has no Claude session import", () => {
   assert.doesNotMatch(companion, /handleTransfer|importExternalAgentSession/);
 });
 
-test("every command declares frontmatter and routes through the companion script", () => {
+test("every command declares frontmatter and routes through a foreground workflow", () => {
   for (const name of listCommands()) {
     const source = read(`commands/${name}.md`);
     // 改行は環境によって CRLF になるので、行末の \r を許容して照合する。
     assert.match(source, /^---\r?\n/, `${name} is missing frontmatter`);
     assert.match(source, /^description: .+$/m, `${name} is missing a description`);
-    assert.match(source, /grok-companion\.mjs/, `${name} does not call the companion script`);
-    assert.doesNotMatch(source, /codex/i, `${name} still mentions Codex`);
+    if (name === "x") assert.match(source, /one foreground task without --write/i);
+    else assert.match(source, /grok-companion\.mjs/, `${name} does not call the companion script`);
   }
 });
 
@@ -192,8 +185,8 @@ test("audit wires to its own subcommand, template, and repo scope", () => {
   assert.match(audit, /ignores the current git diff/i);
 
   const companion = read("scripts/grok-companion.mjs");
-  assert.match(companion, /case "audit":/);
-  assert.match(companion, /scope: "repo"/);
+  assert.match(companion, /"review", "adversarial-review", "audit"/);
+  assert.match(companion, /scope: command === "audit" \? "repo"/);
   assert.ok(fs.existsSync(path.join(PLUGIN_ROOT, "prompts", "audit.md")), "prompts/audit.md is missing");
 });
 
@@ -201,7 +194,9 @@ test("the companion has no detached execution entry points", () => {
   const companion = read("scripts/grok-companion.mjs");
   assert.doesNotMatch(companion, /spawnDetachedWorker|enqueueBackgroundJob/);
   assert.doesNotMatch(companion, /case "(?:task|review)-worker"/);
-  assert.match(companion, /`--background` is no longer supported/);
+  assert.match(companion, /if \(options\.background\) disabled\("--background"\)/);
+  assert.match(companion, /runGrokReview\([^\n]*foreground: true/);
+  assert.match(companion, /runGrokTurn\([^\n]*foreground: true/);
 });
 
 test("review commands stay review-only", () => {
@@ -210,6 +205,21 @@ test("review commands stay review-only", () => {
     assert.match(source, /review-only/i, `${name} does not declare itself review-only`);
     assert.match(source, /[Dd]o not fix/, `${name} does not forbid fixing issues`);
   }
+});
+
+test("foreground review and read-only tasks enforce permission and completion boundaries", () => {
+  const companion = read("scripts/grok-companion.mjs");
+  const runtime = read("scripts/lib/grok.mjs");
+  const transport = read("scripts/lib/acp.mjs");
+  assert.match(companion, /readOnly: !options\.write/);
+  assert.match(companion, /result\.turnStopUnconfirmed \|\| result\.permissionDenials\.length/);
+  assert.match(companion, /parsed\.parsed\.verdict = "incomplete"/);
+  assert.match(runtime, /createReviewPermissionHandler\(cwd, options\.onProgress/);
+  assert.match(runtime, /reason: "the tool is not explicitly known to be read-only"/);
+  assert.match(runtime, /GrokAcpClient\.connectForeground\(cwd, options\)/);
+  assert.match(transport, /this\.options\.readOnly \|\| this\.options\.clientCapabilities\?\.fs\?\.writeTextFile !== true/);
+  assert.equal(classifyShellCommand("unknown-command --read-only").allowed, false);
+  assert.equal(classifyShellCommand("echo data > output.txt").allowed, false);
 });
 
 test("review accepts focus text now that there is no built-in reviewer", () => {
@@ -235,20 +245,21 @@ test("responses follow the sender's language dynamically", () => {
   }
 
   // rescue 経路: 依頼文を英訳せず元の言語のまま転送する指示があること。
-  assert.match(read("agents/grok-rescue.md"), /original language/i);
-  assert.match(read("claude-skills/grok-cli-runtime/SKILL.md"), /original language/i);
+  assert.match(read("agents/grok-rescue.md"), /preserving its language/i);
+  assert.match(read("skills/source-command-rescue/SKILL.md"), /preserve the task language/i);
 });
 
-test("rescue delegates to the subagent without recursing into itself", () => {
+test("rescue forwards one concrete task and grants write access only on request", () => {
   const rescue = read("commands/rescue.md");
-  assert.match(rescue, /subagent_type: "grok:grok-rescue"/);
-  assert.match(rescue, /do not call `Skill\(grok:grok-rescue\)`/i);
+  assert.match(rescue, /require a concrete task/i);
+  assert.match(rescue, /grok-companion\.mjs" task once in the foreground/i);
+  assert.match(rescue, /use --write for requested edits; omit it for read-only work/i);
 });
 
 test("model guidance only names aliases the companion actually resolves", () => {
   const companion = read("scripts/grok-companion.mjs");
   for (const alias of ["fast", "reasoning", "multi", "build", "latest"]) {
-    assert.match(companion, new RegExp(`\\["${alias}",`), `companion is missing the ${alias} alias`);
+    assert.match(companion, new RegExp(`\\b${alias}:`), `companion is missing the ${alias} alias`);
   }
 
   for (const file of ["commands/rescue.md", "agents/grok-rescue.md", "claude-skills/grok-cli-runtime/SKILL.md"]) {
@@ -258,25 +269,21 @@ test("model guidance only names aliases the companion actually resolves", () => 
   }
 });
 
-test("setup points at the x.ai installer rather than a package registry", () => {
-  const setup = read("commands/setup.md");
-  assert.match(setup, /x\.ai\/cli\/install\.ps1/);
-  assert.match(setup, /x\.ai\/cli\/install\.sh/);
-  assert.match(setup, /XAI_API_KEY/);
-  assert.doesNotMatch(setup, /npm install/);
+test("setup entries run the helper and follow its guidance without installing automatically", () => {
+  const claude = read("commands/setup.md");
+  const codex = read("skills/source-command-setup/SKILL.md");
+  assert.match(claude, /node .*scripts\/grok-companion\.mjs" setup/);
+  assert.match(claude, /follow the helper.s install and login guidance/i);
+  assert.match(claude, /do not install or authenticate automatically/i);
+  assert.match(codex, /node <plugin-root>\/scripts\/grok-companion\.mjs setup --json/);
+  assert.match(codex, /install guidance from the helper/i);
+  assert.match(codex, /preserve its login guidance/i);
+  assert.match(codex, /do not install or authenticate automatically/i);
 });
 
-test("hooks keep session lifecycle cleanup and stop gating wired", () => {
+test("automatic lifecycle and review-gate hooks are absent", () => {
   const hooks = JSON.parse(read("hooks/hooks.json"));
-  assert.deepEqual(Object.keys(hooks.hooks).sort(), ["SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
-  assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /session-lifecycle-hook\.mjs.*SessionStart/);
-  assert.match(hooks.hooks.SessionEnd[0].hooks[0].command, /session-lifecycle-hook\.mjs.*SessionEnd/);
-  assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
-  assert.match(hooks.hooks.Stop[0].hooks[0].command, /stop-review-gate-hook\.mjs/);
-  assert.equal(hooks.hooks.SessionStart[0].hooks[0].timeout, 5);
-  assert.equal(hooks.hooks.SessionEnd[0].hooks[0].timeout, 3);
-  assert.equal(hooks.hooks.UserPromptSubmit[0].hooks[0].timeout, 60);
-  assert.equal(hooks.hooks.Stop[0].hooks[0].timeout, 900);
+  assert.deepEqual(hooks.hooks, {});
 });
 
 test("plugin and marketplace manifests agree on name and version", () => {
@@ -380,9 +387,9 @@ test("the README documents every exposed command", () => {
   // 禁じるのは、この plugin では動かない `/codex:` コマンドの案内。
   assert.doesNotMatch(readme, /\/codex:/);
   assert.match(readme, /openai\/codex-plugin-cc/, "README should credit the upstream project");
-  assert.match(readme, /Claude Code and Codex/);
+  assert.match(readme, /Claude Code or Codex/);
   assert.match(readme, /codex plugin add grok@kagayoi-grok/);
-  assert.match(readme, /\/skills/);
+  assert.match(readme, /grok:source-command-<name>/);
 });
 
 test("自由記述より後ろのダッシュ付きトークンはフラグとして解釈しない", () => {

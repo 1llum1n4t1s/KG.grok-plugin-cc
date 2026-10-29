@@ -11,18 +11,9 @@ import { fileURLToPath } from "node:url";
 
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
 import { makeTempDir, initGitRepo, removeTempFixture, run } from "./helpers.mjs";
-import { listJobs, migrateStateLock, readJobFile, resolveJobFile, resolveStateDir, updateState, writeJobFile } from "../plugins/grok/scripts/lib/state.mjs";
-import { createBrokerEndpoint } from "../plugins/grok/scripts/lib/broker-endpoint.mjs";
-import { reserveLinuxTrackedJob } from "../plugins/grok/scripts/lib/tracked-jobs.mjs";
-import { releaseLinuxWorkerLease } from "../plugins/grok/scripts/lib/linux-worker-lease.mjs";
-import { sendBrokerShutdown } from "../plugins/grok/scripts/lib/broker-lifecycle.mjs";
-import { startFixtureBroker } from "./broker-fixture-helper.mjs";
-import { GrokAcpClient } from "../plugins/grok/scripts/lib/acp.mjs";
-import { shutdownPosixStateLockSentinel } from "../plugins/grok/scripts/lib/posix-state-lock.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "grok", "scripts", "grok-companion.mjs");
-const SESSION_HOOK = path.join(ROOT, "plugins", "grok", "scripts", "session-lifecycle-hook.mjs");
 
 const REVIEW_JSON = JSON.stringify({
   verdict: "needs-attention",
@@ -94,82 +85,9 @@ function recordChildOwner(f, child) {
   owner.close = new Promise(resolve => child.once("close", () => { owner.closed = true; resolve(); }));
   child.once("error", () => { owner.error = true; });
 }
-// startFixtureBroker が返る前の失敗も含め、spawn 時点から直子を所有する。
-function managedRuntimeBroker(fixture, endpoint, fake) {
-  let child, closed, session, spawnError;
-  const retained = () => [fixture?.repo, fixture?.dataDir, fake.binDir].filter(Boolean).join("; ");
-  const withDeadline = async (promise, ms) => {
-    let timer;
-    try { return await Promise.race([promise, new Promise(resolve => { timer = setTimeout(() => resolve(null), ms); })]); }
-    finally { clearTimeout(timer); }
-  };
-  return {
-    onChild(value) {
-      if (child) throw new Error("A second fixture broker was spawned");
-      child = value;
-      closed = new Promise(resolve => {
-        value.once("error", error => { spawnError = error; });
-        value.once("close", (code, signal) => resolve({ code, signal }));
-      });
-      if (fixture) { fixture.broker = value; fixture.endpoint = endpoint; recordChildOwner(fixture, value); }
-    },
-    started(value) { session = value; },
-    async stop() {
-      if (!child) {
-        if (fixture) fixture.leaseUncertain = true;
-        throw new Error("Fixture retained because broker spawn ownership was not confirmed: " + retained());
-      }
-      let outcome, signalled = false;
-      try {
-        if (child.exitCode === null && child.signalCode === null) {
-          // ACK や timeout は終了の証拠ではない。必ず所有 child の close を待つ。
-          try { await withDeadline(sendBrokerShutdown(endpoint, 1000), 1500); } catch { /* 後続の所有 child 停止を試みる。 */ }
-        }
-        outcome = await withDeadline(closed, 2500);
-        if (!outcome) {
-          // 同期区間で未終了の直子だけに送る。PID の再利用後には送らない。
-          if (child.exitCode === null && child.signalCode === null) {
-            if (!child.kill("SIGTERM")) throw new Error("Owned fixture broker SIGTERM was not delivered");
-            signalled = true;
-          }
-          outcome = await withDeadline(closed, 5000);
-        }
-        if (!outcome) throw new Error("Owned fixture broker close was not confirmed");
-        if (spawnError) throw new Error("Owned fixture broker spawn failed", { cause: spawnError });
-        if (process.platform === "linux" || process.platform === "darwin") {
-          // broker は detached、agent は同じ process group を継承する。
-          if (!Number.isSafeInteger(child.pid) || child.pid <= 0) throw new Error("Fixture broker group identity is unavailable");
-          const deadline = Date.now() + 5000;
-          for (;;) {
-            let exists = true;
-            try { process.kill(-child.pid, 0); }
-            catch (error) { if (error?.code === "ESRCH") exists = false; else throw error; }
-            if (!exists) break;
-            if (Date.now() >= deadline) throw new Error("Fixture broker and fake agent group exit was not confirmed");
-            await new Promise(resolve => setTimeout(resolve, 50));
-          }
-        }
-      } catch (error) {
-        if (fixture) fixture.leaseUncertain = true;
-        throw new Error("Fixture retained because broker or agent exit was not confirmed: " + retained(), { cause: error });
-      }
-      if (session) {
-        const stderr = fs.existsSync(session.logFile) ? fs.readFileSync(session.logFile, "utf8") : "";
-        assert.equal(outcome.code, 0, `Broker exit (${outcome.signal}): ${stderr}`);
-      }
-      return { outcome, signalled };
-    }
-  };
-}
-
 async function closeRuntimeFixture(f) {
   const paths = [f.repo, f.dataDir, f.fake?.binDir].filter(Boolean).join("; ");
-  if (f.migrationStarted && !f.migrationComplete) throw new Error("Incomplete migration; retained: " + paths);
-  if (f.leaseUncertain || f.leases.some(lease => !lease.released)) throw new Error("Worker lease release unconfirmed; retained: " + paths);
   try {
-    if (f.broker && f.broker.exitCode === null && f.broker.signalCode === null) {
-      await sendBrokerShutdown(f.endpoint, 1000);
-    }
     for (const owner of f.owners) {
       if (owner.close && !owner.closed) {
         let timer;
@@ -211,19 +129,6 @@ async function closeRuntimeFixture(f) {
         await new Promise(resolve => setTimeout(resolve, 50));
       }
     }
-    if (f.migrationComplete) {
-      assertFixtureIdentity(f.stateDir, f.stateIdentity);
-      const markerPath = path.join(f.stateDir, "state.lock", "protocol.json");
-      const markerStat = fs.lstatSync(markerPath);
-      assert.ok(markerStat.isFile() && !markerStat.isSymbolicLink(), "fixture sentinel marker is not a regular file");
-      const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-      assert.equal(marker.epoch, f.epoch, "fixture epoch changed");
-      assert.deepEqual(marker.sentinel, f.sentinel, "fixture sentinel identity changed");
-      const stopped = shutdownPosixStateLockSentinel(f.stateDir, { offlineConfirmed: true, expectedStateDir: f.stateDir });
-      assert.equal(stopped.stopped, true);
-      assert.equal(stopped.stateDir, f.stateDir);
-      assert.equal(stopped.epoch, f.epoch);
-    }
     for (const item of f.roots) assertFixtureIdentity(item.file, item.identity);
     for (const link of f.links) {
       const stat = fs.lstatSync(link.file, { bigint: true });
@@ -252,7 +157,7 @@ test.afterEach(async () => {
 
 /** 偽 grok と使い捨ての git リポジトリを用意する。 */
 function setupWorkspace(scenario) {
-  const f = { roots: [], links: [], owners: [], leases: [], migrationStarted: false, migrationComplete: false };
+  const f = { roots: [], links: [], owners: [] };
   if (process.platform === "linux") runtimeFixtures.push(f);
   const fake = installFakeGrok(scenario);
   f.fake = fake;
@@ -276,29 +181,6 @@ function setupWorkspace(scenario) {
     env.RUNTIME_PROCESS_LOG = f.trackingLog;
     env.RUNTIME_FAKE_BIN = fake.env.GROK_BIN;
     env.NODE_OPTIONS = (env.NODE_OPTIONS ?? "") + " --require=" + JSON.stringify(preload);
-  }
-  if (["win32", "linux", "darwin"].includes(process.platform)) {
-    const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
-    process.env.CLAUDE_PLUGIN_DATA = dataDir;
-    try {
-      const stateDir = resolveStateDir(repo);
-      f.stateDir = stateDir;
-      f.migrationStarted = true;
-      const migrated = migrateStateLock(repo, { offlineConfirmed: true, localOnly: true, expectedStateDir: stateDir });
-      if (process.platform === "linux") {
-        f.epoch = migrated.epoch;
-        assert.ok(f.epoch, "fixture migration epoch is unavailable");
-        f.stateIdentity = fixtureIdentity(stateDir);
-        const marker = JSON.parse(fs.readFileSync(path.join(stateDir, "state.lock", "protocol.json"), "utf8"));
-        assert.equal(marker.epoch, f.epoch);
-        f.sentinel = marker.sentinel;
-        assert.ok(f.sentinel, "fixture sentinel identity is unavailable");
-      }
-      f.migrationComplete = true;
-    } finally {
-      if (previousPluginData == null) delete process.env.CLAUDE_PLUGIN_DATA;
-      else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
-    }
   }
   return { fake, repo, env, registerLink(file) {
     if (process.platform !== "linux") return;
@@ -364,152 +246,18 @@ for (const tag of ["en--US", "x", "en-a-foo-a-bar", "en-1901-1901", 'en\" do som
 }
 
 for (const location of ["top-level", "finding"]) {
-  test(`review schema contract: rejects extra ${location} property on first run and stored result`, () => {
+  test(`review schema contract: rejects extra ${location} property in the direct result`, () => {
     const data = JSON.parse(REVIEW_JSON);
     if (location === "top-level") data.extra = "dummy";
     else data.findings[0].extra = "dummy";
     const workspace = setupWorkspace({ replies: [{ text: JSON.stringify(data) }] });
     const result = reviewCompanion(["review", "--json"], workspace);
     assert.equal(result.status, 1, result.stderr);
-    const status = JSON.parse(companion(["status", "--json", "--all"], workspace).stdout);
-    assert.equal(status.latestFinished.status, "failed");
-    const stored = companion(["result", status.latestFinished.id], workspace);
-    assert.match(stored.stdout, /unexpected review shape|valid structured JSON/);
-    assert.doesNotMatch(stored.stdout, /Verdict: needs-attention/);
+    const payload = JSON.parse(result.stdout);
+    assert.match(payload.parseError, /unexpected property/i);
+    assert.equal(payload.result, null);
   });
 }
-
-async function waitForHeldTask(child, fake, repo, env) {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error("Held Grok task exited before cancellation.");
-    }
-    const status = companion(["status", "--json"], { repo, env });
-    assert.equal(status.status, 0, status.stderr);
-    const job = JSON.parse(status.stdout).running?.[0];
-    if (job?.pid && job.processStartKey && fake.readState()?.prompts?.length) {
-      return job;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  throw new Error("Held Grok task did not reach the prompt.");
-}
-
-async function waitForChildExit(child) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Grok task process stayed alive after cancellation.")), 6000);
-    child.once("exit", () => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-}
-
-for (const mode of ["cancel", "session-end"]) {
-  test(`${mode} stops a held foreground Grok task`, async () => {
-    const { fake, repo, env } = setupWorkspace({ holdPrompt: true });
-    env.GROK_COMPANION_SESSION_ID = "held-session";
-    const child = spawn(process.execPath, [SCRIPT, "task", "--json", "hold this turn"], {
-      cwd: repo,
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true
-    });
-    if (process.platform === "linux") recordChildOwner(runtimeFixtures.find(f => f.repo === repo), child);
-    child.stdout.resume();
-    child.stderr.resume();
-    try {
-      const job = await waitForHeldTask(child, fake, repo, env);
-      if (mode === "cancel") {
-        const result = companion(["cancel", "--json", job.id], { repo, env });
-        assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-        assert.equal(JSON.parse(result.stdout).status, "cancelled");
-      } else {
-        const result = run(process.execPath, [SESSION_HOOK, "SessionEnd"], {
-          cwd: repo,
-          env,
-          input: JSON.stringify({ cwd: repo, session_id: "held-session", hook_event_name: "SessionEnd" })
-        });
-        recordSyncOwner(repo, result);
-        assert.equal(result.status, 0, result.stderr);
-      }
-      await waitForChildExit(child);
-    } finally {
-      if (child.exitCode === null && child.signalCode === null) child.kill();
-      await waitForChildExit(child);
-    }
-  });
-}
-
-test("cancel preserves an unverifiable process and blocks task resume", () => {
-  const { repo, env } = setupWorkspace({ replies: [] });
-  env.GROK_COMPANION_SESSION_ID = "test-session";
-  const job = {
-    id: "unverifiable-cancel",
-    status: "running",
-    jobClass: "task",
-    sessionId: "test-session",
-    grokSessionId: "fake-session-pending",
-    workspaceRoot: repo,
-    createdAt: "2026-01-01T00:00:00.000Z",
-    pid: process.pid
-  };
-  const previous = process.env.CLAUDE_PLUGIN_DATA;
-  let reservation, leaseRecord;
-  const leaseFixture = process.platform === "linux" ? runtimeFixtures.find(f => f.repo === repo) : null;
-  process.env.CLAUDE_PLUGIN_DATA = env.CLAUDE_PLUGIN_DATA;
-  try {
-    // Linux は実際の lease と epoch がない旧レコードの取消を拒否する。
-    if (process.platform === "linux") {
-      leaseFixture.leaseUncertain = true;
-      reservation = reserveLinuxTrackedJob(job);
-      leaseRecord = { released: false };
-      leaseFixture.leases.push(leaseRecord);
-      leaseFixture.leaseUncertain = false;
-    }
-    updateState(repo, state => {
-      const indexed = state.jobs.find(candidate => candidate.id === job.id);
-      const record = indexed ? { ...indexed, ...job, grokPromptState: "pending" } : job;
-      writeJobFile(repo, job.id, record);
-      if (indexed) Object.assign(indexed, record);
-      else state.jobs.push(record);
-    });
-    const indexFile = path.join(resolveStateDir(repo), "state.json");
-    const detailFile = resolveJobFile(repo, job.id);
-    const indexBefore = fs.readFileSync(indexFile, "utf8"), detailBefore = fs.readFileSync(detailFile, "utf8");
-    const result = companion(["cancel", "--json", job.id], { repo, env });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /cancellation remains pending/i);
-    const pending = listJobs(repo).find((candidate) => candidate.id === job.id);
-    assert.equal(pending.status, process.platform === "darwin" ? "running" : "cancelled");
-    if (process.platform === "darwin") {
-      assert.match(result.stderr, /no verified current worker lease/i);
-      assert.equal(fs.readFileSync(indexFile, "utf8"), indexBefore);
-      assert.equal(fs.readFileSync(detailFile, "utf8"), detailBefore);
-    } else assert.equal(pending.terminationPending, true);
-    assert.equal(pending.pid, process.pid);
-    const waited = companion(["status", "--json", "--wait", "--timeout-ms", "1", job.id], { repo, env });
-    assert.equal(waited.status, 0, waited.stderr);
-    assert.equal(JSON.parse(waited.stdout).waitTimedOut, true);
-    const candidate = companion(["task-resume-candidate", "--json"], { repo, env });
-    assert.notEqual(candidate.status, 0, `stdout:\n${candidate.stdout}\nstderr:\n${candidate.stderr}`);
-    assert.match(candidate.stderr, /termination is pending; resume is unavailable/i);
-    const resume = companion(["task", "--resume-last", "continue"], { repo, env });
-    assert.notEqual(resume.status, 0);
-    assert.match(resume.stderr, process.platform === "darwin" ? /still running/i : /needs process termination/i);
-  } finally {
-    try {
-      if (reservation) {
-        leaseRecord.released = releaseLinuxWorkerLease(reservation.owner);
-        assert.equal(leaseRecord.released, true, "fixture worker lease must be released");
-      }
-    } finally {
-      if (previous == null) delete process.env.CLAUDE_PLUGIN_DATA;
-      else process.env.CLAUDE_PLUGIN_DATA = previous;
-    }
-  }
-});
 
 test("setup reports a ready runtime and the detected model", () => {
   const { repo, env } = setupWorkspace({ replies: [{ text: "ok" }] });
@@ -520,26 +268,25 @@ ${result.stdout}
 stderr:
 ${result.stderr}`);
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.ready, true);
-  assert.equal(payload.grok.available, true);
-  assert.match(payload.grok.version, /grok 9\.9\.9 \(fake\)/);
-  assert.equal(payload.auth.authenticated, true);
-  assert.equal(payload.auth.method, "api-key");
+  assert.equal(payload.availability.available, true);
+  assert.match(payload.availability.version, /grok 9\.9\.9 \(fake\)/);
+  assert.equal(payload.authenticated, true);
+  assert.equal(payload.method, "api-key");
 });
 
 test("setup reports not-authenticated instead of crashing", () => {
   const { repo, env } = setupWorkspace({ authError: true });
   const result = companion(["setup", "--json"], { repo, env });
 
-  assert.equal(result.status, 0, `stdout:
+  assert.equal(result.status, 1, `stdout:
 ${result.stdout}
 stderr:
 ${result.stderr}`);
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.ready, false);
-  assert.equal(payload.auth.authenticated, false);
-  assert.match(payload.nextSteps.join("\n"), /grok login/);
-  assert.match(payload.nextSteps.join("\n"), /XAI_API_KEY/);
+  assert.equal(payload.authenticated, false);
+  assert.equal(payload.reason, "not-authenticated");
+  assert.match(payload.guidance, /grok login/);
+  assert.match(payload.guidance, /XAI_API_KEY/);
 });
 
 test("review renders structured findings and asks for the reasoning model", () => {
@@ -556,8 +303,6 @@ test("review renders structured findings and asks for the reasoning model", () =
     assert.match(unsupported.stderr, /Review incomplete: cannot safely read the working tree snapshot/i);
     assert.equal(fake.readState()?.prompts?.length ?? 0, 0);
     assert.doesNotMatch(unsupported.stdout, /Verdict: approve/i);
-    const failed = JSON.parse(companion(["status", "--json", "--all"], { repo, env }).stdout);
-    assert.equal(failed.latestFinished.status, "failed");
   }
 
   const result = reviewCompanion(["review", "--wait"], { repo, env });
@@ -570,14 +315,6 @@ ${result.stderr}`);
   assert.match(result.stdout, /Verdict: needs-attention/);
   assert.match(result.stdout, /\[high\] Unvalidated input \(auth\.js:2\)/);
   assert.match(result.stdout, /Parameterize the query\./);
-
-  const jobIdMatch = result.stderr.match(/^\[grok\] Job ID: (review-[a-z0-9-]+)$/m);
-  assert.ok(jobIdMatch, `foreground review did not announce its job ID:\n${result.stderr}`);
-
-  const stored = companion(["result", jobIdMatch[1]], { repo, env });
-  assert.equal(stored.status, 0, `stdout:\n${stored.stdout}\nstderr:\n${stored.stderr}`);
-  assert.match(stored.stdout, /# Grok Review/);
-  assert.match(stored.stdout, /Verdict: needs-attention/);
 
   // API キー認証時の既定は非推論モデルなので、明示的に差し替えていること。
   const state = fake.readState();
@@ -649,11 +386,9 @@ for (const replies of [[{ text: "" }], [{ text: "not json" }, { text: "" }]]) {
     const result = reviewCompanion(["review", "--json"], workspace);
     assert.equal(result.status, 1);
     const payload = JSON.parse(result.stdout);
-    assert.equal(payload.grok.status, "completed");
+    assert.equal(payload.status, "completed");
     assert.equal(payload.result, null);
     assert.match(payload.parseError, /did not return a final structured message/i);
-    const stored = companion(["result", payload.jobId], workspace);
-    assert.match(stored.stdout, /did not return a final structured message/i);
   });
 }
 
@@ -683,19 +418,12 @@ for (const command of ["review", "audit", "adversarial-review"]) {
     const result = reviewCompanion([command, "--json"], workspace);
     assert.equal(result.status, 1);
     const payload = JSON.parse(result.stdout);
-    assert.equal(payload.grok.status, "completed");
-    assert.equal(payload.grok.stopReason, "end_turn");
-    assert.equal(payload.rawOutput, latestText);
-    assert.equal(payload.grok.stdout, latestText);
+    assert.equal(payload.status, "completed");
+    assert.equal(payload.stopReason, "end_turn");
+    assert.equal(payload.reviewText, latestText);
     assert.ok(payload.parseError);
     assert.equal(payload.result, null);
     assert.equal(workspace.fake.readState().prompts.length, 2);
-
-    const stored = companion(["result", payload.jobId], workspace);
-    assert.match(stored.stdout, /One real problem/);
-    assert.doesNotMatch(stored.stdout, /Starting the audit/);
-    const status = JSON.parse(companion(["status", "--json", "--all"], workspace).stdout);
-    assert.equal(status.latestFinished.status, "failed");
   });
 }
 
@@ -717,44 +445,13 @@ for (const command of ["review", "audit", "adversarial-review"]) {
     const result = reviewCompanion([command, "--json"], workspace);
     assert.equal(result.status, 1);
     const payload = JSON.parse(result.stdout);
-    assert.equal(payload.grok.status, "cancelled");
-    assert.equal(payload.grok.stopReason, "cancelled");
+    assert.equal(payload.status, "cancelled");
+    assert.equal(payload.stopReason, "cancelled");
     assert.equal(payload.result, null);
-    assert.equal(payload.rawOutput, "Review in progress.");
+    assert.equal(payload.reviewText, "Review in progress.");
     assert.match(payload.permissionDenials.join("\n"), /unsupported shell control/i);
     assert.equal(workspace.fake.readState().prompts.length, 1);
-
-    const stored = companion(["result", payload.jobId], workspace);
-    assert.match(stored.stdout, /Review incomplete/i);
-    assert.match(stored.stdout, /cancelled/i);
-    assert.match(stored.stdout, /unsupported shell control/i);
-    assert.match(stored.stdout, /Partial message:/);
-    assert.doesNotMatch(stored.stdout, /Verdict: approve|Raw final message:/i);
   });
-}
-
-function assertPendingReviewResult(workspace, payload) {
-  const status = companion(["status", "--json", payload.jobId], workspace);
-  assert.equal(status.status, 0, status.stderr);
-  const job = JSON.parse(status.stdout).job;
-  assert.equal(job.terminationPending, true);
-  assert.equal(job.grokPromptState, "pending");
-  const previous = process.env.CLAUDE_PLUGIN_DATA;
-  process.env.CLAUDE_PLUGIN_DATA = workspace.env.CLAUDE_PLUGIN_DATA;
-  try {
-    const detail = readJobFile(resolveJobFile(workspace.repo, payload.jobId));
-    assert.equal(detail.terminationPending, true);
-    assert.equal(detail.grokPromptState, "pending");
-    assert.equal(detail.result.grok.stopReason, "unknown_reason");
-    assert.equal(detail.result.result.verdict, "incomplete");
-  } finally {
-    if (previous == null) delete process.env.CLAUDE_PLUGIN_DATA;
-    else process.env.CLAUDE_PLUGIN_DATA = previous;
-  }
-  const stored = companion(["result", payload.jobId], workspace);
-  assert.notEqual(stored.status, 0, `stdout:\n${stored.stdout}\nstderr:\n${stored.stderr}`);
-  assert.match(stored.stderr, /still needs process termination/i);
-  assert.equal(stored.stdout, "");
 }
 
 for (const stopReason of ["cancelled", "refusal", "max_tokens", "max_turn_requests", "unknown_reason"]) {
@@ -763,18 +460,12 @@ for (const stopReason of ["cancelled", "refusal", "max_tokens", "max_turn_reques
     const result = reviewCompanion(["review", "--json"], workspace);
     assert.equal(result.status, 1);
     const payload = JSON.parse(result.stdout);
-    assert.notEqual(payload.grok.status, "completed");
-    assert.equal(payload.grok.stopReason, stopReason);
+    assert.notEqual(payload.status, "completed");
+    assert.equal(payload.stopReason, stopReason);
     assert.equal(payload.result.verdict, "incomplete");
-    assert.equal(payload.rawOutput, APPROVE_JSON);
+    assert.equal(payload.reviewText, APPROVE_JSON);
     assert.equal(workspace.fake.readState().prompts.length, 1);
-    if (stopReason === "unknown_reason") assertPendingReviewResult(workspace, payload);
-    else {
-      const stored = companion(["result", payload.jobId], workspace);
-      assert.equal(stored.status, 0, stored.stderr);
-      assert.match(stored.stdout, /Verdict: incomplete/);
-      assert.doesNotMatch(stored.stdout, /Verdict: approve/);
-    }
+
   });
 }
 
@@ -785,12 +476,12 @@ test("review preserves an unknown reason from the latest repair without confirmi
   const result = reviewCompanion(["review", "--json"], workspace);
   assert.equal(result.status, 1);
   const payload = JSON.parse(result.stdout);
-  assert.notEqual(payload.grok.status, "completed");
-  assert.equal(payload.grok.stopReason, "unknown_reason");
+  assert.notEqual(payload.status, "completed");
+  assert.equal(payload.stopReason, "unknown_reason");
   assert.equal(payload.result.verdict, "incomplete");
-  assert.equal(payload.rawOutput, APPROVE_JSON);
+  assert.equal(payload.reviewText, APPROVE_JSON);
   assert.equal(workspace.fake.readState().prompts.length, 2);
-  assertPendingReviewResult(workspace, payload);
+  assert.equal(payload.turnStopUnconfirmed, true);
 });
 
 test("review never approves a valid JSON repair from a cancelled turn", () => {
@@ -800,9 +491,9 @@ test("review never approves a valid JSON repair from a cancelled turn", () => {
   const result = reviewCompanion(["review", "--json"], workspace);
   assert.equal(result.status, 1);
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.grok.status, "cancelled");
+  assert.equal(payload.status, "cancelled");
   assert.equal(payload.result.verdict, "incomplete");
-  assert.equal(payload.rawOutput, APPROVE_JSON);
+  assert.equal(payload.reviewText, APPROVE_JSON);
   assert.equal(workspace.fake.readState().prompts.length, 2);
 });
 
@@ -814,9 +505,7 @@ for (const invalidJson of ["null", "false", "0", '""']) {
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.result, null);
     assert.match(payload.parseError, /top-level JSON object/i);
-    assert.equal(payload.rawOutput, invalidJson);
-    const stored = companion(["result", payload.jobId], workspace);
-    assert.match(stored.stdout, /top-level JSON object/i);
+    assert.equal(payload.reviewText, invalidJson);
   });
 }
 
@@ -827,11 +516,8 @@ test("review does not expose an invalid partial approval as a structured result"
   assert.equal(result.status, 1);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.result, null);
-  assert.equal(payload.rawOutput, partial);
+  assert.equal(payload.reviewText, partial);
   assert.match(payload.parseError, /findings/i);
-  const stored = companion(["result", payload.jobId], workspace);
-  assert.match(stored.stdout, /Review incomplete/i);
-  assert.match(stored.stdout, /Partial message:/);
 });
 
 for (const text of ["", "partial review", APPROVE_JSON]) {
@@ -840,13 +526,10 @@ for (const text of ["", "partial review", APPROVE_JSON]) {
     const result = reviewCompanion(["review", "--json"], workspace);
     assert.equal(result.status, 1);
     const payload = JSON.parse(result.stdout);
-    assert.equal(payload.grok.status, "failed");
-    assert.equal(payload.grok.error, "Review connection failed");
-    assert.equal(payload.rawOutput, text);
+    assert.equal(payload.status, "failed");
+    assert.equal(payload.error?.message, "Review connection failed");
+    assert.equal(payload.reviewText, text);
     assert.notEqual(payload.result?.verdict, "approve");
-    const stored = companion(["result", payload.jobId], workspace);
-    assert.match(stored.stdout, /Review connection failed/);
-    assert.doesNotMatch(stored.stdout, /Verdict: approve/);
   });
 }
 
@@ -857,8 +540,8 @@ test("review preserves an empty cancelled repair instead of the initial reply", 
   const result = reviewCompanion(["review", "--json"], workspace);
   assert.equal(result.status, 1);
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.grok.status, "cancelled");
-  assert.equal(payload.rawOutput, "");
+  assert.equal(payload.status, "cancelled");
+  assert.equal(payload.reviewText, "");
   assert.equal(payload.result, null);
   assert.doesNotMatch(payload.parseError, /Initial malformed reply/);
 });
@@ -878,10 +561,6 @@ test("review denies write-capable shell commands but allows read-only ones", () 
   assert.match(deniedResult.stdout, /Verdict: incomplete/);
   assert.match(deniedResult.stdout, /rm -rf build/);
   assert.match(deniedResult.stdout, /must not be treated as approval/i);
-
-  const deniedStatus = JSON.parse(companion(["status", "--json", "--all"], denied).stdout);
-  assert.equal(deniedStatus.latestFinished.status, "failed");
-  assert.match(deniedStatus.latestFinished.summary, /incomplete/i);
 
   const allowed = setupWorkspace({
     replies: [
@@ -929,13 +608,9 @@ test("review marks a denied subagent request as incomplete even when Grok return
   assert.equal(result.status, 1);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.result.verdict, "incomplete");
-  assert.equal(payload.rawOutput, APPROVE_JSON);
-  assert.equal(payload.grok.stdout, APPROVE_JSON);
+  assert.equal(payload.reviewText, APPROVE_JSON);
+  assert.equal(payload.reviewText, APPROVE_JSON);
   assert.match(payload.permissionDenials.join("\n"), /Delegate to subagent/);
-
-  const stored = companion(["result", payload.jobId], workspace);
-  assert.match(stored.stdout, /Verdict: incomplete/);
-  assert.match(stored.stdout, /Delegate to subagent/);
 });
 
 test("review keeps permission denials across JSON repair and cannot repair into approve", () => {
@@ -954,7 +629,7 @@ test("review keeps permission denials across JSON repair and cannot repair into 
   assert.equal(result.status, 1);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.result.verdict, "incomplete");
-  assert.equal(payload.rawOutput, APPROVE_JSON);
+  assert.equal(payload.reviewText, APPROVE_JSON);
   assert.match(payload.permissionDenials.join("\n"), /Delegate to subagent/);
   assert.equal(workspace.fake.readState().prompts.length, 2);
 });
@@ -989,12 +664,8 @@ test("review treats an explicit incomplete verdict as a failed review result", (
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.result.verdict, "incomplete");
   assert.deepEqual(payload.permissionDenials, []);
-  assert.equal(payload.grok.status, "completed");
-  assert.equal(payload.grok.stopReason, "end_turn");
-
-  const stored = companion(["result", payload.jobId], workspace);
-  assert.match(stored.stdout, /Verdict: incomplete/);
-  assert.match(stored.stdout, /must not be treated as approval/i);
+  assert.equal(payload.status, "completed");
+  assert.equal(payload.stopReason, "end_turn");
 });
 
 test("review still completes for an approve verdict without permission denials", () => {
@@ -1005,9 +676,6 @@ test("review still completes for an approve verdict without permission denials",
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.result.verdict, "approve");
   assert.deepEqual(payload.permissionDenials, []);
-
-  const status = JSON.parse(companion(["status", "--json", "--all"], workspace).stdout);
-  assert.equal(status.latestFinished.status, "completed");
 });
 
 test("review rejects an unsolicited ACP file write", () => {
@@ -1090,7 +758,7 @@ ${result.stderr}`);
   assert.match(prompt, /full-repository audit/i);
   assert.match(prompt, /ignore any uncommitted diff/i);
   assert.match(prompt, /focus on auth/);
-  assert.doesNotMatch(prompt, /default deep-audit focus/i);
+  assert.match(prompt, /Weight the user's focus area heavily[\s\S]*still report any other material issue/i);
   assert.match(prompt, /## Tracked Files/);
   // setupWorkspace は auth.js を書き換えて working tree を汚しているが、
   // 監査プロンプトにその差分が混入しないこと。
@@ -1105,10 +773,10 @@ test("audit applies a risk-directed deep investigation when focus is omitted", (
 
   assert.equal(result.status, 0, result.stderr);
   const prompt = fake.readState().prompts[0];
-  assert.match(prompt, /default deep-audit focus/i);
   assert.match(prompt, /highest-risk execution paths/i);
-  assert.match(prompt, /callers, callees, state transitions, trust boundaries/i);
-  assert.match(prompt, /failure and cleanup paths, concurrency behavior/i);
+  assert.match(prompt, /concrete callers and consumers/i);
+  assert.match(prompt, /state transitions and invariants, trust and persistence boundaries/i);
+  assert.match(prompt, /failure and cleanup behavior, retries and timeouts, concurrency and ordering/i);
   assert.match(prompt, /relevant tests or documented contracts/i);
   assert.match(prompt, /Perform all review perspectives yourself in this session/i);
   assert.match(prompt, /do not call spawn_subagent/i);
@@ -1116,7 +784,7 @@ test("audit applies a risk-directed deep investigation when focus is omitted", (
   assert.doesNotMatch(prompt, /No extra focus provided\./);
 });
 
-test("JSON audit keeps progress silent and returns the exact tracked job id", () => {
+test("JSON audit keeps progress silent and returns its direct review result", () => {
   const { fake, repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
 
   const result = companion(["audit", "--json"], { repo, env });
@@ -1124,8 +792,9 @@ test("JSON audit keeps progress silent and returns the exact tracked job id", ()
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, "");
   const payload = JSON.parse(result.stdout);
-  assert.match(payload.jobId, /^review-[a-z0-9-]+$/);
-  assert.equal(payload.review, "Audit");
+  assert.equal(payload.status, "completed");
+  assert.equal(payload.stopReason, "end_turn");
+  assert.equal(payload.reviewText, REVIEW_JSON);
   assert.equal(payload.result.verdict, "needs-attention");
   assert.equal(fake.readState().prompts.length, 1);
 });
@@ -1139,7 +808,7 @@ test("review and task commands reject background execution", () => {
   ]) {
     const result = companion(args, { repo, env });
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /--background.*no longer supported.*foreground/i);
+    assert.match(result.stderr, /--background.*no longer supported/i);
   }
 
   assert.equal(fake.readState(), null, "background rejection must happen before starting Grok");
@@ -1155,51 +824,20 @@ test("task accepts legacy --wait as a foreground no-op", () => {
   assert.doesNotMatch(fake.readState().prompts[0], /--wait/);
 });
 
-test("status tracks a finished review as completed, not failed", () => {
-  const { repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
-
-  reviewCompanion(["review", "--wait"], { repo, env });
-  const status = companion(["status", "--json", "--all"], { repo, env });
-  assert.equal(status.status, 0, status.stderr);
-
-  const payload = JSON.parse(status.stdout);
-  // 直近の完了ジョブは recent とは別枠の latestFinished に入る。
-  const job = payload.latestFinished;
-  assert.ok(job, `status payload: ${JSON.stringify(payload).slice(0, 700)}`);
-  assert.equal(job.jobClass, "review");
-  assert.equal(job.status, "completed");
-  assert.match(job.grokSessionId, /^fake-session-/);
+test("removed job controls and task resumption reject without reading legacy state", () => {
+  const workspace = setupWorkspace({ replies: [{ text: "unexpected" }] });
+  const legacy = path.join(workspace.env.CLAUDE_PLUGIN_DATA, "state.json");
+  fs.writeFileSync(legacy, "invalid legacy state");
+  for (const args of [["status"], ["result"], ["cancel"], ["state-lock", "migrate"],
+    ["task-resume-candidate"], ["task", "--resume", "continue"], ["task", "--resume-last"],
+    ["task", "--stop-gate", "review"]]) {
+    const result = companion(args, workspace);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /no longer supported/i);
+    assert.equal(fs.readFileSync(legacy, "utf8"), "invalid legacy state");
+    assert.equal(workspace.fake.readState(), null);
+  }
 });
-
-test("status marks an unparseable review as failed", () => {
-  const { repo, env } = setupWorkspace({
-    replies: [{ text: "not json at all" }, { text: "still not json" }]
-  });
-
-  reviewCompanion(["review", "--wait"], { repo, env });
-  const payload = JSON.parse(companion(["status", "--json", "--all"], { repo, env }).stdout);
-
-  assert.equal(payload.latestFinished.status, "failed");
-});
-
-test("result replays the stored rendering of a finished job", () => {
-  const { repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
-
-  reviewCompanion(["review", "--wait"], { repo, env });
-  const status = JSON.parse(companion(["status", "--json", "--all"], { repo, env }).stdout);
-  const result = companion(["result", status.latestFinished.id], { repo, env });
-
-  assert.equal(result.status, 0, `stdout:
-${result.stdout}
-stderr:
-${result.stderr}`);
-  assert.match(result.stdout, /# Grok Review/);
-  assert.match(result.stdout, /Grok session ID: fake-session-/);
-  assert.match(result.stdout, /Resume in Grok: grok --resume fake-session-/);
-});
-
-// --- task（/grok:rescue の実体）---------------------------------------
-// ここは書き込みを許しうる唯一の経路なので、権限分岐を実プロセスで確かめる。
 
 for (const mode of ["split stdin", "empty stdin", "positional priority", "prompt file priority"]) {
   test(`task reads piped input and preserves prompt priority: ${mode}`, { timeout: 45000 }, async () => {
@@ -1243,7 +881,7 @@ for (const mode of ["split stdin", "empty stdin", "positional priority", "prompt
       assert.equal(inputError, undefined);
       if (mode === "empty stdin") {
         assert.equal(outcome.code, 1, stderr);
-        assert.match(stderr, /Provide a prompt.*or use --resume-last/i);
+        assert.match(stderr, /A prompt is required/i);
         assert.equal(fake.readState()?.prompts?.length ?? 0, 0);
       } else {
         assert.equal(outcome.code, 0, `signal=${outcome.signal} stdout=${stdout} stderr=${stderr}`);
@@ -1258,24 +896,18 @@ for (const mode of ["split stdin", "empty stdin", "positional priority", "prompt
   });
 }
 
-test("task rejects an omitted rescue request without recording a failed job", () => {
+test("task rejects an omitted rescue request before starting Grok", () => {
   const workspace = setupWorkspace({ replies: [{ text: "should not run" }] });
 
   const result = companion(["task"], workspace);
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Provide a prompt.*or use --resume-last/i);
+  assert.match(result.stderr, /A prompt is required/i);
   assert.equal(workspace.fake.readState(), null);
 
-  const status = companion(["status", "--json", "--all"], workspace);
-  assert.equal(status.status, 0, status.stderr);
-  const payload = JSON.parse(status.stdout);
-  assert.deepEqual(payload.running, []);
-  assert.equal(payload.latestFinished, null);
-  assert.deepEqual(payload.recent, []);
 });
 
-test("status marks schema-invalid review JSON as failed", () => {
+test("schema-invalid review JSON fails in the direct result", () => {
   const malformedShape = JSON.stringify({
     verdict: "approve",
     summary: "Looks fine.",
@@ -1284,10 +916,11 @@ test("status marks schema-invalid review JSON as failed", () => {
   });
   const { repo, env } = setupWorkspace({ replies: [{ text: malformedShape }] });
 
-  reviewCompanion(["review", "--wait"], { repo, env });
-  const payload = JSON.parse(companion(["status", "--json", "--all"], { repo, env }).stdout);
-
-  assert.equal(payload.latestFinished.status, "failed");
+  const result = reviewCompanion(["review", "--json"], { repo, env });
+  assert.equal(result.status, 1);
+  const payload = JSON.parse(result.stdout);
+  assert.ok(payload.parseError);
+  assert.equal(payload.result, null);
 });
 
 test("task without --write denies write permission requests", () => {
@@ -1303,7 +936,7 @@ test("task without --write denies write permission requests", () => {
 
   const result = companion(["task", "add a note"], { repo, env });
 
-  assert.equal(result.status, 0, `stdout:
+  assert.equal(result.status, 1, `stdout:
 ${result.stdout}
 stderr:
 ${result.stderr}`);
@@ -1336,11 +969,8 @@ test("read-only rescue permits built-in WebFetch but denies ambiguous or write-c
     const result = companion(["task", "--json", "--fresh", "Read the public source without changing files."], workspace);
     const payload = JSON.parse(result.stdout);
     assert.equal(result.status, scenario.allowed ? 0 : 1, `${scenario.name}: ${result.stderr}`);
-    assert.equal(payload.rawOutput, scenario.allowed ? "FETCH_OK" : "FETCH_DENIED", scenario.name);
+    assert.equal(payload.finalMessage, scenario.allowed ? "FETCH_OK" : "FETCH_DENIED", scenario.name);
     assert.equal(payload.permissionDenials.length, scenario.allowed ? 0 : 1, scenario.name);
-    const stored = companion(["result", payload.jobId], workspace);
-    assert.equal(stored.status, 0, stored.stderr);
-    assert.match(stored.stdout, scenario.allowed ? /FETCH_OK/ : /FETCH_DENIED/);
     assert.equal(fs.existsSync(path.join(workspace.repo, "notes.txt")), false);
   }
 });
@@ -1374,41 +1004,10 @@ test("read-only task confines Test-Path to its repository", () => {
 
     const result = companion(["task", "--json", "check build directory"], workspace);
     const payload = JSON.parse(result.stdout);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(payload.rawOutput, scenario === "inside" ? /permission allowed/ : /permission denied/);
+    assert.equal(result.status, scenario === "inside" ? 0 : 1, result.stderr);
+    assert.match(payload.finalMessage, scenario === "inside" ? /permission allowed/ : /permission denied/);
     assert.equal(payload.permissionDenials.length, scenario === "inside" ? 0 : 1);
   }
-});
-
-test("stop-gate review fails when a denied operation is followed by ALLOW", () => {
-  const workspace = setupWorkspace({
-    replies: [
-      {
-        requestPermissionFor: { title: "Delegate to subagent", rawInput: { agent: "reviewer" } },
-        text: "BLOCK: should not be emitted",
-        onDenied: { text: "ALLOW: no blockers found in the partial review" }
-      }
-    ]
-  });
-
-  const result = companion(["task", "--stop-gate", "review the previous turn"], workspace);
-  assert.equal(result.status, 1);
-  assert.match(result.stdout, /Review incomplete/i);
-  assert.match(result.stdout, /must not be treated as approval/i);
-  assert.match(result.stdout, /Delegate to subagent/);
-  assert.match(result.stdout, /Raw final message:/);
-  assert.match(result.stdout, /ALLOW: no blockers found in the partial review/);
-
-  const jobIdMatch = result.stderr.match(/^\[grok\] Job ID: (task-[a-z0-9-]+)$/m);
-  assert.ok(jobIdMatch, result.stderr);
-  const stored = companion(["result", jobIdMatch[1]], workspace);
-  assert.match(stored.stdout, /Review incomplete/i);
-  assert.match(stored.stdout, /Delegate to subagent/);
-  assert.match(stored.stdout, /Raw final message:/);
-
-  const status = JSON.parse(companion(["status", "--json", "--all"], workspace).stdout);
-  assert.equal(status.latestFinished.status, "failed");
-  assert.match(status.latestFinished.summary, /incomplete/i);
 });
 
 test("task with --write allows write permission requests", () => {
@@ -1444,7 +1043,7 @@ test("task does not treat --write inside the prompt text as a flag", () => {
 
   const result = companion(["task", "explain what the --write flag does"], { repo, env });
 
-  assert.equal(result.status, 0, `stdout:
+  assert.equal(result.status, 1, `stdout:
 ${result.stdout}
 stderr:
 ${result.stderr}`);
@@ -1543,124 +1142,4 @@ test("task falls back to set_config_option when session/set_model is gone", () =
   const state = fake.readState();
   assert.deepEqual(state.models, []);
   assert.deepEqual(state.configs, [{ configId: "model", value: "grok-4.5" }]);
-});
-
-test("managed broker fixture stops its owned broker and agent after a busy shutdown", { timeout: 60000,
-  skip: !["linux", "darwin"].includes(process.platform) ? "POSIX broker group only" : false }, async () => {
-  const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
-  const endpoint = createBrokerEndpoint(fake.binDir);
-  const brokerEnv = { ...env, GROK_COMPANION_DISABLE_BROKER: "0",
-    GROK_COMPANION_ACP_ENDPOINT: endpoint, TMPDIR: fake.binDir, TMP: fake.binDir, TEMP: fake.binDir };
-  const fixture = process.platform === "linux" ? runtimeFixtures.find(f => f.repo === repo) : null;
-  const ownedBroker = managedRuntimeBroker(fixture, endpoint, fake);
-  let holder, probe, stopPromise;
-  try {
-    const { session } = await startFixtureBroker(repo, brokerEnv, endpoint, { onChild: ownedBroker.onChild });
-    ownedBroker.started(session);
-    holder = await GrokAcpClient.connect(repo, { env: brokerEnv, brokerEndpoint: endpoint, brokerOnly: true });
-    probe = await GrokAcpClient.connect(repo, { env: brokerEnv, brokerEndpoint: endpoint, brokerOnly: true });
-    assert.equal(holder.initializeResult?._meta?.grokBrokerGeneration, session.generation);
-    assert.ok(fake.readState()?.pid, "the fake agent must have started");
-    await assert.rejects(probe.request("broker/shutdown", {}), /busy|attached/i);
-    await probe.close(); probe = null;
-    const started = Date.now();
-    stopPromise = ownedBroker.stop();
-    const stopped = await stopPromise;
-    assert.equal(stopped.signalled, true, "the attached client must force the bounded SIGTERM fallback");
-    assert.equal(stopped.outcome.code, 0, "the broker must finish its graceful shutdown");
-    assert.ok(Date.now() - started < 15000, "busy shutdown must not wait indefinitely");
-  } finally {
-    try { await (stopPromise ?? ownedBroker.stop()); }
-    finally { await probe?.close(); await holder?.close(); }
-  }
-});
-
-test("resuming a task reloads the previous session and reapplies --effort", { timeout: 60000 }, async () => {
-  const { fake, repo, env } = setupWorkspace({
-    replies: [{ text: "carrying on" }],
-    configOptions: [THOUGHT_LEVEL_OPTION]
-  });
-  // 再開には同じbroker世代が確認したterminal履歴が必要。直結の新規agentへ
-  // session/loadを送る旧fixtureでは、安全な再開の経路を検証できない。
-  const endpoint = createBrokerEndpoint(fake.binDir);
-  const brokerEnv = { ...env, GROK_COMPANION_DISABLE_BROKER: "0",
-    GROK_COMPANION_ACP_ENDPOINT: endpoint, TMPDIR: fake.binDir, TMP: fake.binDir, TEMP: fake.binDir };
-  const fixture = process.platform === "linux" ? runtimeFixtures.find(f => f.repo === repo) : null;
-  const ownedBroker = managedRuntimeBroker(fixture, endpoint, fake);
-  try {
-    const { session } = await startFixtureBroker(repo, brokerEnv, endpoint, { onChild: ownedBroker.onChild });
-    ownedBroker.started(session);
-    brokerEnv.GROK_COMPANION_BROKER_GENERATION = session.generation;
-    const first = companion(["task", "start the work"], { repo, env: brokerEnv });
-    assert.equal(first.status, 0, first.stderr);
-    const initialState = fake.readState();
-    assert.deepEqual(initialState.loads, []);
-    assert.equal(initialState.sessions, 1);
-
-    const resumed = companion(["task", "--resume-last", "--effort", "medium", "keep going"], { repo, env: brokerEnv });
-    assert.equal(resumed.status, 0, `stdout:
-${resumed.stdout}
-stderr:
-${resumed.stderr}`);
-    assert.match(resumed.stdout, /carrying on/);
-
-    const state = fake.readState();
-    // 同じagentで新しいセッションを作らず、前回のセッションを読み直している。
-    assert.equal(state.pid, initialState.pid);
-    assert.equal(state.sessions, 1);
-    assert.deepEqual(state.loads, ["fake-session-1"]);
-    assert.deepEqual(state.prompts, ["start the work", "keep going"]);
-    // 再開でも --effort が当たる（以前は startSession を通らず無視されていた）。
-    assert.deepEqual(state.configs, [{ configId: "thought-level", value: "medium" }]);
-  } finally {
-    await ownedBroker.stop();
-  }
-});
-
-test("stop-gate reviews never replace the latest resumable rescue task", { timeout: 60000 }, async () => {
-  const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
-  const endpoint = createBrokerEndpoint(fake.binDir);
-  const brokerEnv = { ...env, GROK_COMPANION_DISABLE_BROKER: "0",
-    GROK_COMPANION_ACP_ENDPOINT: endpoint, TMPDIR: fake.binDir, TMP: fake.binDir, TEMP: fake.binDir };
-  const fixture = process.platform === "linux" ? runtimeFixtures.find(f => f.repo === repo) : null;
-  const ownedBroker = managedRuntimeBroker(fixture, endpoint, fake);
-  try {
-    const { session } = await startFixtureBroker(repo, brokerEnv, endpoint, { onChild: ownedBroker.onChild });
-    ownedBroker.started(session);
-    brokerEnv.GROK_COMPANION_BROKER_GENERATION = session.generation;
-    const rescue = companion(["task", "--json", "start the rescue work"], { repo, env: brokerEnv });
-    assert.equal(rescue.status, 0, rescue.stderr);
-    const rescuePayload = JSON.parse(rescue.stdout);
-
-    const stopGate = companion(["task", "--json", "--stop-gate", "review the previous turn"], { repo, env: brokerEnv });
-    assert.equal(stopGate.status, 0, stopGate.stderr);
-    const stopGatePayload = JSON.parse(stopGate.stdout);
-
-    const candidate = companion(["task-resume-candidate", "--json"], { repo, env: brokerEnv });
-    assert.equal(candidate.status, 0, candidate.stderr);
-    const candidatePayload = JSON.parse(candidate.stdout);
-    assert.equal(candidatePayload.candidate.id, rescuePayload.jobId);
-    assert.notEqual(candidatePayload.candidate.id, stopGatePayload.jobId);
-
-    const status = companion(["status", "--json", "--all"], { repo, env: brokerEnv });
-    assert.equal(status.status, 0, status.stderr);
-    const stopGateJob = JSON.parse(status.stdout).latestFinished;
-    assert.equal(stopGateJob.id, stopGatePayload.jobId);
-    assert.equal(stopGateJob.jobClass, "review");
-    assert.equal(stopGateJob.kind, "stop-gate-review");
-    for (const id of [rescuePayload.jobId, stopGatePayload.jobId]) {
-      const result = companion(["result", "--json", id], { repo, env: brokerEnv });
-      assert.equal(result.status, 0, result.stderr);
-      const records = JSON.parse(result.stdout);
-      for (const job of [records.job, records.storedJob]) {
-        assert.equal(job.grokTransport, "broker");
-        assert.equal(job.grokBrokerGeneration, session.generation);
-        assert.equal(job.grokPromptState, "terminal");
-      }
-      if (id === rescuePayload.jobId) assert.equal(candidatePayload.candidate.grokSessionId, records.job.grokSessionId);
-    }
-    assert.deepEqual(fake.readState().prompts, ["start the rescue work", "review the previous turn"]);
-  } finally {
-    await ownedBroker.stop();
-  }
 });

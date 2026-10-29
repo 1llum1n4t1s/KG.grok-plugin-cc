@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { GrokAcpClient } from "../plugins/grok/scripts/lib/acp.mjs";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
-import { prepareFixtureState } from "./broker-fixture-helper.mjs";
+import { removeTempFixture } from "./helpers.mjs";
 
 // 失敗条件: 外部リンク経由のread/write、未作成の親、隣接rootの接頭辞。
 // 保全条件: 内部リンク、リンクのcwd、通常の新規write、欠損readの既存エラー。
@@ -24,7 +24,6 @@ test("ACP file requests stay inside the real session workspace", async (t) => {
   const cwdAlias = path.join(root, "cwd-alias");
   fs.symlinkSync(workspace, cwdAlias, linkType);
   fs.symlinkSync(path.join(outside, "missing-target"), path.join(workspace, "dangling-link"), linkType);
-  const fixture = prepareFixtureState(t, cwdAlias, root, { cleanupLinux: true });
   const cases = [
     { read: "outside-link/canary.txt", code: -32602 },
     { write: "outside-link/canary.txt", code: -32602 },
@@ -40,8 +39,8 @@ test("ACP file requests stay inside the real session workspace", async (t) => {
   const fake = installFakeGrok({ replies: cases.map((item) => item.read
     ? { requestClientFileRead: { path: item.read } }
     : { requestClientFileWrite: { path: item.write, content: "DUMMY_WRITE" } }) });
-  const client = await GrokAcpClient.connect(cwdAlias, {
-    disableBroker: true, grokBin: fake.env.GROK_BIN, env: fake.env,
+  const client = await GrokAcpClient.connectForeground(cwdAlias, {
+    grokBin: fake.env.GROK_BIN, env: fake.env,
     clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } }
   });
   try {
@@ -63,18 +62,21 @@ test("ACP file requests stay inside the real session workspace", async (t) => {
     await client.close();
     if (process.platform === "linux") {
       assert.ok(client.proc && Number.isInteger(client.proc.pid));
-      assert.equal(client.directAgentStopProof(), "posix-group-empty");
-      fixture.confirmStopped();
+      assert.notEqual(client.closeStopUnconfirmed, true);
     }
+    for (const link of [cwdAlias, path.join(workspace, "outside-link"), path.join(workspace, "inside-link"), path.join(workspace, "dangling-link")]) {
+      assert.ok(fs.lstatSync(link).isSymbolicLink());
+      fs.unlinkSync(link);
+    }
+    removeTempFixture(root, { recursive: true, force: true });
   }
 });
 
 // 失敗条件: ACP処理中のstate更新と親のreadStateが重なり、不完全JSONを読む。
 test("fake ACP state remains readable while the agent publishes updates", async (t) => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "acp-state-e2e-"));
-  const fixture = prepareFixtureState(t, workspace, workspace, { cleanupLinux: true });
   const fake = installFakeGrok({ holdPrompt: true });
-  const client = await GrokAcpClient.connect(workspace, { disableBroker: true, grokBin: fake.env.GROK_BIN, env: fake.env });
+  const client = await GrokAcpClient.connectForeground(workspace, { grokBin: fake.env.GROK_BIN, env: fake.env });
   try {
     const session = await client.request("session/new", { cwd: workspace, mcpServers: [] });
     for (let i = 0; i < 80; i += 1) {
@@ -90,8 +92,8 @@ test("fake ACP state remains readable while the agent publishes updates", async 
     await client.close();
     if (process.platform === "linux") {
       assert.ok(client.proc && Number.isInteger(client.proc.pid));
-      assert.equal(client.directAgentStopProof(), "posix-group-empty");
-      fixture.confirmStopped();
+      assert.notEqual(client.closeStopUnconfirmed, true);
     }
+    removeTempFixture(workspace, { recursive: true, force: true });
   }
 });

@@ -34,17 +34,6 @@ export function initGitRepo(cwd) {
 }
 
 // Windows の Node.js 22 でも日本語パスを含むテスト用インストールを作成する。
-export function copyTestDirectory(source, destination) {
-  fs.mkdirSync(destination, { recursive: true });
-  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
-    const from = path.join(source, entry.name);
-    const to = path.join(destination, entry.name);
-    if (entry.isDirectory()) copyTestDirectory(from, to);
-    else fs.copyFileSync(from, to);
-  }
-}
-
-
 // 許可rootの境界とリンクを検査してから標準APIへ渡す。
 function assertCleanupPath(target, allowedRoot) {
   if (typeof target !== 'string' || !target || typeof allowedRoot !== 'string' || !allowedRoot || !path.isAbsolute(target) || !path.isAbsolute(allowedRoot)) throw new Error('Cleanup paths must be absolute');
