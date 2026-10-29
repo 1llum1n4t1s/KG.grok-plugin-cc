@@ -21,6 +21,17 @@ function parse(argv, values, booleans) {
 }
 function disabled(name) { throw new Error(`${name} is no longer supported. Use Grok's own commands to resume or manage sessions.`); }
 function model(value) { return aliases[value] ?? value; }
+function setupGuidance(status) {
+  if (status.reason === "grok-missing") {
+    if (status.availability?.reason === "missing-agent-stdio") return "Update Grok Build with `grok update`, then run setup again.";
+    if (status.availability?.reason === "not-installed") {
+      const install = process.platform === "win32" ? "irm https://x.ai/cli/install.ps1 | iex" : "curl -fsSL https://x.ai/cli/install.sh | bash";
+      return `Install Grok Build with \`${install}\`, then run setup again.`;
+    }
+  }
+  if (status.reason === "not-authenticated") return "Authenticate with `grok login` (or `grok login --device-auth`), or configure XAI_API_KEY, then run setup again.";
+  return null;
+}
 function errorDiagnostic(error) {
   if (!error) return null;
   const data = error.data?.data ?? null;
@@ -28,11 +39,32 @@ function errorDiagnostic(error) {
   return { message: error.message, rpcCode: error.rpcCode ?? null, data,
     ...(usageExhausted ? { classification: "usage-balance-exhausted", guidance: "Grokの利用枠が不足しています（HTTP 402）。利用枠の回復後に再実行してください。" } : {}) };
 }
+function normalizeLanguageTag(language) {
+  if (/[^A-Za-z0-9-]/.test(String(language))) throw new Error(`Invalid BCP 47 language tag "${language}".`);
+  const tag = String(language).toLowerCase();
+  // RFC 5646 の祖父タグと、Intl が扱わない extlang・private-use を許容する。
+  const grandfathered = new Set([
+    "en-gb-oed", "i-ami", "i-bnn", "i-default", "i-enochian", "i-hak", "i-klingon",
+    "i-lux", "i-mingo", "i-navajo", "i-pwn", "i-tao", "i-tay", "i-tsu",
+    "sgn-be-fr", "sgn-be-nl", "sgn-ch-de", "art-lojban", "cel-gaulish", "no-bok",
+    "no-nyn", "zh-guoyu", "zh-hakka", "zh-min", "zh-min-nan", "zh-xiang"
+  ]);
+  const langtag = /^(?:[a-z]{2,3}(?:-[a-z]{3}){0,3}|[a-z]{4}|[a-z]{5,8})(?:-[a-z]{4})?(?:-(?:[a-z]{2}|[0-9]{3}))?(?<variants>(?:-(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3}))*)(?<extensions>(?:-[0-9a-wy-z](?:-[a-z0-9]{2,8})+)*)(?:-x(?:-[a-z0-9]{1,8})+)?$/;
+  const match = langtag.exec(tag);
+  if (!grandfathered.has(tag) && !/^x(?:-[a-z0-9]{1,8})+$/.test(tag)) {
+    if (!match) throw new Error(`Invalid BCP 47 language tag "${language}".`);
+    const variants = match.groups.variants.split("-").filter(Boolean);
+    const singletons = Array.from(match.groups.extensions.matchAll(/-([0-9a-wy-z])(?:-[a-z0-9]{2,8})+/g), (item) => item[1]);
+    if (new Set(variants).size !== variants.length || new Set(singletons).size !== singletons.length) {
+      throw new Error(`Invalid BCP 47 language tag "${language}".`);
+    }
+  }
+  try { return new Intl.Locale(language).toString(); } catch { return tag; }
+}
 function languageRule(language, focus) {
   const fields = "every human-readable field (summary, finding titles and bodies, recommendations, next steps)";
   if (language) {
-    if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/.test(language)) throw new Error(`Invalid BCP 47 language tag "${language}".`);
-    return `Write ${fields} in the language identified by the BCP 47 tag "${language}".`;
+    return `Write ${fields} in the language identified by the BCP 47 tag "${normalizeLanguageTag(language)}".`;
   }
   return focus ? `Write ${fields} in the same language as the user focus above.` : `Write ${fields} in English.`;
 }
@@ -45,7 +77,10 @@ async function main() {
     if (options["enable-review-gate"] || options["disable-review-gate"]) disabled("automatic review gate");
     if (positionals.length) throw new Error(`Unknown setup argument: ${positionals[0]}`);
     const status = await getGrokAuthStatus(path.resolve(options.cwd ?? process.cwd()), { foreground: true });
-    console.log(options.json ? JSON.stringify(status, null, 2) : status.turnStopUnconfirmed ? "Grok setup check incomplete: agent stop could not be confirmed." : status.authenticated ? `Grok is authenticated (${status.method}).` : `Grok setup check failed: ${status.detail ?? status.reason}.`);
+    const guidance = setupGuidance(status);
+    const report = { ...status, ...(guidance ? { guidance } : {}) };
+    const message = status.authenticated && !status.turnStopUnconfirmed ? `Grok is authenticated (${status.method}).` : status.authenticated ? "Grok setup check incomplete." : `Grok setup check failed: ${status.detail ?? status.reason}.`;
+    console.log(options.json ? JSON.stringify(report, null, 2) : [message, ...(status.turnStopUnconfirmed ? ["Grok agent stop could not be confirmed."] : []), ...(guidance ? [guidance] : [])].join("\n"));
     if (!status.authenticated || status.turnStopUnconfirmed) process.exitCode = 1;
     return;
   }
@@ -68,7 +103,7 @@ async function main() {
     const incomplete = parsed.parseError || result.status !== "completed" || result.stopReason !== "end_turn" || result.turnStopUnconfirmed || result.permissionDenials.length || parsed.parsed?.verdict === "incomplete";
     if (incomplete && parsed.parsed && !parsed.parseError) parsed.parsed.verdict = "incomplete";
     const diagnostic = errorDiagnostic(result.error);
-    console.log(options.json ? JSON.stringify({ ...result, error: diagnostic, result: parsed.parsed, parseError: parsed.parseError }, null, 2) : renderReviewResult(parsed, { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }));
+    console.log(options.json ? JSON.stringify({ ...result, error: diagnostic, result: parsed.parseError ? null : parsed.parsed, parseError: parsed.parseError }, null, 2) : renderReviewResult(parsed, { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }));
     if (!options.json && diagnostic?.rpcCode != null) console.error(`Grok session/prompt RPC error code: ${diagnostic.rpcCode}`);
     if (!options.json && diagnostic?.guidance) console.error(diagnostic.guidance);
     if (!options.json && result.turnStopUnconfirmed) console.error("Grok agent stop could not be confirmed.");

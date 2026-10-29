@@ -282,36 +282,10 @@ export interface AcpClientOptions {
   /** `grok` 実行ファイルのパス。未指定なら PATH 上の `grok`。 */
   grokBin?: string;
   permissionHandler?: (params: RequestPermissionParams) => RequestPermissionResponse;
-  brokerEndpoint?: string;
-  disableBroker?: boolean;
-  /** Broker-internal POSIX agent only: inherit broker group; never signal that group from this client. */
-  posixGroupMode?: "inherit";
-  reuseExistingBroker?: boolean;
-  /** Connect only to an existing broker; never probe or spawn Grok. */
-  brokerOnly?: boolean;
-  /** Limit the connection to initialization and cancellation of one recorded broker generation. */
-  cancellationOnly?: boolean;
-  cancellationGeneration?: string;
-  cancellationSessionId?: string;
-  cancellationExecutionId?: string;
-  /** Absolute deadline for a broker-only control connection. */
-  brokerDeadlineMs?: number;
-  /** 追跡 job の所有者検査と同期 effect を同じ state snapshot 内で行う。 */
-  guardOwnerEffect?: (effect: (state: any, context: any) => any) => any;
-  /** Direct owner registration must finish before any agent spawn. POSIX proof covers only its owned group. */
-  directAgentStarting?: (control: { close: () => Promise<"job-empty" | "posix-group-empty" | "never-started" | false> }) => {
-    finish: (proof: "job-empty" | "posix-group-empty" | "never-started" | false) => Promise<boolean>;
-  };
+
 }
 
 export interface AcpMethodMap {
-  // notificationSent confirms only transport enqueue; ACP has no cancellation-stop acknowledgement.
-  "broker/cancelTurn": { params: { sessionId: string; executionId: string; generation?: string }; result: {
-    reservationAccepted: boolean;
-    notificationSent: boolean;
-    executionState: "accepted" | "terminal" | "unknown" | "never-accepted";
-    generation?: string;
-  } };
   initialize: { params: InitializeParams; result: InitializeResponse };
   authenticate: { params: AuthenticateParams; result: Record<string, never> };
   "session/new": { params: SessionNewParams; result: SessionNewResponse };

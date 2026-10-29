@@ -681,40 +681,6 @@ export function collectWorkingTreeSnapshot(cwd, options = {}) {
     head: metadata.head, files: entries, state, buildDiffs };
 }
 
-export function buildWorkingTreeSnapshotDiff(before, after, options = {}) {
-  const snapshots = [before, after].map((snapshot) => {
-    if (snapshot?.version !== 1 || !/^[a-f0-9]{64}$/.test(snapshot.fingerprint ?? "") ||
-      !/^[a-f0-9]{64}$/.test(snapshot.indexFingerprint ?? "") || !Array.isArray(snapshot.files) ||
-      snapshot.files.length > MAX_REPO_LISTING_ENTRIES) throw incompleteSnapshot("invalid saved working tree snapshot.");
-    const entries = new Map();
-    let total = 0;
-    for (const entry of snapshot.files) {
-      const name = entry?.path;
-      if (typeof name !== "string" || !name || /[\\:\x00-\x1f\x7f]/.test(name) ||
-        name.split("/").some((part) => !part || part === "." || part === ".." || /^\.git$/i.test(part)) ||
-        !["100644", "100755"].includes(entry.mode) || typeof entry.content !== "string" || entries.has(name)) throw incompleteSnapshot("invalid saved snapshot entry.");
-      const bytes = Buffer.from(entry.content, "base64");
-      total += bytes.length;
-      if (bytes.toString("base64") !== entry.content || total > MAX_FINGERPRINT_TOTAL_BYTES) throw incompleteSnapshot("invalid or oversized saved snapshot bytes.");
-      entries.set(name, { mode: entry.mode, bytes });
-    }
-    return entries;
-  });
-  if (before.indexFingerprint !== after.indexFingerprint || before.head !== after.head) throw incompleteSnapshot("HEAD, index or conversion metadata changed during the turn.");
-  let context = "";
-  let contextBytes = 0;
-  for (const name of listUniqueFiles([...snapshots[0].keys()], [...snapshots[1].keys()])) {
-    const previous = snapshots[0].get(name);
-    const current = snapshots[1].get(name);
-    const patch = replacementPatch(name, previous?.bytes ?? null, current?.bytes ?? null, previous?.mode, current?.mode);
-    context += patch;
-    contextBytes += Buffer.byteLength(patch);
-    if (contextBytes > normalizeMaxInlineDiffBytes(options.maxInlineDiffBytes)) throw incompleteSnapshot("complete turn evidence exceeds the inline size limit.");
-  }
-  if (!context && before.fingerprint !== after.fingerprint) throw incompleteSnapshot("fingerprint changed without a complete physical file delta.");
-  return { fingerprint: after.fingerprint, context, complete: true };
-}
-
 export function captureWorkingTreeReviewSnapshot(cwd, options = {}) {
   const snapshot = collectWorkingTreeSnapshot(cwd);
   const { stagedDiff, unstagedDiff } = snapshot.buildDiffs();
@@ -725,10 +691,6 @@ export function captureWorkingTreeReviewSnapshot(cwd, options = {}) {
     formatSection("Untracked Files", untracked)].join("\n");
   if (Buffer.byteLength(context) > normalizeMaxInlineDiffBytes(options.maxInlineDiffBytes)) throw incompleteSnapshot("complete working tree evidence exceeds the inline size limit.");
   return { fingerprint: snapshot.fingerprint, context, complete: true, state: snapshot.state, files: snapshot.files };
-}
-
-export function getWorkingTreeFingerprint(cwd) {
-  return collectWorkingTreeSnapshot(cwd).fingerprint;
 }
 
 export function resolveReviewTarget(cwd, options = {}) {
