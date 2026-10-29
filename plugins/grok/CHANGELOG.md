@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.1.3
+
+- Removed unused legacy state management, migration code, and their dedicated tests to keep the Grok bridge minimal.
+- Stop Grok and its descendants when the caller exits on macOS or Linux, preserving the agent's original exit status.
+- Hardened read-only shell permissions and improved setup guidance, language selection, and review-result validation.
+- Consolidated duplicate unit tests while retaining current functionality and safety checks.
+
 ## 1.1.2
 
 - Run reviews, audits, and delegated tasks in fresh foreground Grok sessions without requiring plugin state migration.
