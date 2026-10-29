@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.1.1
+
+- Aligned the SessionEnd hook timeout with Codex's three-second limit to avoid a hook-loading warning.
+- Read fragmented standard input asynchronously so hooks and commands receive complete payloads.
+- Improved cancellation, task resumption, and broker cleanup after startup failures while retaining records with unverified ownership or stop evidence.
+- Improved Linux sentinel identity checks across Node.js installations and strengthened state and lease boundary checks.
+- Reduced repeated work and allocations in Git snapshots, state migration, and long-text summaries.
+
 ## 1.0.26
 
 - Added failure-only Windows process lookup diagnostics to stderr and existing job logs, separating PowerShell startup from CIM query progress.
