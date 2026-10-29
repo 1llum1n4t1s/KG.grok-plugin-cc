@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.1.2
+
+- Run reviews, audits, and delegated tasks in fresh foreground Grok sessions without requiring plugin state migration.
+- Removed automatic hooks, shared broker usage, and persistent job tracking from normal execution. Plugin status, result, cancel, and resume operations are retired; use Grok itself to resume conversations.
+- Retained read-only permission enforcement and owned-process cleanup, reporting an incomplete result when shutdown cannot be confirmed.
+- Show explicit usage-balance guidance in normal output when Grok reports HTTP 402 with an exhausted balance.
+
 ## 1.1.1
 
 - Aligned the SessionEnd hook timeout with Codex's three-second limit to avoid a hook-loading warning.
