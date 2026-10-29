@@ -33,14 +33,4 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" adversarial-review "$ARG
 ```
 
 - Give the `Bash` call a timeout of at least 600000 ms.
-- If it times out, do not rerun it. Tell the user to check `/grok:status` and `/grok:result`.
-- Capture the exact job id from `[grok] Job ID: <job-id>` and read the clean stored report:
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result "<job-id>"
-```
-- Never infer the job id from job ordering.
-
-Returning the report:
-- Write the complete `result` stdout into your reply from first line to last.
-- Reproduce it verbatim with no paraphrase, translation, reordering, shortening, extra formatting, or commentary.
-- Do not fix any issues mentioned in the review output.
+- Return completed stdout faithfully. Report failure or timeout; continue conversations in Grok itself.

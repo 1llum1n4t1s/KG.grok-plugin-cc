@@ -27,8 +27,6 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
-import { ensureBrokerSession, loadBrokerSession, reserveDirectAdmission, reserveManagedBroker, inspectManagedBrokerForCancel, authorizeBrokerChild, verifyBrokerEpoch, findExplicitManagedSession } from "./broker-lifecycle.mjs";
-import { finishDirectStart, verifyDirectStart, verifyDirectStartWithinContext } from "./direct-start-admission.mjs";
 import { spawnWindowsAgent } from "./windows-agent.mjs";
 import { JsonlFramer } from "./jsonl.mjs";
 
@@ -674,7 +672,7 @@ class SpawnedAcpClient extends AcpClientBase {
               if (!active) return undefined;
               if (called) { repeated = true; throw new Error("Direct spawn guard invoked its effect more than once."); }
               called = true;
-              verifyDirectStartWithinContext(context, this.directSpawnAdmission);
+              this.options.verifyDirectStartWithinContext(context, this.directSpawnAdmission);
               context.check();
               return spawnChild();
             });
@@ -869,6 +867,9 @@ class SpawnedAcpClient extends AcpClientBase {
 }
 
 async function connectDirectClient(cwd, options, brokerOwned = false) {
+  const { reserveDirectAdmission } = await import("./broker-lifecycle.mjs");
+  const { finishDirectStart, verifyDirectStart, verifyDirectStartWithinContext } = await import("./direct-start-admission.mjs");
+  options = { ...options, verifyDirectStartWithinContext };
   const client = new SpawnedAcpClient(cwd, options);
   let admission = null;
   try {
@@ -969,7 +970,19 @@ class BrokerAcpClient extends AcpClientBase {
 }
 
 export class GrokAcpClient {
+  static async connectForeground(cwd, options = {}) {
+    const client = new SpawnedAcpClient(cwd, options);
+    try {
+      await client.initialize();
+      return client;
+    } catch (error) {
+      try { await client.close(); } catch { client.closeStopUnconfirmed = true; }
+      if (client.closeStopUnconfirmed && error && typeof error === "object") error.turnStopUnconfirmed = true;
+      throw error;
+    }
+  }
   static async connectBrokerOwned(cwd, options = {}) {
+    const { authorizeBrokerChild, verifyBrokerEpoch } = await import("./broker-lifecycle.mjs");
     const authorization = await authorizeBrokerChild(cwd, options.brokerEndpoint);
     try {
       const env = { ...(options.env ?? process.env) };
@@ -984,6 +997,8 @@ export class GrokAcpClient {
     } catch (error) { authorization.channel.destroy(); throw error; }
   }
   static async connect(cwd, options = {}) {
+    const { ensureBrokerSession, loadBrokerSession, reserveManagedBroker, inspectManagedBrokerForCancel, findExplicitManagedSession } = await import("./broker-lifecycle.mjs");
+    const { finishDirectStart } = await import("./direct-start-admission.mjs");
     if (options.cancellationOnly && (!options.brokerOnly ||
         ![options.cancellationGeneration, options.cancellationSessionId, options.cancellationExecutionId].every(value => typeof value === "string" && value))) {
       throw new Error("Cancellation-only broker connection requires recorded generation, session, and execution identities.");

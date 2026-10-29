@@ -33,7 +33,7 @@ When to add blocks:
 How to choose prompt shape:
 - Use built-in `review` or `adversarial-review` commands when the job is reviewing local git changes. Those prompts already carry the review contract.
 - Use `task` when the task is diagnosis, planning, research, or implementation and you need to control the prompt more directly.
-- Use `task --resume-last` for follow-up instructions on the same Grok thread. Send only the delta instruction instead of restating the whole prompt unless the direction changed materially.
+- For follow-up conversations, use Grok itself; the companion starts a new session for each task.
 
 Working rules:
 - Prefer explicit prompt contracts over vague nudges.

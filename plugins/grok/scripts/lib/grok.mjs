@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 
 import { readJsonFile } from "./fs.mjs";
 import { READ_ONLY_GIT_GLOBAL_ARGS } from "./git.mjs";
@@ -36,7 +37,6 @@ import {
   createAllowAllPermissionResponder,
   createReadOnlyPermissionResponder
 } from "./acp.mjs";
-import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
 import { looksLikeVerificationCommand } from "./job-status.mjs";
 import { shortenText } from "./text.mjs";
@@ -616,6 +616,29 @@ function splitReasoningSections(buffer) {
  * 直接 `grok agent stdio` を起動する経路へ落とす（本家と同じ考え方）。
  */
 async function withGrok(cwd, handler, options = {}) {
+  if (options.foreground) {
+    const client = await GrokAcpClient.connectForeground(cwd, options);
+    let result, failure, failed = false;
+    try { result = await handler(client); }
+    catch (error) { failed = true; failure = error; }
+    let closeError;
+    try { await client.close(); } catch (error) { closeError = error; }
+    if (client.closeStopUnconfirmed || closeError) {
+      if (failed) {
+        if (failure && typeof failure === "object") failure.turnStopUnconfirmed = true;
+        else failure = Object.assign(new Error(String(failure)), { turnStopUnconfirmed: true });
+      } else if (closeError) {
+        closeError.turnStopUnconfirmed = true;
+      } else if (result && typeof result === "object") {
+        result.turnStopUnconfirmed = true;
+      } else {
+        throw Object.assign(new Error("Direct Grok agent stop could not be confirmed."), { turnStopUnconfirmed: true });
+      }
+    }
+    if (failed) throw failure;
+    if (closeError) throw closeError;
+    return result;
+  }
   // 共有ブローカーを使わず、毎回自前で grok を起動する逃げ道。
   // ブローカー由来の不具合を切り分けるときと、プロセスの後始末を
   // 呼び出し側で完結させたいとき（統合テスト）に使う。
@@ -1204,6 +1227,7 @@ export function getGrokAvailability(cwd, env = process.env) {
 }
 
 export function getSessionRuntimeStatus(env = process.env, cwd = process.cwd()) {
+  const { loadBrokerSession } = createRequire(import.meta.url)("./broker-lifecycle.mjs");
   const storedSession = env[BROKER_ENDPOINT_ENV] ? null : loadBrokerSession(cwd);
   const endpoint = env[BROKER_ENDPOINT_ENV] ?? storedSession?.endpoint ?? null;
   let brokerActive = Boolean(endpoint);
@@ -1264,10 +1288,11 @@ export async function getGrokAuthStatus(cwd, options = {}) {
           };
         }
       },
-      { grokBin: availability.bin, env }
+      { grokBin: availability.bin, env, foreground: options.foreground }
     );
   } catch (error) {
-    return { authenticated: false, reason: "connect-failed", detail: error?.message ?? String(error), availability };
+    return { authenticated: false, reason: "connect-failed", detail: error?.message ?? String(error), availability,
+      ...(error?.turnStopUnconfirmed ? { turnStopUnconfirmed: true } : {}) };
   }
 }
 
@@ -1412,7 +1437,7 @@ export async function runGrokReview(cwd, options = {}) {
         stderr: cleanGrokStderr(client.stderr)
       };
     },
-    { grokBin: availability.bin, env, readOnly: true, requireScopedCancellation: true,
+    { grokBin: availability.bin, env, readOnly: true, foreground: options.foreground, requireScopedCancellation: true,
       prepareConnection: options.enqueuePrompt?.prepareConnection,
       connectionEstablished: options.enqueuePrompt?.connectionEstablished,
       directAgentStarting: options.enqueuePrompt?.directAgentStarting,
@@ -1598,7 +1623,7 @@ export async function runGrokTurn(cwd, options = {}) {
         commandExecutions: turnState.commandExecutions
       };
     },
-    { grokBin: availability.bin, env, readOnly: Boolean(options.readOnly), resumeSessionId: options.resumeSessionId,
+    { grokBin: availability.bin, env, readOnly: Boolean(options.readOnly), foreground: options.foreground, resumeSessionId: options.resumeSessionId,
       resumeBrokerGeneration: options.resumeBrokerGeneration, resumeExecutionId: options.resumeExecutionId,
       requireManagedBrokerForResume: options.requireManagedBrokerForResume,
       requireScopedCancellation: true, prepareConnection: options.enqueuePrompt?.prepareConnection,

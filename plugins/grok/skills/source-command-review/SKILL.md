@@ -12,9 +12,6 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
 - Follow the shared foreground execution contract. Reject `--background`; accept legacy `--wait` only as a no-op.
 - Unless supplied, add `--language` for the conversation language before the focus text.
 - Preserve the user's target flags and focus text exactly apart from a removed legacy `--wait`.
-- Run `node <plugin-root>/scripts/grok-companion.mjs review --json <arguments>`.
+- Run `node <plugin-root>/scripts/grok-companion.mjs review <arguments>`.
 - Allow at least 600 seconds and wait silently on the same foreground process until it completes.
-- After any completed run, run the companion's `result <job-id>` command and reproduce the stored
-  report verbatim, without commentary before or after it.
-- If the call times out, do not rerun it; direct the user to `grok:source-command-status` and
-  `grok:source-command-result`.
+- Return completed stdout faithfully. Report failure or timeout; continue conversations in Grok itself.

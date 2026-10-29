@@ -33,14 +33,4 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" review "$ARGUMENTS"
 ```
 
 - A review can run longer than `Bash`'s default timeout, so give the call a timeout of at least 600000 ms.
-- If the call times out, do not rerun it. Tell the user to check `/grok:status` and read the stored output with `/grok:result`.
-- Do not treat the call's merged stdout and stderr as the report. Capture the exact job id from the `[grok] Job ID: <job-id>` progress line, then read the clean stored report:
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" result "<job-id>"
-```
-- Never infer the job id from whichever job happened to finish most recently.
-
-Returning the report:
-- Write the complete `result` stdout into your reply from first line to last.
-- Reproduce it verbatim: do not paraphrase, translate, reorder, shorten, or wrap it in extra formatting, and add no commentary before or after it.
-- Do not fix any issues mentioned in the review output.
+- Return completed stdout faithfully. Report failure or timeout; continue conversations in Grok itself.
