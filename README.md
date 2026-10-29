@@ -31,11 +31,15 @@ Claude Code exposes `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `
 
 For example, use `/grok:review --scope working-tree` to review local changes, `/grok:audit authentication` to focus an audit, or `/grok:rescue <task>` to delegate a task. Review also accepts `--base <ref>` and `--language <BCP 47 tag>`. Run `/grok:setup` when installation or authentication fails; follow its reported error and Grok’s login guidance.
 
-Each invocation runs a new Grok session in the foreground over a direct ACP connection. The companion does not maintain a broker, job ledger, automatic review hook, or migration step for these commands. Results are returned by the invocation itself. Use Grok's own interface to continue a conversation. The former status, result, cancel, state-lock, and task-resume commands are no longer supported by the companion; old internal libraries remain as historical compatibility and test references, not part of the normal workflow.
+Each invocation runs a new Grok session in the foreground and returns its result directly. Use Grok's own interface to continue a conversation. Automatic reviews and the former status, result, cancel, state-lock, and task-resume commands are no longer supported by the companion.
 
 The companion starts the locally installed Grok CLI. Review and read-only tasks retain workspace and permission restrictions; explicitly requested write tasks can modify the workspace. External access and authentication are handled by Grok Build. Review Grok's output and changes before relying on them.
 
-For development, use `pnpm install --frozen-lockfile`, then `pnpm test` and `pnpm build`. See [DESIGN.md](DESIGN.md) for the runtime structure.
+## Troubleshooting
+
+If an invocation reports HTTP 402 with `usage balance exhausted`, Grok Build's usage balance is exhausted. Retry after that balance recovers. A timeout, permission denial, incomplete review, or unconfirmed agent stop is a failed invocation; do not treat partial output as a completed review or task.
+
+For development commands and validation, see [AGENTS.md](AGENTS.md). Runtime structure and boundaries are described in [DESIGN.md](DESIGN.md).
 
 <a id="japanese"></a>
 # Claude Code・Codex 向け Grok プラグイン
@@ -68,8 +72,12 @@ Claude Code では `/grok:review`、`/grok:adversarial-review`、`/grok:audit`�
 
 例えば `/grok:review --scope working-tree` はローカル変更をレビューし、`/grok:audit authentication` は認証に対象を絞り、`/grok:rescue <task>` はタスクを委任します。レビューには `--base <ref>` と `--language <BCP 47 tag>` も指定できます。起動や認証に失敗したら `/grok:setup` を実行し、表示されたエラーと Grok のログイン案内を確認してください。
 
-各実行は直接 ACP 接続で新しい Grok セッションを前景で開始し、その結果を返します。通常コマンドに独自 broker、ジョブ台帳、自動レビュー hook、移行手順はありません。会話の続きは Grok 本体で行ってください。旧 status・result・cancel・state-lock・タスク再開コマンドは利用できません。旧内部ライブラリは履歴上の互換性とテストの参考として残し、通常の利用経路では使いません。
+各実行は新しい Grok セッションを前景で開始し、その結果を直接返します。会話の続きは Grok 本体で行ってください。自動レビューと旧 status・result・cancel・state-lock・タスク再開コマンドは利用できません。
 
 ローカルにインストールされた Grok CLI を起動します。レビューと読み取り専用タスクではワークスペースと権限の制限を維持し、明示的に編集を依頼したタスクはワークスペースを変更できます。外部アクセスと認証は Grok Build が担います。結果と変更を確認してから利用してください。
 
-開発時は `pnpm install --frozen-lockfile` の後に `pnpm test` と `pnpm build` を実行します。構造は [DESIGN.md](DESIGN.md) を参照してください。
+## トラブルシュート
+
+HTTP 402 と `usage balance exhausted` が表示された場合は、Grok Build の利用枠が不足しています。利用枠の回復後に再実行してください。タイムアウト、権限拒否、不完全なレビュー、agent の終了未確認は実行失敗です。途中の出力を完了したレビューやタスクとして扱わないでください。
+
+開発用コマンドと検証手順は [AGENTS.md](AGENTS.md)、実行時の構造と境界は [DESIGN.md](DESIGN.md) を参照してください。
