@@ -21,6 +21,8 @@ Claude Code と Codex から既存の Grok Build CLI を呼び出す薄い橋渡
 
 各 review、adversarial-review、audit、task は一度だけ前景で新しい Grok ACP セッションを開始する。結果はその実行から直接返す。setup は認証状態を確認する。独自 broker、ジョブ台帳、移行、自動 hook は通常経路に含めない。会話再開は Grok 本体が担う。
 
+POSIX では専用プロセスグループの supervisor が Grok の標準入出力を中継せず継承させ、親だけが保持する監視パイプの EOF で所有グループを停止する。親が強制終了しても supervisor は自身が leader として生きているグループに停止信号を送り、期限後は強制終了する。通常の終了確認もグループと標準入出力の終了を待つ。
+
 ホストの入口から `grok-companion.mjs` を呼び、`grok.mjs` の `foreground: true` を経て `GrokAcpClient.connectForeground` でローカルの `grok agent stdio` に接続する。ACP の初期化、新規セッション、プロンプト送信、結果受信、agent の終了を同じ呼出しが担当する。setup は新規セッションを作成して認証を確かめ、タスクのプロンプトは送らない。X 検索と rescue は `task` を利用する。
 
 レビューでは `git.mjs` が差分またはリポジトリの対象情報を集め、`prompts/` のテンプレートと schema を載せて送信する。正常に終了した応答の JSON が壊れている場合だけ、同じセッションで一度再出力を求め、初回の権限拒否記録は保持する。task の入力は `--prompt-file`、位置引数、パイプ標準入力の順で選ぶ。JSON 出力ではレビューの原文を `reviewText`、タスクの最終応答を `finalMessage` に含め、通常出力ではレビューを描画し、タスクの応答を直接表示する。
@@ -34,8 +36,4 @@ Claude Code と Codex から既存の Grok Build CLI を呼び出す薄い橋渡
 - 結果受信後も agent を閉じ、終了未確認は `turnStopUnconfirmed` と非ゼロ終了コードで伝える。setup も終了未確認を成功扱いしない。
 - RPC エラーはコードとデータを JSON 出力へ含める。HTTP 402 と `usage balance exhausted` が一致するときだけ利用枠不足に分類し、回復後の再実行を案内する。他の課金・接続エラーを同じ理由に決め付けない。
 
-## 旧内部実装との境界
-
-旧 broker、状態管理、移行、hook 等の内部実装とテストは残るが、公開された通常実行から呼び出さない。`GrokAcpClient.connect` などの旧接続 API と、CLI が使用する `connectForeground` は別経路である。旧データの移行は行わない。
-
-利用方法は [README.md](README.md)、Codex 入口の実行契約は [codex-runtime.md](plugins/grok/references/codex-runtime.md)、変更時の検証手順と旧内部実装のテスト範囲は [AGENTS.md](AGENTS.md) を参照する。
+利用方法は [README.md](README.md)、Codex 入口の実行契約は [codex-runtime.md](plugins/grok/references/codex-runtime.md)、変更時の検証手順は [AGENTS.md](AGENTS.md) を参照する。
