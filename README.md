@@ -13,9 +13,10 @@ reach it from the workflow they are already in.
 State writes and locked state snapshots require explicit offline migration, even for a new state
 directory. Supported local filesystems are Windows NTFS fixed volumes, macOS APFS, and Linux
 ext4/tmpfs, with the OS utilities and host identity described in [setup and migration](#groksetup).
-Unknown or unsupported filesystems and missing prerequisites are refused. Plain state reads can
-still inspect saved data, without a transactional consistency guarantee. Git worktree snapshots and
-the DPAPI stop gate retain their separate Windows-only limits.
+Unknown or unsupported filesystems and missing prerequisites are refused. Linux also requires
+migration before reading state, even when no state file exists yet. Direct reads on other platforms
+do not guarantee transactional consistency. Git worktree snapshots and the DPAPI stop gate retain
+their separate Windows-only limits.
 
 It is a fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), retargeted
 from the OpenAI Codex CLI to xAI's Grok Build CLI. See [NOTICE](./NOTICE) for attribution and a
@@ -290,7 +291,10 @@ set of eyes on it."
 Plugin-managed resumption requires the target session's terminal state to have been confirmed in
 the same broker generation that will resume it. After a broker restart, or for direct-mode and
 older-version history without that confirmation, `--resume` is rejected. A saved session ID or
-completed job record alone is insufficient; start a fresh task when resumption cannot be verified.
+completed job record alone is insufficient. The plugin also rechecks related job records before
+loading the session and sending the next prompt; inconsistent or pending records block resumption.
+If Grok does not support session loading, resumption fails instead of starting a fresh session.
+Start a fresh task explicitly when resumption cannot be verified.
 
 Unlike the review commands, `/grok:rescue` runs write-capable by default, so Grok can edit files
 while it works. Say so in the request when you only want diagnosis — "read-only", "just
@@ -338,9 +342,9 @@ Prints the stored final output of a finished job.
 /grok:result <job-id>
 ```
 
-Each result includes the Grok session ID and the `grok --resume <id>` command, so you can pick the
-conversation back up in Grok's own TUI. That external command is not evidence that plugin-managed
-resumption is safe; `/grok:rescue --resume` still requires terminal confirmation in the same broker generation.
+When a Grok session ID is available, the result includes it and the `grok --resume <id>` command
+to pick the conversation back up in Grok's own TUI. That external command is not evidence that
+plugin-managed resumption is safe; see the requirements under [`/grok:rescue`](#grokrescue).
 
 ### `/grok:cancel`
 
@@ -357,9 +361,6 @@ If the plugin cannot confirm that the process stopped, the job stays pending in 
 Retry `/grok:cancel <job-id>`; results and task resumption remain unavailable until cancellation completes.
 Active and pending jobs remain tracked even as finished history grows. A cancellation-log write failure
 is reported as a warning and does not prevent process termination.
-The current runtime refuses state writes until explicit migration; it does not acquire or reclaim a
-legacy file lock. Older runtimes still have non-atomic ownership-check/removal races and no automatic
-dead-lock recovery. Stop every old runtime before migration; existing legacy lock files are left untouched.
 Cancellation requires worker-stop confirmation. Except for jobs confirmed unsent before connection
 preparation, broker jobs also require an execution-scoped broker cancellation reservation and confirmed turn
 termination. Direct jobs use the cooperative confirmation described below; older jobs without stop evidence can remain
@@ -367,9 +368,6 @@ termination-pending even after the worker stops; retrying alone cannot supply th
 They are not reported as cancelled, and their results remain unavailable.
 If startup or prompt transmission is uncertain, the job remains termination-pending even if the
 worker exits.
-Even completed history cannot be resumed through the plugin unless the target session has confirmed
-terminal state in the same broker generation. Broker restart, direct-mode history, and unconfirmed
-older history therefore block resumption independently of the saved job status.
 Windows cancellation stops the tracked worker without a tree-wide kill to protect a shared broker.
 Windows checks the full-precision start time and stops the worker through the same process handle.
 Older CIM-based identifiers cannot be verified this way, so their cancellation remains pending.
@@ -407,6 +405,9 @@ privacy boundaries, and interpretation, and [AGENTS.md](AGENTS.md) for developme
 ### `/grok:setup`
 
 Checks the local install and optionally toggles the stop-time review gate.
+On Linux and macOS, when the migration barrier is absent, setup still reports installation and
+authentication checks, marks the runtime not ready, and shows the broker and gate as `unknown`
+with migration instructions. Migrate before changing gate settings. Other invalid state remains an error.
 
 ```bash
 /grok:setup
@@ -662,7 +663,7 @@ Codex のワークフローからそのまま呼び出したい方を対象と�
 状態の書込みと lock 付き状態 snapshot は、新しい状態ディレクトリでも旧 runtime 停止後の明示移行が必要です。
 対応するローカル FS は Windows の NTFS 固定 volume、macOS の APFS、Linux の ext4/tmpfs です。
 後述の `/grok:setup` 節にある OS utility と host 識別情報が必要で、未対応・判定不能や前提不足は拒否します。
-保存済み状態の直接読取は可能ですが、transaction としての一貫性は保証しません。
+Linux では状態ファイルがまだない場合も、読取り前に移行が必要です。他の OS の直接読取も、transaction としての一貫性は保証しません。
 Git 作業ツリー snapshot と DPAPI 終了時ゲートは、独立した Windows 限定の制限を維持します。
 
 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) をフォークし、OpenAI Codex
@@ -932,7 +933,9 @@ statusコマンドから確認できます。Claude Codeでは従来どおり、
 
 プラグイン経由の再開は、対象セッションのターン終了が、再開を担うブローカーと同じ世代で確認済みの場合だけ許可します。
 ブローカーの再起動後や、終了確認のない直接起動・旧版の履歴では `--resume` を拒否します。
-保存済みセッション ID やジョブの完了記録だけでは証明になりません。安全に再開できなければ、新規タスクを開始してください。
+保存済みセッション ID やジョブの完了記録だけでは証明になりません。セッション読込みと次のプロンプト送信前にも
+関連ジョブを照合し、不整合や保留中の記録があれば拒否します。Grok がセッション読込みに対応しない場合も、
+新規セッションへ自動で切り替えません。安全に再開できなければ、明示的に新規タスクを開始してください。
 
 レビューコマンドとは異なり、`/grok:rescue` は既定で書き込み可能な状態で実行されるため、Grok は
 作業中にファイルを編集できます。診断だけが必要な場合は、依頼文に `read-only`、`just investigate`、
@@ -982,9 +985,9 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 /grok:result <job-id>
 ```
 
-各結果には Grok セッション ID と `grok --resume <id>` コマンドが含まれるため、Grok 独自の TUI で
+Grok セッション ID を保存できた結果には、その ID と `grok --resume <id>` コマンドを表示し、Grok 独自の TUI で
 会話を再開できます。この外部コマンドの表示は、プラグイン経由の安全な再開の証明にはなりません。
-`/grok:rescue --resume` は、同じブローカー世代でのターン終了確認を別途必要とします。
+プラグイン経由の再開条件は [`/grok:rescue`](#grokrescue-1) を参照してください。
 
 ### `/grok:cancel`
 
@@ -1002,16 +1005,11 @@ Grok Build を介して X（Twitter）の投稿を検索し、投稿者のハン
 `/grok:cancel <job-id>` を再実行してください。キャンセルが完了するまで、結果の取得とタスクの再開はできません。
 終了済みの履歴が増えても、実行中・保留中のジョブは追跡を維持します。キャンセル時のログ書き込みに
 失敗した場合は警告を表示し、プロセスの停止処理を続けます。
-現行 runtime は明示移行まで状態の書込みを拒否し、旧 file lock の取得・回収は行いません。
-旧 runtime には所有者確認と削除の間の競合や死者 lock の自動回復未対応が残るため、移行前にすべて停止してください。
-既存の旧 lock ファイルは削除せず保持します。
 キャンセル確定には、ワーカーの停止確認が必要です。接続準備前に未送信と確認できるジョブを除き、
 ブローカージョブでは実行 ID に対応する取消予約とターン終了の確認も必要です。
 直接起動ジョブは後述の協調停止で確認します。停止の証拠がない旧ジョブは、ワーカーが止まっても保留に残り得ます。
 再試行だけで不足する証拠を補えるとは限らず、取消済みとは表示せず、結果の取得も許可しません。
 起動準備中やプロンプト送信の成否が不明な場合は、ワーカー終了後もキャンセル保留を維持します。
-完了履歴があっても、対象セッションのターン終了を同じブローカー世代で確認できなければ、プラグインからは再開できません。
-ブローカー再起動後、直接起動の履歴、未確認の旧版履歴は、保存済みジョブの状態とは別に再開を拒否します。
 Windows のキャンセルは共有ブローカーを保護するため、追跡ワーカーだけを停止し、プロセスツリー全体を終了しません。
 Windows では同じプロセスハンドルで高精度の開始時刻を照合して停止します。旧 CIM 識別子は
 この方法で確認できないため、キャンセルを保留します。POSIX では追跡 worker に数値 PID で signal を送らず、自然終了を確認します。
@@ -1042,6 +1040,9 @@ Windows でプロセス照会に失敗すると、stderr と、利用可能な�
 ### `/grok:setup`
 
 ローカル環境のインストール状態を確認し、必要に応じて終了時のレビューゲートを切り替えます。
+Linux と macOS で移行用 barrier がまだない場合も、インストールと認証の確認結果は表示します。
+この場合は実行準備が未完了となり、broker とゲート設定を `unknown` として移行手順を案内します。
+ゲート設定の変更は移行後に行ってください。不正な状態など、それ以外のエラーは引き続き拒否します。
 
 ```bash
 /grok:setup

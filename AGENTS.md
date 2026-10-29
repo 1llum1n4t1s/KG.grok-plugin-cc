@@ -14,9 +14,11 @@
 - 実装変更後は CI と同じ `pnpm test`、`pnpm build` を実行する。`build` は `tsconfig.acp.json` で指定した配布ランタイムとバージョン管理スクリプトの型検査・未使用定義の検出で、成果物を生成しない。
 - manifest の整合性は `pnpm check-version` で確認する。
 - フックやホスト連携を変えるときは `tests/hooks.test.mjs`、`tests/commands.test.mjs`、`tests/coexistence.test.mjs` の関連ケースを確認する。テストの fake Grok と一時ディレクトリを使って、実アカウントへの実行と分離する。一時領域は `tests/helpers.mjs` と同様にリポジトリ外へ置き、Git 基点の検出がテスト対象へ干渉しないようにする。
+- 標準入力の読取りを変えるときは `scripts/lib/fs.mjs` の非同期 API と全呼出し元の `await` を照合し、フックの分割入力と `tests/runtime.test.mjs` のパイプ入力・プロンプト優先順位を確認する。SessionEnd の timeout は両ホスト共通の3秒枠に収める。
 - Grok の起動環境や ACP 接続・権限処理を変えるときは `tests/grok-env.test.mjs`、`tests/acp.test.mjs`、`tests/runtime.test.mjs` の関連ケースを確認する。JSONL 受信やブローカーの接続・セッション所有権を変えるときは `tests/acp-transport-e2e.test.mjs` で直接起動とブローカー経由の巨大・分割応答、受信中のキャンセル、不正 JSON 後の終了、切断後の遅延要求とセッション再利用も確認する。
 - 文書だけの変更は参照先、実装との整合性、`git diff --check` を確認する。利用者向けの変更は README の英語・日本語をそろえる。
 - 起動受付・世代・取消を変えるときは `tests/broker-admission-async-e2e.test.mjs`、`tests/direct-admission-e2e.test.mjs`、`tests/cancel-repair-e2e.test.mjs` を照合し、Windows の agent 所有権は `tests/windows-agent-owned-e2e.test.mjs` でも確認する。
+- タスク再開を変えるときは `tests/cancel-repair-e2e.test.mjs` の索引と詳細の矛盾・並行更新・選択した実行 ID と broker 世代の照合、`tests/acp-transport-e2e.test.mjs` の欠落・未知・不正型の終了理由、`tests/runtime.test.mjs` の再開経路を確認する。再開時の再照合と代替起動の境界は [DESIGN.md](DESIGN.md#状態保存と排他) を参照する。
 - state lock・移行・lease・履歴整理を変えるときは `tests/state-lock-*.test.mjs`、`tests/posix-state-lock-e2e.test.mjs` と該当 OS の `tests/linux-*.test.mjs`、`tests/darwin-*.test.mjs` を照合する。実機専用ケースと模擬ケースを区別し、Ubuntu の CI 成功を Windows/macOS の実機確認の代わりにしない。保存形式・移行と未統合処理の境界は [DESIGN.md](DESIGN.md#状態保存と排他) を参照する。
 - 作業ツリー snapshot や終了時ゲートの基準取得を変えるときは `tests/git-windows-snapshot-reader.test.mjs`、`tests/git-worktree-snapshot-memory.test.mjs`、`tests/stop-gate-snapshot*.test.mjs` の関連ケースを確認する。
 
