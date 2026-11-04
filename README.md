@@ -5,11 +5,11 @@
 
 Run Grok Build from Claude Code or Codex for code reviews, repository audits, X searches, and delegated tasks. This project is a fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc); see [NOTICE](NOTICE).
 
-For source builds and contributing, see [Development](CONTRIBUTING.md#english).
-
 ## Requirements and installation
 
 Install [Grok Build](https://x.ai/cli), sign in or configure its API key, and install Node.js 22 or later and Git 2.45 or later (or a Git build with backported `--no-lazy-fetch`). Grok usage is charged to the account or API key used. Grok must support `grok agent stdio`; update it with `grok update` if needed.
+
+On Windows, the plugin includes native helpers for ia32, x64, and arm64 Node.js. No Rust or MSVC installation is required.
 
 In Claude Code:
 
@@ -41,18 +41,18 @@ The companion starts the locally installed Grok CLI. Review and read-only tasks 
 
 If an invocation reports HTTP 402 with `usage balance exhausted`, Grok Build's usage balance is exhausted. Retry after that balance recovers. A timeout, permission denial, incomplete review, or unconfirmed agent stop is a failed invocation; do not treat partial output as a completed review or task.
 
-For development commands and validation, see [AGENTS.md](AGENTS.md). Runtime structure and boundaries are described in [DESIGN.md](DESIGN.md).
+For source builds, development commands, and validation, see [Development](CONTRIBUTING.md#english). Runtime structure and boundaries are described in [DESIGN.md](DESIGN.md).
 
 <a id="japanese"></a>
 # Claude Code・Codex 向け Grok プラグイン
 
 Claude Code や Codex から Grok Build を使い、コードレビュー、リポジトリ監査、X 検索、タスクの委任を行えます。本プロジェクトは [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) のフォークです。詳細は [NOTICE](NOTICE) を参照してください。
 
-ソースからのビルドと開発手順は [開発ガイド](CONTRIBUTING.md#日本語) を参照してください。
-
 ## 必要環境とインストール
 
 [Grok Build](https://x.ai/cli) をインストールし、ログインまたは API キーを設定してください。Node.js 22 以降、Git 2.45 以降（または `--no-lazy-fetch` のバックポート版）が必要です。Grok の利用は使用するアカウントまたは API キーに課金されます。`grok agent stdio` が使えない場合は `grok update` で更新してください。
+
+Windows では ia32・x64・arm64 の Node.js に対応するネイティブ helper を同梱しています。Rust や MSVC のインストールは不要です。
 
 Claude Code では次を実行します。
 
@@ -84,4 +84,4 @@ Claude Code では `/grok:review`、`/grok:adversarial-review`、`/grok:audit`�
 
 HTTP 402 と `usage balance exhausted` が表示された場合は、Grok Build の利用枠が不足しています。利用枠の回復後に再実行してください。タイムアウト、権限拒否、不完全なレビュー、agent の終了未確認は実行失敗です。途中の出力を完了したレビューやタスクとして扱わないでください。
 
-開発用コマンドと検証手順は [AGENTS.md](AGENTS.md)、実行時の構造と境界は [DESIGN.md](DESIGN.md) を参照してください。
+ソースからのビルド、開発用コマンドと検証手順は [開発ガイド](CONTRIBUTING.md#日本語)、実行時の構造と境界は [DESIGN.md](DESIGN.md) を参照してください。

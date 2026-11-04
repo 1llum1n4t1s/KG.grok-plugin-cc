@@ -21,7 +21,7 @@ Node.js ランタイム、管理スクリプト、テストの正本は TypeScri
 | `plugins/grok/prompts/`、`plugins/grok/schemas/` | レビュープロンプトと構造化結果の契約 |
 | `tests/` | fake Grok によるランタイムとホスト入口の検証 |
 
-Windows 配布生成は VS 18.11.12328.437、既定 VC toolset 14.51.36231、SDK 10.0.26100.0 と固定 Rust flags を使用する。ビルドスクリプトは版の相違・必要ツールの不足を拒否し、CI は `windows-2025-vs2026` で配布 exe を上書きせず再生成物との SHA-256 一致を確認する。固定環境の更新時は [CONTRIBUTING.md](CONTRIBUTING.md) に従って全アーキテクチャを再生成する。
+Windows 配布生成はツールチェーンと Rust flags を固定し、CI で同梱 exe と再生成物の SHA-256 一致を確認する。利用者環境でビルドしない配布方式でも、ソースから同一バイナリを再現できるようにするための境界である。固定版と再生成手順は [CONTRIBUTING.md](CONTRIBUTING.md) を参照する。
 
 ## 実行経路とデータフロー
 
@@ -29,9 +29,13 @@ Windows 配布生成は VS 18.11.12328.437、既定 VC toolset 14.51.36231、SDK
 
 POSIX では専用プロセスグループの supervisor が Grok の標準入出力を中継せず継承させ、親だけが保持する監視パイプの EOF で所有グループを停止する。親が強制終了しても supervisor は自身が leader として生きているグループに停止信号を送り、期限後は強制終了する。通常の終了確認もグループと標準入出力の終了を待つ。
 
+Windows では `windows-agent.mjs` が Node.js の `process.arch` に対応する同梱 helper を選び、専用 Job の supervisor を起動する。helper は親 PID と作成 FILETIME、制御用名前付きパイプの所有者を照合し、Grok の起動プロセスを Job に所属させた停止状態で作成してから再開する。親の終了・制御接続の切断時は所有 Job を停止し、helper 自体の終了時も kill-on-close で子孫を回収する。Node.js 側は nonce が一致する制御接続から同じ Job の `ActiveProcesses=0` を示す停止通知を受けた場合だけ終了確認を成立させる。PID の不在や helper の終了だけでは成功扱いしない。
+
 ホストの入口から `grok-companion.mjs` を呼び、`grok.mjs` の `foreground: true` を経て `GrokAcpClient.connectForeground` でローカルの `grok agent stdio` に接続する。ACP の初期化、新規セッション、プロンプト送信、結果受信、agent の終了を同じ呼出しが担当する。setup は新規セッションを作成して認証を確かめ、タスクのプロンプトは送らない。X 検索と rescue は `task` を利用する。
 
 レビューでは `git.mjs` が差分またはリポジトリの対象情報を集め、`prompts/` のテンプレートと schema を載せて送信する。正常に終了した応答の JSON が壊れている場合だけ、同じセッションで一度再出力を求め、初回の権限拒否記録は保持する。task の入力は `--prompt-file`、位置引数、パイプ標準入力の順で選ぶ。JSON 出力ではレビューの原文を `reviewText`、タスクの最終応答を `finalMessage` に含め、通常出力ではレビューを描画し、タスクの応答を直接表示する。
+
+Windows の作業ツリースナップショットでは、同梱 helper の `git-snapshot` が固定ローカルドライブのルートから各成分をハンドル相対で開き、reparse point や曖昧なパスを拒否する。ディレクトリとファイルのハンドルは応答の出力完了まで保持し、パスの差し替えによる境界外の読取りを防ぐ。`git.mjs` は応答の版・対象パス・内容・容量を検証し、安全な完全スナップショットを確立できなければ失敗させる。
 
 この境界はプラグイン側の永続ジョブ管理と Grok 本体の会話管理を二重化しないために置く。旧状態は読み取らず、`hooks/hooks.json` の登録も空である。旧 status・result・cancel・state-lock・task-resume-candidate と再開・背景実行の指定は拒否し、旧 `--wait` は待機ジョブを作らない。
 
