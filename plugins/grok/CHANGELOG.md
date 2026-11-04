@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.1.4
+
+- Replaced Windows PowerShell, CIM, and batch helpers with native Rust helpers, including prebuilt ia32, x64, and arm64 binaries so users do not need Rust or MSVC.
+- Kept Node.js 22 or later support while maintaining the shared runtime in TypeScript and shipping ready-to-run JavaScript.
+- Hardened descendant-process cleanup after abnormal termination while preserving process ownership and Git safety boundaries.
+
 ## 1.1.3
 
 - Removed unused legacy state management, migration code, and their dedicated tests to keep the Grok bridge minimal.
