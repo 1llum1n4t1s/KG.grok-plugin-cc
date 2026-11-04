@@ -1,11 +1,12 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "allowJs": true,
-    "checkJs": true,
-    "noEmit": true,
+    "rootDir": ".",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmitOnError": true,
+    "newLine": "lf",
+    "useDefineForClassFields": false,
     "noUnusedLocals": true,
     "strict": false,
     "noImplicitAny": false,
@@ -14,8 +15,9 @@
     "types": ["node"]
   },
   "include": [
-    "plugins/grok/scripts/**/*.mjs",
-    "scripts/**/*.mjs",
+    "plugins/grok/scripts/**/*.mts",
+    "scripts/**/*.mts",
+    "tests/**/*.mts",
     "plugins/grok/scripts/lib/acp-protocol.d.ts"
   ]
 }

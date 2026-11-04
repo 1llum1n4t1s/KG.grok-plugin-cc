@@ -8,15 +8,21 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "packageManager": "pnpm@11.26.0",
+  "packageManager": "pnpm@12.16.1",
+  "volta": {
+    "node": "26.13.0"
+  },
   "scripts": {
     "bump-version": "node scripts/bump-version.mjs",
     "check-version": "node scripts/bump-version.mjs --check",
     "build": "tsc -p tsconfig.acp.json",
-    "test": "node --test --test-concurrency=4 tests/*.test.mjs"
+    "build:native": "node scripts/build-windows-helper.mjs",
+    "check:native": "node scripts/build-windows-helper.mjs --check",
+    "check-generated": "node scripts/check-generated.mjs",
+    "test": "node scripts/run-tests.mjs"
   },
   "devDependencies": {
-    "@types/node": "^26.6.5",
+    "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
   }
 }

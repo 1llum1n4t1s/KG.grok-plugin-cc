@@ -17,8 +17,8 @@ export interface ClientInfo {
 }
 
 export interface FileSystemCapability {
-  readTextFile: boolean;
-  writeTextFile: boolean;
+  readTextFile?: boolean;
+  writeTextFile?: boolean;
 }
 
 export interface ClientCapabilities {

@@ -148,6 +148,7 @@ vite.config.ts.timestamp-*
 
 output/
 plugins/grok/.generated/
+plugins/grok/native/target/
 
 # wrangler のローカルキャッシュ・state（アカウント情報を含む）
 .wrangler/

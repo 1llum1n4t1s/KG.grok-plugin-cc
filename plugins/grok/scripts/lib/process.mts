@@ -1,0 +1,168 @@
+import type { SpawnSyncOptionsWithStringEncoding } from "node:child_process";
+export interface ProcessOptions extends Omit<SpawnSyncOptionsWithStringEncoding, "encoding"> {
+  processLookupDeadline?: number;
+  onProcessLookupDiagnostic?: (record: unknown) => void;
+  runCommandImpl?: typeof runCommand;
+}
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import process from "node:process";
+import { performance } from "node:perf_hooks";
+import { windowsHelperPath } from "./windows-helper.mjs";
+
+// supervisor と同じ 10 秒を上限とし、呼出し元の早い期限を優先する。
+const PROCESS_LOOKUP_TIMEOUT_MS = 10000;
+const WINDOWS_START_KEY_PREFIX = "win32-filetime:";
+
+function reportProcessLookupFailure(options, lookup, startedAt, begin, timeoutMs, result, error) {
+  const code = error?.code;
+  const errorCode = typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : null;
+  const signal = typeof result?.signal === "string" && /^[A-Z0-9]{1,16}$/.test(result.signal) ? result.signal : null;
+  const record = {
+    event: "process-lookup", ...lookup, parentPid: process.pid, startedAt,
+    timeoutMs, elapsedMs: Math.round((performance.now() - begin) * 10) / 10,
+    outcome: errorCode === "ETIMEDOUT" ? "timeout" : error ? "error" : signal ? "signal" : "exit",
+    status: Number.isInteger(result?.status) ? result.status : null, signal, errorCode,
+    lastPhase: result ? "helper-returned" : "helper-not-returned"
+  };
+  // 診断用の保存失敗で、同一性の判定やキャンセルの結果を変えない。
+  try { options.onProcessLookupDiagnostic?.(record); } catch { /* stderr への診断は続ける。 */ }
+  // Stream.write の非同期 EPIPE で終了しないよう、閉じた stderr もここで同期的に捕捉する。
+  try { fs.writeSync(process.stderr.fd, `[grok] Process lookup diagnostic ${JSON.stringify(record)}\n`); } catch { /* 診断は補助情報。 */ }
+}
+
+function withProcessLookupDeadline(options, budget) {
+  return {
+    ...options,
+    processLookupDeadline: Math.min(options.processLookupDeadline ?? Infinity, performance.now() + budget)
+  };
+}
+
+function remainingProcessLookupTime(options) {
+  return Math.max(0, options.processLookupDeadline - performance.now());
+}
+
+function runProcessLookup(run, args, options: ProcessOptions, lookup = {}) {
+  const remaining = remainingProcessLookupTime(options);
+  if (remaining <= 0) return null;
+  const timeoutMs = Math.max(1, Math.ceil(remaining));
+  const begin = performance.now();
+  const startedAt = new Date().toISOString();
+  let result;
+  try {
+    result = run(windowsHelperPath(), args, { shell: false, timeout: timeoutMs, maxBuffer: 64 * 1024 });
+  } catch (error) {
+    reportProcessLookupFailure(options, lookup, startedAt, begin, timeoutMs, null, error);
+    throw error;
+  }
+  if (result && (result.error || result.signal || result.status !== 0)) {
+    reportProcessLookupFailure(options, lookup, startedAt, begin, timeoutMs, result, result.error);
+  }
+  return result;
+}
+
+/**
+ * shell 経由で渡す 1 語をエスケープする。
+ *
+ * すでに丸ごと二重引用符で囲まれている値はそのまま返す（呼び出し側が
+ * `quoteIfNeeded` で囲んだ実行ファイルパスを二重に囲まないため）。
+ * バックスラッシュは触らない。cmd.exe はこれをエスケープ文字として扱わず、
+ * `"C:\\Users\\..."` へ変換すると Windows のパスが壊れる。
+ */
+export function quoteShellArgument(value) {
+  const text = String(value ?? "");
+  if (text && !/[\s"'`$&|<>^()]/.test(text)) {
+    return text;
+  }
+  if (/^".*"$/.test(text)) {
+    return text;
+  }
+  return `"${text.replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * 実行ファイルと引数を、shell に渡せる 1 本のコマンド文字列へ畳む。
+ *
+ * `shell` を有効にしたまま引数配列を渡すと Node 24 以降が DEP0190 を出す。
+ * 警告は stderr へ書かれるので、ホストが stdout と stderr を 1 つの結果へ
+ * 合流する経路では、レポート本文の前に
+ * 警告が挟まって出力が汚れる。shell 経由のときは自前で連結して、引数配列は
+ * 空のまま spawn する。
+ */
+export function buildShellCommand(command: string, args: string[] = []) {
+  return [quoteShellArgument(command), ...args.map((arg) => quoteShellArgument(arg))].join(" ");
+}
+
+export function runCommand(command: string, args: string[] = [], options: ProcessOptions = {}) {
+  const shell = options.shell ?? (process.platform === "win32");
+  const useShell = Boolean(shell);
+  const result = spawnSync(useShell ? buildShellCommand(command, args) : command, useShell ? [] : args, {
+    cwd: options.cwd,
+    env: options.env,
+    encoding: "utf8",
+    input: options.input,
+    maxBuffer: options.maxBuffer,
+    timeout: options.timeout,
+    stdio: options.stdio ?? "pipe",
+    shell,
+    windowsHide: true
+  });
+
+  return {
+    command,
+    args,
+    status: result.status ?? 0,
+    signal: result.signal ?? null,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    error: result.error ?? null
+  };
+}
+
+export function binaryAvailable(command, versionArgs = ["--version"], options: ProcessOptions = {}) {
+  const result = runCommand(command, versionArgs, options);
+  if (result.error && (result.error as NodeJS.ErrnoException).code === "ENOENT") {
+    return { available: false, detail: "not found" };
+  }
+  if (result.error) {
+    return { available: false, detail: result.error.message };
+  }
+  if (result.status !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
+    return { available: false, detail };
+  }
+  return { available: true, detail: result.stdout.trim() || result.stderr.trim() || "ok" };
+}
+
+/** PID の再利用を見分けるため、OS が持つプロセス開始識別子を読む。 */
+export function getProcessSnapshot(pid, options: ProcessOptions = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const run = options.runCommandImpl ?? runCommand;
+  const lookupOptions = withProcessLookupDeadline(options, PROCESS_LOOKUP_TIMEOUT_MS);
+  try {
+    // ハンドルを出力完了まで保持し、PID の再利用で開始時刻の所有者が変わるのを防ぐ。
+    const result = runProcessLookup(run, ["identity", String(pid)], lookupOptions, { lookup: "snapshot", targetPid: pid });
+    if (!result || result.error || result.signal || result.status !== 0) return null;
+    const identity = /^([1-9][0-9]{0,18})(?:\r?\n)?$/.exec(result.stdout);
+    return identity && identity[0] === result.stdout ? { startKey: WINDOWS_START_KEY_PREFIX + identity[1] } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function formatCommandFailure(result) {
+  const parts = [`${result.command} ${result.args.join(" ")}`.trim()];
+  if (result.signal) {
+    parts.push(`signal=${result.signal}`);
+  } else {
+    parts.push(`exit=${result.status}`);
+  }
+  const stderr = (result.stderr || "").trim();
+  const stdout = (result.stdout || "").trim();
+  if (stderr) {
+    parts.push(stderr);
+  } else if (stdout) {
+    parts.push(stdout);
+  }
+  return parts.join(": ");
+}

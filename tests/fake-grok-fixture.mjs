@@ -15,10 +15,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import process from "node:process";
-
-import { makeTempDir, writeExecutable } from "./helpers.mjs";
-
+import { grokFixtureEnv, makeTempDir, writeExecutable } from "./helpers.mjs";
 const FAKE_GROK_SOURCE = `#!/usr/bin/env node
 import fs from "node:fs";
 import readline from "node:readline";
@@ -257,7 +254,6 @@ rl.on("line", (line) => {
   handle(message);
 });
 `;
-
 /**
  * 偽 grok を一時ディレクトリへ設置し、テスト用の環境変数を返す。
  *
@@ -265,39 +261,28 @@ rl.on("line", (line) => {
  * @returns {{ env: NodeJS.ProcessEnv, binDir: string, statePath: string, readState: () => object }}
  */
 export function installFakeGrok(scenario = {}) {
-  const binDir = makeTempDir("grok-fake-bin-");
-  const scriptPath = path.join(binDir, "fake-grok.mjs");
-  const scenarioPath = path.join(binDir, "scenario.json");
-  const statePath = path.join(binDir, "state.json");
-
-  writeExecutable(scriptPath, FAKE_GROK_SOURCE);
-  fs.writeFileSync(scenarioPath, JSON.stringify(scenario, null, 2), "utf8");
-
-  // GROK_BIN は実行ファイルのパスとして扱われる。node スクリプトを直接
-  // 指せないので、node を呼ぶ薄いラッパーを置く。
-  const isWindows = process.platform === "win32";
-  const wrapperPath = path.join(binDir, isWindows ? "grok.cmd" : "grok");
-  const wrapperSource = isWindows
-    ? `@echo off\r\n"${process.execPath}" "${scriptPath}" %*\r\n`
-    : `#!/bin/sh\nexec "${process.execPath}" "${scriptPath}" "$@"\n`;
-  writeExecutable(wrapperPath, wrapperSource);
-
-  return {
-    binDir,
-    statePath,
-    env: {
-      ...process.env,
-      GROK_BIN: wrapperPath,
-      FAKE_GROK_SCENARIO: scenarioPath,
-      FAKE_GROK_STATE: statePath,
-      // 実物の資格情報を巻き込まないよう明示的に差し替える。
-      XAI_API_KEY: "fake-key-for-tests",
-      // 共有ブローカーは detached プロセスとして残るため、テストでは使わない。
-      // 各コマンドが自分で偽 grok を起動し、終了時に確実に片付ける。
-      GROK_COMPANION_DISABLE_BROKER: "1"
-    },
-    readState() {
-      return fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf8")) : null;
-    }
-  };
+    const binDir = makeTempDir("grok-fake-bin-");
+    const scriptPath = path.join(binDir, "fake-grok.mjs");
+    const scenarioPath = path.join(binDir, "scenario.json");
+    const statePath = path.join(binDir, "state.json");
+    writeExecutable(scriptPath, FAKE_GROK_SOURCE);
+    fs.writeFileSync(scenarioPath, JSON.stringify(scenario, null, 2), "utf8");
+    const env = grokFixtureEnv(scriptPath, path.join(binDir, "grok"));
+    return {
+        binDir,
+        statePath,
+        env: {
+            ...env,
+            FAKE_GROK_SCENARIO: scenarioPath,
+            FAKE_GROK_STATE: statePath,
+            // 実物の資格情報を巻き込まないよう明示的に差し替える。
+            XAI_API_KEY: "fake-key-for-tests",
+            // 共有ブローカーは detached プロセスとして残るため、テストでは使わない。
+            // 各コマンドが自分で偽 grok を起動し、終了時に確実に片付ける。
+            GROK_COMPANION_DISABLE_BROKER: "1"
+        },
+        readState() {
+            return fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf8")) : null;
+        }
+    };
 }

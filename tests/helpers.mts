@@ -1,0 +1,84 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import process from "node:process";
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
+import { buildShellCommand } from "../plugins/grok/scripts/lib/process.mjs";
+
+export function makeTempDir(prefix = "grok-plugin-test-") {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+export function writeExecutable(filePath: string, source: string) {
+  fs.writeFileSync(filePath, source, { encoding: "utf8", mode: 0o755 });
+}
+
+export function grokFixtureEnv(scriptPath: string, wrapperPath: string): NodeJS.ProcessEnv & { GROK_BIN: string; GROK_TEST_NODE: string; GROK_TEST_SCRIPT: string } {
+  let bin = wrapperPath;
+  if (process.platform === "win32") {
+    const shim = process.env.GROK_TEST_SHIM;
+    if (!shim || !path.isAbsolute(shim) || !fs.statSync(shim).isFile()) {
+      throw new Error("Windows fixtures require GROK_TEST_SHIM; run pnpm test to build it");
+    }
+    bin = shim;
+  } else {
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    writeExecutable(wrapperPath, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(scriptPath)} "$@"\n`);
+  }
+  return { ...process.env, GROK_BIN: bin, GROK_TEST_NODE: process.execPath, GROK_TEST_SCRIPT: scriptPath };
+}
+
+export function run(command: string, args: string[], options: Omit<SpawnSyncOptionsWithStringEncoding, 'encoding'> = {}) {
+  const shell = options.shell ?? (process.platform === "win32" && !path.isAbsolute(command));
+  return spawnSync(shell ? buildShellCommand(command, args) : command, shell ? [] : args, {
+    cwd: options.cwd,
+    env: options.env,
+    encoding: "utf8",
+    input: options.input,
+    shell,
+    windowsHide: true
+  });
+}
+
+export function initGitRepo(cwd: string) {
+  run("git", ["init", "-b", "main"], { cwd });
+  run("git", ["config", "user.name", "Grok Plugin Tests"], { cwd });
+  run("git", ["config", "user.email", "tests@example.com"], { cwd });
+  run("git", ["config", "commit.gpgsign", "false"], { cwd });
+  run("git", ["config", "tag.gpgsign", "false"], { cwd });
+}
+
+// Windows の Node.js 22 でも日本語パスを含むテスト用インストールを作成する。
+// 許可rootの境界とリンクを検査してから標準APIへ渡す。
+function assertCleanupPath(target: string, allowedRoot: string) {
+  if (typeof target !== 'string' || !target || typeof allowedRoot !== 'string' || !allowedRoot || !path.isAbsolute(target) || !path.isAbsolute(allowedRoot)) throw new Error('Cleanup paths must be absolute');
+  const resolved = path.resolve(target);
+  const root = path.resolve(allowedRoot);
+  const relative = path.relative(root, resolved);
+  if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('Cleanup target is outside the allowed root');
+  // OS指定の一時rootは /var -> /private/var 等の正規aliasを含み得る。
+  // rootの実体を確認し、root配下だけは従来どおりリンクを拒否する。
+  const canonicalRoot = fs.realpathSync(root);
+  const rootStat = fs.lstatSync(canonicalRoot);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error('Cleanup root is not a directory');
+  const canonicalTarget = path.join(canonicalRoot, relative);
+  for (let current = canonicalTarget; path.relative(canonicalRoot, current); current = path.dirname(current)) {
+    try { if (fs.lstatSync(current).isSymbolicLink()) throw new Error('Cleanup path contains a link'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  const pending = [canonicalTarget];
+  while (pending.length) {
+    const current = pending.pop();
+    let stat;
+    try { stat = fs.lstatSync(current); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    if (stat.isSymbolicLink()) throw new Error('Cleanup directory contains a link');
+    if (stat.isDirectory()) for (const entry of fs.readdirSync(current)) pending.push(path.join(current, entry));
+  }
+  return canonicalTarget;
+}
+
+export function removeTempFixture(target: string, options?: fs.RmOptions) {
+  // ローカル Windows 検証では親が専用一時領域を Prunlet で清掃する。
+  if (process.platform === "win32" && process.env.GROK_TEST_DEFER_CLEANUP === "1") return;
+  return fs.rmSync(assertCleanupPath(target, path.resolve(os.tmpdir())), options);
+}

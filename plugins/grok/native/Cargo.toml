@@ -1,0 +1,34 @@
+[package]
+name = "grok-windows-helper"
+version = "0.1.0"
+edition = "2021"
+publish = false
+default-run = "grok-windows-helper"
+
+[[bin]]
+name = "grok-windows-helper"
+path = "src/main.rs"
+
+[[bin]]
+name = "grok-test-shim"
+path = "src/bin/grok-test-shim.rs"
+
+[target.'cfg(windows)'.dependencies]
+base64 = "0.22.1"
+serde_json = "1.0.149"
+windows-sys = { version = "0.61.2", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }

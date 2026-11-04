@@ -8,14 +8,20 @@ Claude Code と Codex から既存の Grok Build CLI を呼び出す薄い橋渡
 
 以下のパスは Git ルート基準。Claude 専用 helper と Codex 公開 skill は、それぞれの manifest が異なるディレクトリを公開し、ホスト固有の指示を混在させない。
 
+Node.js ランタイム、管理スクリプト、テストの正本は TypeScript の `.mts`。`pnpm build` で同じ場所へ `.mjs` を生成し、配布用の生成物も Git 管理する。Windows helper の正本は `plugins/grok/native/` の Rust と Cargo.lock。PowerShell / CMD 実装は使用しない。両ホストは Node.js 22 以降で `.mjs` を直接実行し、Windows では対応アーキテクチャの同梱 executable を呼ぶ。利用者には従来どおり Node.js と Git が必要で、Rust、MSVC、コンパイラ、実行時ダウンロードは不要。生成物の照合と開発手順は [CONTRIBUTING.md](CONTRIBUTING.md) を参照する。
+
 | 構成 | 責務 |
 | --- | --- |
 | `plugins/grok/commands/`、`agents/`、`claude-skills/` | Claude Code の入口と専用 helper |
 | `plugins/grok/skills/` | Codex の公開入口 |
 | `plugins/grok/scripts/grok-companion.mjs` | CLI 引数、対象とプロンプト、前景実行と結果表示 |
 | `plugins/grok/scripts/lib/grok.mjs` と ACP 関連 | Grok の新規プロセスへの直接接続、権限と結果 |
+| `plugins/grok/native/` | Windows の `supervisor`、`identity`、`git-snapshot` を実装する Rust helper とテスト用 shim |
+| `plugins/grok/bin/win32-{ia32,x64,arm64}/grok-windows-helper.exe` | Rust 1.97.1 で生成し Git 管理する Windows 配布バイナリ。ビルド用 `native/target/` は配布しない |
 | `plugins/grok/prompts/`、`plugins/grok/schemas/` | レビュープロンプトと構造化結果の契約 |
 | `tests/` | fake Grok によるランタイムとホスト入口の検証 |
+
+Windows 配布生成は VS 18.11.12328.437、既定 VC toolset 14.51.36231、SDK 10.0.26100.0 と固定 Rust flags を使用する。ビルドスクリプトは版の相違・必要ツールの不足を拒否し、CI は `windows-2025-vs2026` で配布 exe を上書きせず再生成物との SHA-256 一致を確認する。固定環境の更新時は [CONTRIBUTING.md](CONTRIBUTING.md) に従って全アーキテクチャを再生成する。
 
 ## 実行経路とデータフロー
 

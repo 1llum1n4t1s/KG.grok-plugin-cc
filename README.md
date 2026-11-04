@@ -5,6 +5,8 @@
 
 Run Grok Build from Claude Code or Codex for code reviews, repository audits, X searches, and delegated tasks. This project is a fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc); see [NOTICE](NOTICE).
 
+For source builds and contributing, see [Development](CONTRIBUTING.md#english).
+
 ## Requirements and installation
 
 Install [Grok Build](https://x.ai/cli), sign in or configure its API key, and install Node.js 22 or later and Git 2.45 or later (or a Git build with backported `--no-lazy-fetch`). Grok usage is charged to the account or API key used. Grok must support `grok agent stdio`; update it with `grok update` if needed.
@@ -45,6 +47,8 @@ For development commands and validation, see [AGENTS.md](AGENTS.md). Runtime str
 # Claude Code・Codex 向け Grok プラグイン
 
 Claude Code や Codex から Grok Build を使い、コードレビュー、リポジトリ監査、X 検索、タスクの委任を行えます。本プロジェクトは [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) のフォークです。詳細は [NOTICE](NOTICE) を参照してください。
+
+ソースからのビルドと開発手順は [開発ガイド](CONTRIBUTING.md#日本語) を参照してください。
 
 ## 必要環境とインストール
 
