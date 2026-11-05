@@ -53,7 +53,11 @@ function identity(pid) {
 log({ type: "ready", pid: process.pid, identity: identity(process.pid) });
 const realSpawn = childProcess.spawn, realSpawnSync = childProcess.spawnSync;
 childProcess.spawn = function(file, args, options) {
-  const child = realSpawn.apply(this, arguments);
+  const bunSupervisor = process.versions.bun && file === process.execPath && Array.isArray(args) &&
+    args.some(arg => typeof arg === "string" && arg.endsWith("/posix-agent-supervisor.mjs")) && process.env.RUNTIME_PRELOAD;
+  const child = bunSupervisor
+    ? realSpawn.call(this, file, ["--preload", process.env.RUNTIME_PRELOAD, ...args], options)
+    : realSpawn.apply(this, arguments);
   const opts = Array.isArray(args) ? options : args;
   log({ type: "spawn", pid: child.pid ?? null, identity: child.pid ? identity(child.pid) : null, detached: opts?.detached === true });
   child.once("close", (code, signal) => log({ type: "close", pid: child.pid ?? null, code, signal }));
@@ -184,7 +188,11 @@ function setupWorkspace(scenario: import('./fake-grok-fixture.mjs').FakeGrokScen
     fs.writeFileSync(preload, runtimePreload);
     env.RUNTIME_PROCESS_LOG = f.trackingLog;
     env.RUNTIME_FAKE_BIN = fake.env.GROK_BIN;
-    env.NODE_OPTIONS = (env.NODE_OPTIONS ?? "") + " --require=" + JSON.stringify(preload);
+    if ("bun" in process.versions) {
+      env.RUNTIME_PRELOAD = preload;
+    } else {
+      env.NODE_OPTIONS = (env.NODE_OPTIONS ?? "") + " --require=" + JSON.stringify(preload);
+    }
   }
   return { fake, repo, env, registerLink(file) {
     if (process.platform !== "linux") return;
@@ -194,8 +202,12 @@ function setupWorkspace(scenario: import('./fake-grok-fixture.mjs').FakeGrokScen
   } };
 }
 
+function runtimeArgs(env, args) {
+  return process.platform === "linux" && "bun" in process.versions ? ["--preload", env.RUNTIME_PRELOAD, ...args] : args;
+}
+
 function companion(args, { repo, env }) {
-  const result = run(process.execPath, [SCRIPT, ...args], { cwd: repo, env });
+  const result = run(process.execPath, runtimeArgs(env, [SCRIPT, ...args]), { cwd: repo, env });
   recordSyncOwner(repo, result);
   return result;
 }
@@ -856,7 +868,7 @@ for (const mode of ["split stdin", "empty stdin", "positional priority", "prompt
     const args = [SCRIPT, "task", "--json", "--fresh"];
     if (mode === "prompt file priority") args.push("--prompt-file", promptFile);
     if (mode === "positional priority" || mode === "prompt file priority") args.push(positional);
-    const child = spawn(process.execPath, args, { cwd: repo, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    const child = spawn(process.execPath, runtimeArgs(env, args), { cwd: repo, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     if (process.platform === "linux") recordChildOwner(runtimeFixtures.find(f => f.repo === repo), child);
     let stdout = "", stderr = "", inputError;
     child.stdout.on("data", chunk => { stdout += chunk; });

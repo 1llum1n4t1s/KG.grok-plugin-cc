@@ -12,6 +12,6 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
 - Follow the shared foreground execution contract. Reject `--background`; accept legacy `--wait` only as a no-op.
 - Unless supplied, add `--language` for the conversation language before the focus text.
 - Do not weaken or supplement the adversarial framing.
-- Run `node <plugin-root>/scripts/grok-companion.mjs adversarial-review <arguments>`.
+- Run `node <plugin-root>/scripts/grok-companion.mjs adversarial-review <arguments>`, using `bun --no-env-file` in place of `node` when available as specified in the shared runtime contract.
 - Allow at least 600 seconds and wait silently on the same foreground process until it completes.
 - Return completed stdout faithfully. Report failure or timeout; continue conversations in Grok itself.

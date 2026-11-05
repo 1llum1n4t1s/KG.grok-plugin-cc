@@ -33,8 +33,8 @@ function fixture({ spawnFailure = false, remainingGroup = false, groupDenied = f
                 calls += 1;
                 return true;
             } },
-        spawn: (command, args, options) => { if (spawnFailure)
-            throw Error("spawn failed"); assert.equal(command, "/node"); assert.equal(args[0], "/supervisor.mjs"); assert.equal(options.detached, !inherited); assert.equal(options.stdio[3], "pipe"); return child; }, setTimeout: callback => { timers.push(callback); return { unref() { } }; },
+        childProcess: { spawn: (command, args, options) => { if (spawnFailure)
+                throw Error("spawn failed"); assert.equal(command, "/node"); assert.equal(args[0], "/supervisor.mjs"); assert.equal(options.detached, !inherited); assert.equal(options.stdio[3], "pipe"); return child; } }, setTimeout: callback => { timers.push(callback); return { unref() { } }; },
         withTimeout: promise => promise, DIRECT_HANDSHAKE_TIMEOUT_MS: 100, CLOSE_TIMEOUT_MS: 0,
         waitForExitWithTimeout: () => { waits += 1; return new Promise(resolve => { finishWait = resolve; }); },
         AcpClientBase: class {

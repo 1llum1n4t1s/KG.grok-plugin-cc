@@ -903,7 +903,7 @@ export function getGrokAvailability(cwd, env = process.env) {
   // Windows では cmd.exe 経由で起動する。`process.env.SHELL`（Git Bash）だと
   // パスのバックスラッシュがエスケープとして食われ、`.cmd` ラッパーも起動できない。
   const spawnOptions = { cwd, env, shell: process.platform === "win32" };
-  const command = quoteIfNeeded(bin);
+  const command = process.platform === "win32" ? quoteIfNeeded(bin) : bin;
 
   const versionStatus = binaryAvailable(command, ["--version"], spawnOptions);
   if (!versionStatus?.available) {

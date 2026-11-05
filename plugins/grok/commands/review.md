@@ -2,7 +2,7 @@
 description: Run a Grok code review against local git state
 argument-hint: '[--base <ref>] [--scope auto|working-tree|branch] [--language <bcp47>] [focus ...]'
 disable-model-invocation: true
-allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
+allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(bun:*), Bash(git:*)
 ---
 
 Run a Grok code review against the local git state.
@@ -26,6 +26,8 @@ Argument handling:
 - Do not add extra review instructions or rewrite the user's intent.
 - Any text left after the flags is passed through as review focus. Preserve it verbatim.
 - If the user wants a deliberately skeptical, ship/no-ship framing, point them at `/grok:adversarial-review`.
+
+Run with `bun --no-env-file` instead of `node` on Windows, macOS, and Linux when Bun 1.4.4 or later is available. Otherwise use Node.js 22 or later.
 
 Run:
 ```bash

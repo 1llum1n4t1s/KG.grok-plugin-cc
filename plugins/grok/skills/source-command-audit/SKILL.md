@@ -15,6 +15,6 @@ Read [the shared runtime contract](../../references/codex-runtime.md), then invo
   request.
 - When no focus text is supplied, let the companion apply its built-in risk-directed deep-audit
   focus. An explicit focus narrows that deep audit to the requested subsystem or concern.
-- Run `node <plugin-root>/scripts/grok-companion.mjs audit <arguments>`.
+- Run `node <plugin-root>/scripts/grok-companion.mjs audit <arguments>`, using `bun --no-env-file` in place of `node` when available as specified in the shared runtime contract.
 - Allow at least 600 seconds and wait silently on the same foreground process until it completes.
 - Return completed stdout faithfully. Report failure or timeout; continue conversations in Grok itself.

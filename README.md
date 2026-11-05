@@ -7,9 +7,9 @@ Run Grok Build from Claude Code or Codex for code reviews, repository audits, X 
 
 ## Requirements and installation
 
-Install [Grok Build](https://x.ai/cli), sign in or configure its API key, and install Node.js 22 or later and Git 2.45 or later (or a Git build with backported `--no-lazy-fetch`). Grok usage is charged to the account or API key used. Grok must support `grok agent stdio`; update it with `grok update` if needed.
+Install [Grok Build](https://x.ai/cli), sign in or configure its API key, and install Git 2.45 or later (or a Git build with backported `--no-lazy-fetch`). On Windows, macOS, and Linux, install Bun 1.4.4 or later or Node.js 22 or later; Bun is preferred when both are available. Grok usage is charged to the account or API key used. Grok must support `grok agent stdio`; update it with `grok update` if needed.
 
-On Windows, the plugin includes native helpers for ia32, x64, and arm64 Node.js. No Rust or MSVC installation is required.
+On Windows, the plugin includes native helpers for ia32, x64, and arm64 runtimes. No Rust or MSVC installation is required.
 
 In Claude Code:
 
@@ -50,9 +50,9 @@ Claude Code や Codex から Grok Build を使い、コードレビュー、リ�
 
 ## 必要環境とインストール
 
-[Grok Build](https://x.ai/cli) をインストールし、ログインまたは API キーを設定してください。Node.js 22 以降、Git 2.45 以降（または `--no-lazy-fetch` のバックポート版）が必要です。Grok の利用は使用するアカウントまたは API キーに課金されます。`grok agent stdio` が使えない場合は `grok update` で更新してください。
+[Grok Build](https://x.ai/cli) をインストールし、ログインまたは API キーを設定してください。Git 2.45 以降（または `--no-lazy-fetch` のバックポート版）が必要です。Windows・macOS・Linux では Bun 1.4.4 以降または Node.js 22 以降を使い、両方ある場合は Bun を優先します。Grok の利用は使用するアカウントまたは API キーに課金されます。`grok agent stdio` が使えない場合は `grok update` で更新してください。
 
-Windows では ia32・x64・arm64 の Node.js に対応するネイティブ helper を同梱しています。Rust や MSVC のインストールは不要です。
+Windows では ia32・x64・arm64 のランタイムに対応するネイティブ helper を同梱しています。Rust や MSVC のインストールは不要です。
 
 Claude Code では次を実行します。
 

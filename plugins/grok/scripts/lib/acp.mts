@@ -1,6 +1,6 @@
 import type { AcpMethod, AcpRequestParams, AcpResponse, AcpNotification, AcpNotificationHandler, ClientInfo, ClientCapabilities, AcpClientOptions, InitializeResponse, RequestPermissionParams, RequestPermissionResponse } from "./acp-protocol.js";
 import type { ChildProcess } from "node:child_process";
-import type { Readable } from "node:stream";
+import type { Readable, Duplex } from "node:stream";
 type ProtocolError = Error & { data?: unknown; rpcCode?: number; rpcResponseReceived?: boolean };
 interface RuntimeAcpOptions extends AcpClientOptions {
   rpcTimeoutMs?: number;
@@ -29,7 +29,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import childProcess from "node:child_process";
 import { spawnWindowsAgent } from "./windows-agent.mjs";
 import { JsonlFramer } from "./jsonl.mjs";
 
@@ -74,14 +74,14 @@ function normalizeTransportError(value) {
   }
 }
 
-function waitForExitWithTimeout(exitPromise, timeoutMs = CLOSE_TIMEOUT_MS) {
-  return Promise.race([
-    exitPromise,
-    new Promise((resolve) => {
-      const timer = setTimeout(resolve, timeoutMs);
-      timer.unref?.();
-    })
-  ]);
+async function waitForExitWithTimeout(exitPromise, timeoutMs = CLOSE_TIMEOUT_MS) {
+  let timer: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      exitPromise,
+      new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); })
+    ]);
+  } finally { clearTimeout(timer); }
 }
 
 class HandshakeTimeoutError extends Error {
@@ -559,7 +559,7 @@ class SpawnedAcpClient extends AcpClientBase {
       const spawnChild = () => {
         if (this.closed || this.closeStarted) throw new Error("Direct Grok agent was closed before spawn.");
         this.directAgentSpawnAttempted = true;
-        this.proc = spawn(process.execPath, [POSIX_AGENT_SUPERVISOR, command, ...args], {
+        this.proc = childProcess.spawn(process.execPath, [...("bun" in process.versions ? ["--no-env-file"] : []), POSIX_AGENT_SUPERVISOR, command, ...args], {
           cwd: this.cwd,
           env: this.options.env ?? process.env,
           stdio: ["pipe", "pipe", "pipe", "pipe"],
@@ -572,6 +572,50 @@ class SpawnedAcpClient extends AcpClientBase {
       spawnChild();
       // PIDだけを受け取る停止APIを作らず、このspawnの直子だけをclosureに固定する。
       const child = this.proc;
+      const groupPid = child.pid;
+      let childExited = false;
+      let childClosed = false;
+      let groupSignalled = false;
+      let spawnObserved = false;
+      let spawnError: Error | null = null;
+      let startedResolve: () => void;
+      let startedReject: (error: Error) => void;
+      const started = new Promise<void>((resolve, reject) => { startedResolve = resolve; startedReject = reject; });
+      // 正常pipe経路は起動待ちを要求しないが、errorの未処理rejectionは作らない。
+      void started.catch(() => {});
+      child.once("spawn", () => { spawnObserved = true; this.#posixSpawnNeverStarted = false; startedResolve(); });
+      child.on("error", (error) => { spawnError ??= error; startedReject(error); this.handleExit(error); });
+      for (const pipe of [child.stdin, child.stdout, child.stderr]) pipe?.on("error", error => this.handleExit(error));
+      child.stdio?.[3]?.on("error", () => {});
+      child.once("exit", () => { childExited = true; });
+      this.#posixChildClosed = new Promise((resolve) => {
+        child.once("close", () => {
+          childClosed = true;
+          this.#posixSpawnNeverStarted = Boolean(spawnError && !spawnObserved && (!Number.isInteger(child.pid) || child.pid <= 0));
+          startedReject(spawnError ?? new Error("Grok supervisor closed before startup."));
+          resolve(undefined);
+        });
+      });
+      this.#posixChildIsClosed = () => this.proc === child && childClosed;
+      this.#stopPosixGroup = () => {
+        if (this.proc !== child || childExited || groupSignalled || child.killed || child.exitCode !== null || child.signalCode ||
+            !Number.isInteger(groupPid) || groupPid <= 0) return;
+        groupSignalled = true;
+        try {
+          // spawn時の同じ通信路にだけ要求し、PIDを使う停止へfallbackしない。
+          (child.stdio[3] as Duplex).write("stop\n");
+        } catch { /* 後の停止証拠だけで判定する */ }
+      };
+      this.#posixGroupIsEmpty = () => {
+        if (this.proc !== child || !Number.isInteger(groupPid) || groupPid <= 0) return false;
+        try { process.kill(-groupPid, 0); return false; }
+        catch (error) { return error?.code === "ESRCH"; }
+      };
+      if (!child.stdin || !child.stdout || !child.stderr || !child.stdio?.[3]) {
+        // Bunのspawn失敗は全pipeがnullになり得る。元のspawn errorを優先する。
+        await withTimeout(started, DIRECT_HANDSHAKE_TIMEOUT_MS);
+        throw new Error("Grok supervisor did not provide all required stdio pipes.");
+      }
       let exitData = "";
       (child.stdio[3] as Readable).setEncoding("utf8");
       child.stdio[3].on("data", chunk => { if (exitData.length <= 1024) exitData += chunk; });
@@ -586,29 +630,6 @@ class SpawnedAcpClient extends AcpClientBase {
           }
         } catch { /* 不完全な証拠は supervisor の終了状態を使う。 */ }
       });
-      child.once("error", () => { if (!Number.isInteger(child.pid) || child.pid <= 0) this.#posixSpawnNeverStarted = true; });
-      const groupPid = child.pid;
-      let childExited = false;
-      let childClosed = false;
-      let groupSignalled = false;
-      child.once("exit", () => { childExited = true; });
-      this.#posixChildClosed = new Promise((resolve) => {
-        child.once("close", () => { childClosed = true; resolve(undefined); });
-      });
-      this.#posixChildIsClosed = () => this.proc === child && childClosed;
-      this.#stopPosixGroup = () => {
-        if (this.proc !== child || childExited || groupSignalled || child.killed || child.exitCode !== null || child.signalCode ||
-            !Number.isInteger(groupPid) || groupPid <= 0) return;
-        groupSignalled = true;
-        try {
-          process.kill(-groupPid, "SIGTERM");
-        } catch { /* 後の停止証拠だけで判定する */ }
-      };
-      this.#posixGroupIsEmpty = () => {
-        if (this.proc !== child || !Number.isInteger(groupPid) || groupPid <= 0) return false;
-        try { process.kill(-groupPid, 0); return false; }
-        catch (error) { return error?.code === "ESRCH"; }
-      };
     }
 
     this.proc.stdout.setEncoding("utf8");
@@ -694,10 +715,7 @@ class SpawnedAcpClient extends AcpClientBase {
       if (this.proc && !this.proc.killed) {
         this.proc.stdin?.end();
         setTimeout(() => {
-          // 通常Node/libuvはreapと全exit callbackの配送を同じloop内で終え、
-          // timer phaseと交差させない。未配送のleaderは未reapでPID/PGIDを保持する。
-          // checkとkillは同期のままにし、任意のexit callbackへ移動しない。
-          // 独自waitpidを行う外部native addonの実行環境はこの保証に含めない。
+          // 猶予後も同じchildのfd 3へ要求し、PID/PGIDを停止権限に使わない。
           this.#stopPosixGroup?.();
         }, 50).unref?.();
       }
@@ -753,7 +771,6 @@ export class GrokAcpClient {
 function withTimeout(promise, ms) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new HandshakeTimeoutError(ms)), ms);
-    timer.unref?.();
     promise.then(
       (value) => {
         clearTimeout(timer);

@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import childProcess from "node:child_process";
 import fs from "node:fs";
 import process from "node:process";
 import { performance } from "node:perf_hooks";
@@ -90,7 +90,7 @@ export function buildShellCommand(command, args = []) {
 export function runCommand(command, args = [], options = {}) {
     const shell = options.shell ?? (process.platform === "win32");
     const useShell = Boolean(shell);
-    const result = spawnSync(useShell ? buildShellCommand(command, args) : command, useShell ? [] : args, {
+    const result = childProcess.spawnSync(useShell ? buildShellCommand(command, args) : command, useShell ? [] : args, {
         cwd: options.cwd,
         env: options.env,
         encoding: "utf8",

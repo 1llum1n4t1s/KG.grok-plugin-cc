@@ -2,7 +2,7 @@
 description: Run a Grok audit of the entire existing codebase, ignoring the current diff
 argument-hint: '[--language <bcp47>] [focus ...]'
 disable-model-invocation: true
-allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
+allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(bun:*), Bash(git:*)
 ---
 
 Run a Grok audit of the entire existing codebase. Unlike `/grok:review`, this ignores the current git diff and reviews the source as it exists on disk.
@@ -26,6 +26,8 @@ Argument handling:
 - Do not add audit criteria or rewrite the user's focus.
 - A focus is optional. Without one, the companion applies its built-in risk-directed deep-audit focus; with one, it narrows the audit to that subsystem or concern.
 - If the user wants only current changes reviewed, point them at `/grok:review`.
+
+Run with `bun --no-env-file` instead of `node` on Windows, macOS, and Linux when Bun 1.4.4 or later is available. Otherwise use Node.js 22 or later.
 
 Run:
 ```bash

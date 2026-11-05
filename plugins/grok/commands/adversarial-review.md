@@ -2,7 +2,7 @@
 description: Run a Grok review that challenges the implementation approach and design choices
 argument-hint: '[--base <ref>] [--scope auto|working-tree|branch] [--language <bcp47>] [focus ...]'
 disable-model-invocation: true
-allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
+allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(bun:*), Bash(git:*)
 ---
 
 Run an adversarial Grok review through the shared plugin runtime. This is a challenge review of the chosen implementation, design choices, tradeoffs, and assumptions, not merely a stricter defect scan.
@@ -26,6 +26,8 @@ Argument handling:
 - Unless the flags before the focus already contain `--language`, prepend `--language <BCP 47 tag>` for the conversation language to the raw argument string. Use that updated string in place of `$ARGUMENTS` below. Keep all flags before the focus text; a `--language` mentioned inside the focus is literal focus text.
 - Do not weaken the adversarial framing or rewrite the user's focus text.
 - This command uses the same working-tree or branch target selection as `/grok:review`, including `--base <ref>`; it does not support staged or unstaged scope.
+
+Run with `bun --no-env-file` instead of `node` on Windows, macOS, and Linux when Bun 1.4.4 or later is available. Otherwise use Node.js 22 or later.
 
 Run:
 ```bash

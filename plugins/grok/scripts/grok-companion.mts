@@ -128,4 +128,8 @@ async function main() {
   }
   throw new Error(`Unknown command: ${command}\n${usage}`);
 }
-main().catch(error => { console.error(error?.message ?? String(error)); process.exitCode = 1; });
+main().catch(error => {
+  console.error(error?.message ?? String(error));
+  if (error?.turnStopUnconfirmed) console.error("Grok agent stop could not be confirmed.");
+  process.exitCode = 1;
+});

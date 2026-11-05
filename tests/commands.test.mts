@@ -51,6 +51,24 @@ test("the plugin exposes exactly the supported commands", () => {
   assert.deepEqual(listCommands(), PUBLIC_WORKFLOWS);
 });
 
+test("both hosts permit Bun and Node on Windows macOS and Linux", () => {
+  for (const name of PUBLIC_WORKFLOWS) {
+    const command = read(`commands/${name}.md`);
+    assert.match(command, /Bash\(bun:\*\)/);
+    assert.match(command, /Bash\(node:\*\)/);
+    assert.match(command, /Bun 1\.4\.4 or later/i);
+    assert.match(command, /`bun --no-env-file`/i);
+    assert.match(command, /Windows, macOS, and Linux/i);
+    assert.match(command, /Node\.js 22 or later/i);
+    assert.match(read(`skills/source-command-${name}/SKILL.md`), /shared runtime contract/i);
+  }
+  for (const name of ["references/codex-runtime.md", "claude-skills/grok-cli-runtime/SKILL.md"]) {
+    const runtime = read(name);
+    assert.match(runtime, /Windows.*`bun --no-env-file` instead of `node`/i);
+    assert.match(runtime, /Windows, macOS, and Linux.*Bun 1\.4\.4 or later.*Node\.js 22 or later/i);
+  }
+});
+
 test("Codex exposes the same workflows as native skills", () => {
   const nativeSkillNames = PUBLIC_WORKFLOWS.map((name) => `source-command-${name}`);
 

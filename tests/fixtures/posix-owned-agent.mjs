@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
+if (process.env.GROK_DOTENV_PROBE)
+    throw new Error("Bun unexpectedly loaded the fixture .env");
 // CLI の事前確認は agent 起動や PID 記録を行わず終了する。
 if (process.argv.includes("--version") || process.argv.includes("--help")) {
     process.stdout.write(process.argv.includes("--version") ? "grok 9.9.9 (fake)\n" : "Run the agent over stdio\n");
@@ -25,7 +27,7 @@ else {
         if (process.env.POSIX_OWNED_MODE === "handshake")
             return;
         if (["remaining", "natural"].includes(process.env.POSIX_OWNED_MODE)) {
-            const child = spawn(process.execPath, [process.argv[1], "--grandchild"], {
+            const child = spawn(process.execPath, [...("bun" in process.versions ? ["--no-env-file"] : []), process.argv[1], "--grandchild"], {
                 env: process.env, stdio: ["ignore", "ignore", "inherit", "ipc"],
                 // Windows E2E は libuv 自身の Job を使わず supervisor の所有を検証する。
                 detached: process.platform === "win32" && process.env.WINDOWS_OWNED_DETACHED_DESCENDANT === "1"

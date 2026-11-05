@@ -3,7 +3,7 @@
 ## English
 
 
-For development, use the Node.js version pinned in `package.json` under `volta.node` (also used by CI) and the pnpm version pinned in `packageManager`. The distributed plugin supports Node.js 22 or later.
+For development, use the Node.js version pinned in `package.json` under `volta.node` (also used by CI) and the pnpm version pinned in `packageManager`. The distributed plugin supports Bun 1.4.4 or later and Node.js 22 or later on Windows, macOS, and Linux; Bun is preferred when both are available.
 
 The `.mts` files in `plugins/grok/scripts/`, `scripts/`, and `tests/` are the TypeScript sources. Edit these files, then run:
 
@@ -15,9 +15,11 @@ pnpm test
 pnpm check-version
 ```
 
-`build` type-checks all TypeScript sources and emits adjacent `.mjs` files. Commit both sources and generated JavaScript. Keep `.mjs` extensions in imports and host commands: the distributed plugin runs directly on Node.js without a compiler. Prefer Rust first, Bun (TypeScript / JavaScript) second, and C# third for implementations. Languages needed for compatibility with existing products, frameworks, or SDKs may be used for that purpose only. PowerShell (including 7) and Windows batch implementations remain prohibited, including existing implementations. Bash is permitted. Preserve the existing Node.js runtime compatibility and limit migrations to the requested scope.
+After installing dependencies with the pinned pnpm and `pnpm-lock.yaml`, Bun 1.4.4 or later can also run `bun --no-env-file --no-install --bun run build` and `bun --no-env-file --no-install scripts/check-generated.mjs`. These commands were verified on Windows without Node.js on PATH. Missing dependencies fail without installation. Keep the existing pnpm lockfile and Node.js test/CI commands; this does not establish a Bun-only dependency-install or full-test workflow.
 
-The Windows helper source of truth is `plugins/grok/native/` and its checked-in `Cargo.lock`. It implements `supervisor`, `identity`, and `git-snapshot`; the plugin includes `plugins/grok/bin/win32-{ia32,x64,arm64}/grok-windows-helper.exe`. Users still only need Node.js 22 or later and Git: there is no runtime Rust build or download.
+`build` type-checks all TypeScript sources and emits adjacent `.mjs` files. Commit both sources and generated JavaScript. Keep `.mjs` extensions in imports and host commands: the distributed plugin runs directly on Bun or Node.js without a compiler. Prefer Rust first, Bun (TypeScript / JavaScript) second, and C# third for implementations. Languages needed for compatibility with existing products, frameworks, or SDKs may be used for that purpose only. PowerShell (including 7) and Windows batch implementations remain prohibited, including existing implementations. Bash is permitted. Preserve the existing Node.js runtime compatibility and limit migrations to the requested scope.
+
+The Windows helper source of truth is `plugins/grok/native/` and its checked-in `Cargo.lock`. It implements `supervisor`, `identity`, and `git-snapshot`; the plugin includes `plugins/grok/bin/win32-{ia32,x64,arm64}/grok-windows-helper.exe`. Users need Bun 1.4.4 or later or Node.js 22 or later, plus Git: there is no runtime Rust build or download.
 
 To update these binaries, use Windows with Visual Studio **18.11.12328.437**, default VC toolset **14.51.36231** (observed linker file version **14.51.36260.0**), Windows SDK **10.0.26100.0**, and Rust **1.97.1** (`rust-toolchain.toml`). Install the matching Visual Studio C++ x86/x64 and ARM64 tools and SDK through the Visual Studio installer. The script locates Visual Studio using `vswhere`, requires the exact Visual Studio and default VC toolset versions, and explicitly selects that SDK and each target's linker/libraries without invoking `vcvars`, PowerShell, or batch files. Missing tools or version differences fail the build rather than silently selecting another environment. Install the three Rust targets explicitly in your development environment, then regenerate and verify all distribution binaries with:
 
@@ -45,11 +47,13 @@ For local Windows validation where Prunlet must manage deletion, use a dedicated
 
 ## 日本語
 
-開発には `package.json` の `volta.node` で CI と共通に固定した Node.js と、`packageManager` で固定した pnpm を使用します。配布プラグインは Node.js 22 以降に対応します。
+開発には `package.json` の `volta.node` で CI と共通に固定した Node.js と、`packageManager` で固定した pnpm を使用します。配布プラグインは Windows・macOS・Linux で Bun 1.4.4 以降と Node.js 22 以降に対応し、両方ある場合は Bun を優先します。
 
-`plugins/grok/scripts/`、`scripts/`、`tests/` の `.mts` が TypeScript の正本です。編集後は上記のコマンドを実行し、ソースと生成された `.mjs` を一緒にコミットします。import とホストの起動コマンドは `.mjs` のまま維持します。利用者はコンパイラなしで Node.js から直接実行できます。実装は Rust を第一候補、Bun（TypeScript / JavaScript）を第二候補、C# を第三候補とします。既存製品・フレームワーク・SDK との互換性に必要な言語は、その用途に限って使用できます。PowerShell（7 を含む）・Windows バッチは既存分を含め実装に使用せず、Bash は使用できます。既存 Node.js ランタイムの互換性を保ち、移行は依頼範囲に限定します。
+固定 pnpm と `pnpm-lock.yaml` で依存導入後は、Bun 1.4.4 以降で `bun --no-env-file --no-install --bun run build` と `bun --no-env-file --no-install scripts/check-generated.mjs` も使えます。Windows の Node.js が PATH にない環境で確認済みです。依存が不足している場合は導入せず失敗します。既存の pnpm lockfile と Node.js のテスト・CI 手順を維持し、Bun だけの依存導入・全テスト手順へは切り替えません。
 
-Windows helper の正本は `plugins/grok/native/` と Git 管理する `Cargo.lock` です。`supervisor`、`identity`、`git-snapshot` を実装し、`plugins/grok/bin/win32-{ia32,x64,arm64}/grok-windows-helper.exe` を同梱します。利用者に必要なのは従来どおり Node.js 22 以降と Git だけで、実行時の Rust ビルドやダウンロードはありません。
+`plugins/grok/scripts/`、`scripts/`、`tests/` の `.mts` が TypeScript の正本です。編集後は上記のコマンドを実行し、ソースと生成された `.mjs` を一緒にコミットします。import とホストの起動コマンドは `.mjs` のまま維持します。利用者はコンパイラなしで Bun または Node.js から直接実行できます。実装は Rust を第一候補、Bun（TypeScript / JavaScript）を第二候補、C# を第三候補とします。既存製品・フレームワーク・SDK との互換性に必要な言語は、その用途に限って使用できます。PowerShell（7 を含む）・Windows バッチは既存分を含め実装に使用せず、Bash は使用できます。既存 Node.js ランタイムの互換性を保ち、移行は依頼範囲に限定します。
+
+Windows helper の正本は `plugins/grok/native/` と Git 管理する `Cargo.lock` です。`supervisor`、`identity`、`git-snapshot` を実装し、`plugins/grok/bin/win32-{ia32,x64,arm64}/grok-windows-helper.exe` を同梱します。利用者に必要なのは Bun 1.4.4 以降または Node.js 22 以降と Git で、実行時の Rust ビルドやダウンロードはありません。
 
 バイナリ更新には Windows、Visual Studio **18.11.12328.437**、既定 VC toolset **14.51.36231**（実測 linker ファイル版 **14.51.36260.0**）、Windows SDK **10.0.26100.0**、`rust-toolchain.toml` で固定する Rust **1.97.1** を使用します。Visual Studio Installer で対応する C++ x86/x64・ARM64 ツールと SDK を導入してください。スクリプトは `vswhere` で VS を検出し、本体と既定 VC toolset の完全一致を確認して各ターゲットの linker・ライブラリと SDK を明示選択します。`vcvars`、PowerShell、バッチは呼びません。ツール不足・版の相違は明示的な失敗となります。開発環境へ3ターゲットを明示導入し、上記のコマンドで全配布バイナリを再生成・照合してください。
 

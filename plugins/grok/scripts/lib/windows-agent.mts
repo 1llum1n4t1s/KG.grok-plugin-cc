@@ -9,7 +9,7 @@ export interface WindowsAgentOptions {
 import net from "node:net";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import childProcess from "node:child_process";
 import { windowsHelperPath } from "./windows-helper.mjs";
 import { buildShellCommand, getProcessSnapshot } from "./process.mjs";
 
@@ -131,7 +131,7 @@ export async function spawnWindowsAgent(cwd, command, args, options: WindowsAgen
       void Promise.resolve(checked).catch(() => {});
       throw new TypeError("Windows agent startup verification must be synchronous.");
     }
-    proc = (options.spawnImpl ?? spawn)(windowsHelperPath(),
+    proc = (options.spawnImpl ?? childProcess.spawn)(windowsHelperPath(),
       ["supervisor"],
       { cwd, env, stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true });
     owned.proc = proc;

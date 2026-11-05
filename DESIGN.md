@@ -8,7 +8,7 @@ Claude Code と Codex から既存の Grok Build CLI を呼び出す薄い橋渡
 
 以下のパスは Git ルート基準。Claude 専用 helper と Codex 公開 skill は、それぞれの manifest が異なるディレクトリを公開し、ホスト固有の指示を混在させない。
 
-Node.js ランタイム、管理スクリプト、テストの正本は TypeScript の `.mts`。`pnpm build` で同じ場所へ `.mjs` を生成し、配布用の生成物も Git 管理する。Windows helper の正本は `plugins/grok/native/` の Rust と Cargo.lock。PowerShell / CMD 実装は使用しない。両ホストは Node.js 22 以降で `.mjs` を直接実行し、Windows では対応アーキテクチャの同梱 executable を呼ぶ。利用者には従来どおり Node.js と Git が必要で、Rust、MSVC、コンパイラ、実行時ダウンロードは不要。生成物の照合と開発手順は [CONTRIBUTING.md](CONTRIBUTING.md) を参照する。
+ランタイム、管理スクリプト、テストの正本は TypeScript の `.mts`。`pnpm build` で同じ場所へ `.mjs` を生成し、配布用の生成物も Git 管理する。Windows helper の正本は `plugins/grok/native/` の Rust と Cargo.lock。PowerShell / CMD 実装は使用しない。両ホストは Windows・macOS・Linux で Bun 1.4.4 以降または Node.js 22 以降を使い、`.mjs` を直接実行する。両方ある場合は `bun --no-env-file` を優先する。Windows の対応アーキテクチャでは同梱 executable を呼ぶ。利用者には Git と対応ランタイムが必要で、Rust、MSVC、コンパイラ、実行時ダウンロードは不要。生成物の照合と開発手順は [CONTRIBUTING.md](CONTRIBUTING.md) を参照する。
 
 | 構成 | 責務 |
 | --- | --- |
