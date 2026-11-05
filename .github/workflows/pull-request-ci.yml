@@ -32,16 +32,16 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Check committed JavaScript against TypeScript
-        run: pnpm check-generated
+        run: node scripts/check-generated.mjs
 
       - name: Run build
-        run: pnpm build
+        run: pnpm exec tsc -p tsconfig.acp.json
 
       - name: Run test suite
-        run: pnpm test
+        run: node scripts/run-tests.mjs
 
       - name: Check manifest versions
-        run: pnpm check-version
+        run: node scripts/bump-version.mjs --check
 
   node-22-smoke:
     name: Node.js 22.0 distribution smoke
@@ -78,9 +78,9 @@ jobs:
       - name: Set up pinned Rust and Windows targets
         run: rustup toolchain install 1.97.1 --profile minimal --target i686-pc-windows-msvc,x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
       - name: Check committed JavaScript against TypeScript
-        run: pnpm check-generated
+        run: node scripts/check-generated.mjs
       - name: Check committed native distribution against Rust
-        run: pnpm check:native
+        run: node scripts/build-windows-helper.mjs --check
       - name: Prepare isolated native Git fixture root
         run: |
           node --input-type=module <<'NODE'
@@ -89,11 +89,11 @@ jobs:
           const root = path.resolve(fs.mkdtempSync(path.join(path.resolve(process.env.RUNNER_TEMP), 'grok-git-native-')));
           fs.appendFileSync(process.env.GITHUB_ENV, `GROK_GIT_NATIVE_FIXTURE_ROOT=${root}\n`);
           NODE
-      # pnpm test builds the native fixture shim, runs Rust unit tests, and passes
+      # The Node test runner builds the native fixture shim, runs Rust unit tests, and passes
       # GROK_TEST_SHIM to the real process ownership and Git boundary tests.
       # Exercise checked-in helper executables; do not replace them before tests.
       - name: Test committed Windows distribution and native boundaries
-        run: pnpm test
+        run: node scripts/run-tests.mjs
 
   windows-architecture-smoke:
     name: Windows distribution smoke (${{ matrix.expected-arch }})

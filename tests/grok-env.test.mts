@@ -16,8 +16,9 @@ test("injected Grok environment is used for preflight, authentication and model 
   const originalSpawn = childProcess.spawn, owned = [];
   const observedSpawn = function(command, args, options) {
     const child = originalSpawn.apply(this, arguments);
-    if (process.platform === "linux" && command === process.execPath && args?.[0]?.endsWith("posix-agent-supervisor.mjs") &&
-        args?.[1] === fake.env.GROK_BIN && options?.env?.FAKE_GROK_STATE === fake.env.FAKE_GROK_STATE) {
+    const directArgs = process.versions.bun ? (args?.[0] === "--no-env-file" ? args.slice(1) : null) : args;
+    if (process.platform === "linux" && command === process.execPath && directArgs?.length === 4 && directArgs[0]?.endsWith("posix-agent-supervisor.mjs") &&
+        directArgs[1] === fake.env.GROK_BIN && directArgs[2] === "agent" && directArgs[3] === "stdio" && options?.env?.FAKE_GROK_STATE === fake.env.FAKE_GROK_STATE) {
       const record: { child: import('node:child_process').ChildProcess; identity: { group: number; start: string } | null; closed: boolean; error: Error | null; close?: Promise<{ code: number; signal: NodeJS.Signals }> } = { child, identity: null, closed: false, error: null };
       owned.push(record);
       record.close = new Promise(resolve => child.once("close", (code, signal) => { record.closed = true; resolve({ code, signal }); }));

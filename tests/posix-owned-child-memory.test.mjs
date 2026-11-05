@@ -3,38 +3,38 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
+import { Duplex, PassThrough } from "node:stream";
 const source = fs.readFileSync(new URL("../plugins/grok/scripts/lib/acp.mjs", import.meta.url), "utf8");
 const direct = source.slice(source.indexOf("class SpawnedAcpClient"), source.indexOf("export class GrokAcpClient"));
 function fixture({ spawnFailure = false, remainingGroup = false, groupDenied = false, inherited = false } = {}) {
-    let calls = 0;
+    const stopRequests = [];
+    let unexpectedSignals = 0;
     const timers = [];
     let finishWait;
     let waits = 0;
     let groupPresent = true;
     let queries = 0;
+    const lifeline = new Duplex({ read() { }, write(chunk, _encoding, callback) { stopRequests.push(chunk.toString()); callback(); } });
     const child = new EventEmitter();
     Object.assign(child, { pid: 123, exitCode: null, signalCode: null, killed: false,
-        stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), stdio: [null, null, null, new PassThrough()],
-        kill(signal) { assert.equal(inherited, true); assert.equal(signal, "SIGTERM"); calls += 1; return true; }, unref() { } });
+        stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), stdio: [null, null, null, lifeline],
+        kill() { unexpectedSignals += 1; return true; }, unref() { } });
     child.on("close", () => { if (!remainingGroup)
         groupPresent = false; });
-    const context = vm.createContext({ POSIX_AGENT_SUPERVISOR: "/supervisor.mjs", process: { platform: "linux", execPath: "/node", env: {}, kill(pid, signal) {
-                assert.equal(pid, -123);
-                if (signal === 0) {
-                    queries += 1;
-                    if (groupDenied)
-                        throw Object.assign(Error("denied"), { code: "EPERM" });
-                    if (!groupPresent)
-                        throw Object.assign(Error("gone"), { code: "ESRCH" });
+    const context = vm.createContext({ POSIX_AGENT_SUPERVISOR: "/supervisor.mjs", process: { platform: "linux", execPath: "/node", versions: process.versions, env: {}, kill(pid, signal) {
+                if (pid !== -123 || signal !== 0) {
+                    unexpectedSignals += 1;
                     return true;
                 }
-                assert.equal(signal, "SIGTERM");
-                calls += 1;
+                queries += 1;
+                if (groupDenied)
+                    throw Object.assign(Error("denied"), { code: "EPERM" });
+                if (!groupPresent)
+                    throw Object.assign(Error("gone"), { code: "ESRCH" });
                 return true;
             } },
         childProcess: { spawn: (command, args, options) => { if (spawnFailure)
-                throw Error("spawn failed"); assert.equal(command, "/node"); assert.equal(args[0], "/supervisor.mjs"); assert.equal(options.detached, !inherited); assert.equal(options.stdio[3], "pipe"); return child; } }, setTimeout: callback => { timers.push(callback); return { unref() { } }; },
+                throw Error("spawn failed"); assert.equal(command, "/node"); assert.deepEqual(Array.from(args), [...(process.versions.bun ? ["--no-env-file"] : []), "/supervisor.mjs", "grok", "agent", "stdio"]); assert.equal(options.detached, !inherited); assert.equal(options.stdio[3], "pipe"); return child; } }, setTimeout: callback => { timers.push(callback); return { unref() { } }; },
         withTimeout: promise => promise, DIRECT_HANDSHAKE_TIMEOUT_MS: 100, CLOSE_TIMEOUT_MS: 0,
         waitForExitWithTimeout: () => { waits += 1; return new Promise(resolve => { finishWait = resolve; }); },
         AcpClientBase: class {
@@ -45,8 +45,8 @@ function fixture({ spawnFailure = false, remainingGroup = false, groupDenied = f
         } });
     vm.runInContext(direct + ";globalThis.Direct=SpawnedAcpClient;", context);
     const client = new context.Direct("mock", inherited ? { posixGroupMode: "inherit" } : {});
-    return { client, child, calls: () => calls, queries: () => queries, waits: () => waits, runTimers: () => { for (const timer of timers.splice(0))
-            timer(); }, finishWait: () => finishWait() };
+    return { client, child, calls: () => { assert.equal(unexpectedSignals, 0); assert.ok(stopRequests.every(request => request === "stop\n")); return stopRequests.length; }, queries: () => queries, waits: () => waits, runTimers: () => { for (const timer of timers.splice(0))
+            timer(); }, finishWait: () => { assert.equal(unexpectedSignals, 0); assert.ok(stopRequests.every(request => request === "stop\n")); finishWait(); } };
 }
 test("POSIX stop refuses a process reference not returned by this client's spawn", async () => {
     const f = fixture();

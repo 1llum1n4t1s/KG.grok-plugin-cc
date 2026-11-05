@@ -48,7 +48,7 @@ function makeVersionFixture(t) {
 }
 test("bump-version updates every release manifest", (t) => {
     const root = makeVersionFixture(t);
-    const result = run("node", [SCRIPT, "--root", root, "1.2.3"], {
+    const result = run(process.execPath, [SCRIPT, "--root", root, "1.2.3"], {
         cwd: ROOT
     });
     assert.equal(result.status, 0, result.stderr);
@@ -64,7 +64,7 @@ test("bump-version check mode reports stale metadata", (t) => {
         name: "kg-grok-plugin-cc",
         version: "1.0.3"
     });
-    const result = run("node", [SCRIPT, "--root", root, "--check"], {
+    const result = run(process.execPath, [SCRIPT, "--root", root, "--check"], {
         cwd: ROOT
     });
     assert.notEqual(result.status, 0);

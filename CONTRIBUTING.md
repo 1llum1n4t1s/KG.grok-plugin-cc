@@ -3,7 +3,7 @@
 ## English
 
 
-For development, use the Node.js version pinned in `package.json` under `volta.node` (also used by CI) and the pnpm version pinned in `packageManager`. The distributed plugin supports Bun 1.4.4 or later and Node.js 22 or later on Windows, macOS, and Linux; Bun is preferred when both are available.
+For development, use Bun 1.4.4 or later for package scripts and the pnpm version pinned in `packageManager` for the committed lockfile. Node compatibility CI uses the version pinned under `volta.node`. The distributed plugin supports Bun 1.4.4 or later and Node.js 22 or later on Windows, macOS, and Linux; Bun is preferred when both are available.
 
 The `.mts` files in `plugins/grok/scripts/`, `scripts/`, and `tests/` are the TypeScript sources. Edit these files, then run:
 
@@ -15,7 +15,7 @@ pnpm test
 pnpm check-version
 ```
 
-After installing dependencies with the pinned pnpm and `pnpm-lock.yaml`, Bun 1.4.4 or later can also run `bun --no-env-file --no-install --bun run build` and `bun --no-env-file --no-install scripts/check-generated.mjs`. These commands were verified on Windows without Node.js on PATH. Missing dependencies fail without installation. Keep the existing pnpm lockfile and Node.js test/CI commands; this does not establish a Bun-only dependency-install or full-test workflow.
+After installing dependencies with the pinned pnpm and `pnpm-lock.yaml`, package scripts use Bun with environment-file loading and automatic installation disabled. Use `bun --no-env-file --no-install --bun run build` for the TypeScript build. Missing dependencies fail without installation. Node compatibility CI invokes the corresponding `.mjs` scripts explicitly with Node.
 
 `build` type-checks all TypeScript sources and emits adjacent `.mjs` files. Commit both sources and generated JavaScript. Keep `.mjs` extensions in imports and host commands: the distributed plugin runs directly on Bun or Node.js without a compiler. Prefer Rust first, Bun (TypeScript / JavaScript) second, and C# third for implementations. Languages needed for compatibility with existing products, frameworks, or SDKs may be used for that purpose only. PowerShell (including 7) and Windows batch implementations remain prohibited, including existing implementations. Bash is permitted. Preserve the existing Node.js runtime compatibility and limit migrations to the requested scope.
 
@@ -39,17 +39,17 @@ The scripts never invoke rustup or its proxies. After the developer explicitly i
 
 `check-generated` compiles into the ignored `plugins/grok/.generated/check/` build directory and compares the output with the checked-in JavaScript, allowing Git line-ending conversion. CI runs this check **before** building to catch stale or missing distribution files. It also rejects `.mjs` files without a corresponding `.mts` source. The check directory is reusable build output, not part of the distribution runtime.
 
-Tests use Node's built-in test runner and fake Grok processes; they do not require a real Grok account. Some process-lifecycle E2E tests require POSIX and are skipped on Windows. Run those tests on Linux or macOS before treating that coverage as verified.
+Tests use the `node:test` API and fake Grok processes, with Bun as the default runner and actual Node in compatibility CI; they do not require a real Grok account. Some process-lifecycle E2E tests require POSIX and are skipped on Windows. Run those tests on Linux or macOS before treating that coverage as verified.
 
-CI runs the full suite, build, generated-file check, and the independent `check-version` repository check on Linux with the pinned development Node.js. An additional job runs the committed `.mjs` foreground bridge and runtime smoke tests on Node.js 22.0.0 without installing dependencies. Windows CI uses Bash command steps, pinned Rust, and `pnpm test` to build the native test shim, run Rust unit tests, and exercise the checked-in helper through real process ownership, shutdown, and Git snapshot boundary tests. The runner passes the shim as `GROK_TEST_SHIM`; `GROK_GIT_NATIVE_FIXTURE_ROOT` points to an isolated directory under runner temp. Keep `pnpm check-version` as a separate required check; fixture tests cover version updates and stale metadata rather than checking the live repository again.
+CI runs the full suite, build, generated-file check, and the independent version check on Linux with the pinned development Node.js. It invokes `node scripts/check-generated.mjs`, `node scripts/run-tests.mjs`, and `node scripts/bump-version.mjs --check` explicitly. An additional job runs committed foreground and runtime smoke tests on Node.js 22.0.0. Windows CI also uses `node scripts/build-windows-helper.mjs --check` and the Node test runner to build the native test shim, run Rust unit tests, and exercise process ownership, shutdown, and Git snapshot boundaries. The runner passes the shim as `GROK_TEST_SHIM`; `GROK_GIT_NATIVE_FIXTURE_ROOT` points under runner temp. Keep the live repository version check separate from version fixture tests.
 
 For local Windows validation where Prunlet must manage deletion, use a dedicated `TEMP`/`TMP` directory and set both `GROK_TEST_DEFER_CLEANUP=1` and `GROK_BUMP_TEST_DEFER_CLEANUP=1`. The first defers shared fixture and workspace-link cleanup; the second defers version-script fixture cleanup. Fixtures remain in that dedicated temporary directory until the parent agent cleans them with Prunlet after the test processes exit and process termination is confirmed. Cleanup is deferred, not omitted. Normal CI runs leave these variables unset and retain the usual fixture cleanup.
 
 ## 日本語
 
-開発には `package.json` の `volta.node` で CI と共通に固定した Node.js と、`packageManager` で固定した pnpm を使用します。配布プラグインは Windows・macOS・Linux で Bun 1.4.4 以降と Node.js 22 以降に対応し、両方ある場合は Bun を優先します。
+開発用package scriptはBun 1.4.4以降を使い、lockfile管理は `packageManager` で固定したpnpmを使います。Node互換CIは `volta.node` の固定版を使います。配布プラグインは Windows・macOS・Linux で Bun 1.4.4 以降と Node.js 22 以降に対応し、両方ある場合は Bun を優先します。
 
-固定 pnpm と `pnpm-lock.yaml` で依存導入後は、Bun 1.4.4 以降で `bun --no-env-file --no-install --bun run build` と `bun --no-env-file --no-install scripts/check-generated.mjs` も使えます。Windows の Node.js が PATH にない環境で確認済みです。依存が不足している場合は導入せず失敗します。既存の pnpm lockfile と Node.js のテスト・CI 手順を維持し、Bun だけの依存導入・全テスト手順へは切り替えません。
+固定pnpmと `pnpm-lock.yaml` で依存導入後、package scriptは環境ファイル読込みと自動導入を無効にしたBunで動きます。TypeScriptビルドは `bun --no-env-file --no-install --bun run build` を使います。依存が不足している場合は導入せず失敗します。Node互換CIは対応する `.mjs` をNodeで明示実行します。
 
 `plugins/grok/scripts/`、`scripts/`、`tests/` の `.mts` が TypeScript の正本です。編集後は上記のコマンドを実行し、ソースと生成された `.mjs` を一緒にコミットします。import とホストの起動コマンドは `.mjs` のまま維持します。利用者はコンパイラなしで Bun または Node.js から直接実行できます。実装は Rust を第一候補、Bun（TypeScript / JavaScript）を第二候補、C# を第三候補とします。既存製品・フレームワーク・SDK との互換性に必要な言語は、その用途に限って使用できます。PowerShell（7 を含む）・Windows バッチは既存分を含め実装に使用せず、Bash は使用できます。既存 Node.js ランタイムの互換性を保ち、移行は依頼範囲に限定します。
 
@@ -65,8 +65,8 @@ Windows helper の正本は `plugins/grok/native/` と Git 管理する `Cargo.l
 
 `build` は全 TypeScript の型検査と隣接する `.mjs` の生成を行います。`check-generated` は Git 除外済みの `plugins/grok/.generated/check/` へ生成し、コミット対象の JavaScript と比較します。Git による改行変換は許容します。CI ではビルド前に照合し、生成物の更新漏れ・欠落と、対応する `.mts` がない `.mjs` を検出します。照合ディレクトリは再利用できるビルド出力であり、配布ランタイムからは参照しません。
 
-テストは Node 標準のランナーと fake Grok を使用し、実アカウントは必要ありません。POSIX 専用のプロセス終了 E2E は Windows でスキップされるため、検証済みとするには Linux または macOS でも実行してください。
+テストは `node:test` APIとfake Grokを使い、既定はBun、互換CIは実際のNodeで実行します。実アカウントは必要ありません。POSIX専用のプロセス終了E2EはWindowsでスキップされるため、検証済みとするにはLinuxまたはmacOSでも実行してください。
 
-CI は固定した開発用 Node.js の Linux で全テスト・ビルド・生成物照合と、独立した `check-version` による実リポジトリの検証を実行します。追加のジョブは依存導入なしでコミット済み `.mjs` を使い、Node.js 22.0.0 で前景接続とランタイムの smoke test を行います。Windows は Bash のコマンドステップと固定 Rust を使用し、`pnpm test` が native テスト shim のビルドと Rust 単体テストを行い、同梱 helper を使う実プロセス所有・終了・Git スナップショット境界を確認します。ランナーは shim を `GROK_TEST_SHIM` で渡し、`GROK_GIT_NATIVE_FIXTURE_ROOT` は runner temp 内の分離領域を指します。`pnpm check-version` は独立した必須検証として維持してください。バージョンの fixture テストは更新と不整合の検出を担い、実リポジトリの検証を重複実行しません。
+CIは固定Node.jsのLinuxで全テスト・ビルド・生成物照合・独立した実リポジトリのversion検証を行います。`node scripts/check-generated.mjs`、`node scripts/run-tests.mjs`、`node scripts/bump-version.mjs --check` を明示実行し、追加ジョブはNode.js 22.0.0で前景接続とランタイムのsmoke testを行います。Windowsも `node scripts/build-windows-helper.mjs --check` とNodeのtest runnerを使い、native shim・Rust単体テスト・プロセス所有・終了・Git snapshot境界を検証します。shimは `GROK_TEST_SHIM`、隔離領域はrunner temp内の `GROK_GIT_NATIVE_FIXTURE_ROOT` で渡します。実リポジトリのversion検証はversion fixtureテストと独立して維持します。
 
 Prunlet による削除管理が必要な Windows ローカル検証では、専用の `TEMP` / `TMP` を用意し、`GROK_TEST_DEFER_CLEANUP=1` と `GROK_BUMP_TEST_DEFER_CLEANUP=1` の両方を設定します。前者は共通 fixture と workspace リンク、後者はバージョンスクリプトの fixture の清掃を保留します。fixture を専用の一時領域内に保持し、テストプロセス終了と関連プロセスの終了を確認してから、親エージェントが Prunlet で清掃します。清掃を省略するのではなく、後へ保留する指定です。通常の CI はこれらを未設定とし、従来どおり fixture を清掃します。

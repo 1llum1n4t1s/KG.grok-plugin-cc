@@ -9,7 +9,7 @@ import { installFakeGrok } from "./fake-grok-fixture.mjs";
 import { initGitRepo } from "./helpers.mjs";
 const cli = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
 const output = JSON.stringify({ verdict: "approve", summary: "Reviewed", findings: [], next_steps: [] });
-test("foreground review ignores old state, enforces read-only permission, and closes its agent", { skip: process.platform === "win32" }, () => {
+test("foreground review ignores old state, enforces read-only permission, and closes its agent", { skip: process.platform === "win32", timeout: 45000 }, () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "grok-foreground-work-"));
     const fake = installFakeGrok({ replies: [{ text: output }] });
     try {
@@ -51,8 +51,12 @@ GrokAcpClient.connectForeground = async (...args) => {
   client.close = async () => { await close(); client.closeStopUnconfirmed = true; };
   return client;
 };`;
-        const injectedEnv = { ...env, NODE_OPTIONS: `--import=${`data:text/javascript,${encodeURIComponent(injection)}`}` };
-        const invokeUnconfirmed = args => spawnSync(process.execPath, [cli, ...args], { cwd: workspace, env: injectedEnv, encoding: "utf8", timeout: 15000 });
+        const injectedPreload = path.join(fake.binDir, "unconfirmed-preload.mjs");
+        if (process.versions.bun)
+            fs.writeFileSync(injectedPreload, injection);
+        const injectedEnv = process.versions.bun ? env : { ...env, NODE_OPTIONS: `--import=${`data:text/javascript,${encodeURIComponent(injection)}`}` };
+        const injectedArgs = process.versions.bun ? ["--no-env-file", "--preload", injectedPreload, cli] : [cli];
+        const invokeUnconfirmed = args => spawnSync(process.execPath, [...injectedArgs, ...args], { cwd: workspace, env: injectedEnv, encoding: "utf8", timeout: 15000 });
         fs.writeFileSync(env.FAKE_GROK_SCENARIO, JSON.stringify({ replies: [{ text: output }] }));
         const unconfirmedReview = invokeUnconfirmed(["audit", "--json"]);
         assert.equal(unconfirmedReview.status, 1, unconfirmedReview.stderr);
@@ -79,9 +83,13 @@ GrokAcpClient.connectForeground = async (...args) => {
   };
   return client;
 };`;
-        const failureEnv = { ...env, NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(failureInjection)}`,
+        const failurePreload = path.join(fake.binDir, "rpc-failure-preload.mjs");
+        if (process.versions.bun)
+            fs.writeFileSync(failurePreload, failureInjection);
+        const failureEnv = { ...env, ...(process.versions.bun ? {} : { NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(failureInjection)}` }),
             TEST_RPC_DATA: JSON.stringify({ message: "API error (status 402 Payment Required): Grok Build usage balance exhausted", http_status: 402 }) };
-        const invokeFailure = (args, envOverride = failureEnv) => spawnSync(process.execPath, [cli, ...args], { cwd: workspace, env: envOverride, encoding: "utf8", timeout: 15000 });
+        const failureArgs = process.versions.bun ? ["--no-env-file", "--preload", failurePreload, cli] : [cli];
+        const invokeFailure = (args, envOverride = failureEnv) => spawnSync(process.execPath, [...failureArgs, ...args], { cwd: workspace, env: envOverride, encoding: "utf8", timeout: 15000 });
         for (const args of [["audit"], ["task", "inspect"]]) {
             const response = invokeFailure(args);
             assert.equal(response.status, 1);

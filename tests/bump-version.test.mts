@@ -56,7 +56,7 @@ function makeVersionFixture(t: import("node:test").TestContext) {
 test("bump-version updates every release manifest", (t) => {
   const root = makeVersionFixture(t);
 
-  const result = run("node", [SCRIPT, "--root", root, "1.2.3"], {
+  const result = run(process.execPath, [SCRIPT, "--root", root, "1.2.3"], {
     cwd: ROOT
   });
 
@@ -75,7 +75,7 @@ test("bump-version check mode reports stale metadata", (t) => {
     version: "1.0.3"
   });
 
-  const result = run("node", [SCRIPT, "--root", root, "--check"], {
+  const result = run(process.execPath, [SCRIPT, "--root", root, "--check"], {
     cwd: ROOT
   });
 

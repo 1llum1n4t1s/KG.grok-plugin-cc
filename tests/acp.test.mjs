@@ -28,8 +28,9 @@ test("failed direct ACP initialization closes the spawned agent", async (t) => {
         const child = originalSpawn.apply(this, arguments);
         const supervisor = process.platform === "win32" && path.win32.basename(String(command)).toLowerCase() === "grok-windows-helper.exe" &&
             Array.isArray(args) && args.length === 1 && args[0] === "supervisor";
-        const direct = process.platform !== "win32" && command === process.execPath &&
-            args?.[0]?.endsWith("posix-agent-supervisor.mjs") && args?.[1] === fake.env.GROK_BIN && args?.[2] === "agent" && args?.[3] === "stdio";
+        const directArgs = process.versions.bun ? (args?.[0] === "--no-env-file" ? args.slice(1) : null) : args;
+        const direct = process.platform !== "win32" && command === process.execPath && directArgs?.length === 4 &&
+            directArgs[0]?.endsWith("posix-agent-supervisor.mjs") && directArgs[1] === fake.env.GROK_BIN && directArgs[2] === "agent" && directArgs[3] === "stdio";
         if ((direct || supervisor) && options?.cwd === cwd && options?.env?.FAKE_GROK_STATE === fake.env.FAKE_GROK_STATE) {
             const record = { child, exited: false, exit: null, spawnError: null };
             record.exit = new Promise(resolve => child.once("exit", (code, signal) => { record.exited = true; resolve({ code, signal }); }));

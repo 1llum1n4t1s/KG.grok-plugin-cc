@@ -961,7 +961,7 @@ ${result.stderr}`);
   assert.match(result.stdout, /permission denied/);
 });
 
-test("read-only rescue permits built-in WebFetch but denies ambiguous or write-capable requests", () => {
+test("read-only rescue permits built-in WebFetch but denies ambiguous or write-capable requests", { timeout: 45000 }, () => {
   // 実障害と同じ ACP 要求を再生し、未知ツール・追加引数・非 HTTP URL の過剰許可も検出する。
   const url = "https://raw.githubusercontent.com/ip7z/7zip/26.03/C/LzmaEnc.c";
   const fetchCall = { title: `Fetch: ${url}`, kind: "fetch", rawInput: { variant: "WebFetch", url } };

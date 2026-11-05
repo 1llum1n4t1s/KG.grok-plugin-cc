@@ -91,9 +91,12 @@ try {
   // Windows のシェルに依存せず、従来の tests/*.test.mjs を展開する。
   const tests = fs.readdirSync(path.join(root, "tests"), { withFileTypes: true })
     .filter(entry => entry.isFile() && entry.name.endsWith(".test.mjs"))
-    .map(entry => `tests/${entry.name}`).sort();
+    .map(entry => `./tests/${entry.name}`).sort();
   if (!tests.length) throw new Error("No tests match tests/*.test.mjs");
-  finish(await wait(spawn(process.execPath, ["--test", "--test-concurrency=4", ...tests], {
+  const testArguments = process.versions.bun
+    ? ["--no-env-file", "--no-install", "test", "--parallel=4", ...tests]
+    : ["--test", "--test-concurrency=4", ...tests];
+  finish(await wait(spawn(process.execPath, testArguments, {
     cwd: root, env, stdio: "inherit", windowsHide: true
   })));
 } catch (error) {

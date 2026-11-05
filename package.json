@@ -13,13 +13,13 @@
     "node": "26.13.0"
   },
   "scripts": {
-    "bump-version": "node scripts/bump-version.mjs",
-    "check-version": "node scripts/bump-version.mjs --check",
-    "build": "tsc -p tsconfig.acp.json",
-    "build:native": "node scripts/build-windows-helper.mjs",
-    "check:native": "node scripts/build-windows-helper.mjs --check",
-    "check-generated": "node scripts/check-generated.mjs",
-    "test": "node scripts/run-tests.mjs"
+    "bump-version": "bun --no-env-file --no-install scripts/bump-version.mjs",
+    "check-version": "bun --no-env-file --no-install scripts/bump-version.mjs --check",
+    "build": "bun --no-env-file --no-install --bun run tsc -p tsconfig.acp.json",
+    "build:native": "bun --no-env-file --no-install scripts/build-windows-helper.mjs",
+    "check:native": "bun --no-env-file --no-install scripts/build-windows-helper.mjs --check",
+    "check-generated": "bun --no-env-file --no-install scripts/check-generated.mjs",
+    "test": "bun --no-env-file --no-install --bun run scripts/run-tests.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

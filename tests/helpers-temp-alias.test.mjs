@@ -23,7 +23,13 @@ function fixture(t, options = {}) {
     const removals = [];
     const directory = { isSymbolicLink: () => false, isDirectory: () => true };
     const link = { isSymbolicLink: () => true, isDirectory: () => false };
-    t.mock.method(os, 'tmpdir', () => root);
+    const tmpdirDescriptor = Object.getOwnPropertyDescriptor(os, 'tmpdir');
+    assert.ok(tmpdirDescriptor?.configurable);
+    t.after(() => {
+        Object.defineProperty(os, 'tmpdir', tmpdirDescriptor);
+        assert.deepEqual(Object.getOwnPropertyDescriptor(os, 'tmpdir'), tmpdirDescriptor);
+    });
+    Object.defineProperty(os, 'tmpdir', { configurable: true, enumerable: tmpdirDescriptor.enumerable, writable: true, value: () => root });
     t.mock.method(fs, 'realpathSync', (value) => {
         assert.equal(value, root);
         if (options.rootError)
