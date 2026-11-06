@@ -60,23 +60,28 @@ test("failed direct ACP initialization closes the spawned agent", async (t) => {
             childProcess.spawn = originalSpawn;
             syncBuiltinESMExports();
         }
-        for (const record of owned) {
-            if (!record.exited && record.child.exitCode === null && record.child.signalCode === null && Number.isInteger(record.child.pid)) {
-                record.child.kill("SIGTERM");
+        try {
+            for (const record of owned) {
+                if (!record.exited && record.child.exitCode === null && record.child.signalCode === null && Number.isInteger(record.child.pid)) {
+                    record.child.kill("SIGTERM");
+                }
+                if (!(await waitForOwnedExit(record)))
+                    throw new Error(`Fixture child exit was not confirmed; preserve ${cwd} and ${fake.binDir}`);
             }
-            if (!(await waitForOwnedExit(record)))
-                throw new Error(`Fixture child exit was not confirmed; preserve ${cwd} and ${fake.binDir}`);
-        }
-        if (!owned.length && Number.isInteger(fake.readState()?.pid))
-            throw new Error(`Fixture child handle was not observed; preserve ${cwd} and ${fake.binDir}`);
-        if (process.platform === "win32" && Number.isInteger(fake.readState()?.pid) && failure?.turnStopUnconfirmed === true) {
-            throw new Error(`Fixture Windows Job termination was not confirmed; preserve ${cwd} and ${fake.binDir}`);
-        }
-        if (process.platform === "linux") {
+            if (!owned.length && Number.isInteger(fake.readState()?.pid))
+                throw new Error(`Fixture child handle was not observed; preserve ${cwd} and ${fake.binDir}`);
+            if (process.platform === "win32" && Number.isInteger(fake.readState()?.pid) && failure?.turnStopUnconfirmed === true) {
+                throw new Error(`Fixture Windows Job termination was not confirmed; preserve ${cwd} and ${fake.binDir}`);
+            }
             assert.equal(owned.length, 1, "owned agent handle was not confirmed");
             assert.ok(owned[0].exited && Number.isInteger(owned[0].child.pid));
-            assert.notEqual(failure.turnStopUnconfirmed, true);
+            assert.ok(failure && failure.turnStopUnconfirmed !== true);
+            removeTempFixture(cwd, { recursive: true, force: true });
+            removeTempFixture(fake.binDir, { recursive: true, force: true });
         }
-        removeTempFixture(cwd, { recursive: true, force: true });
+        catch (error) {
+            t.diagnostic(`Fixture retained: ${cwd}; ${fake.binDir}: ${error.message}`);
+            throw error;
+        }
     }
 });

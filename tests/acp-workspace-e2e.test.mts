@@ -24,6 +24,11 @@ test("ACP file requests stay inside the real session workspace", async (t) => {
   const cwdAlias = path.join(root, "cwd-alias");
   fs.symlinkSync(workspace, cwdAlias, linkType);
   fs.symlinkSync(path.join(outside, "missing-target"), path.join(workspace, "dangling-link"), linkType);
+  const links = [cwdAlias, path.join(workspace, "outside-link"), path.join(workspace, "inside-link"), path.join(workspace, "dangling-link")].map(file => {
+    const stat = fs.lstatSync(file, { bigint: true });
+    assert.ok(stat.isSymbolicLink());
+    return { file, dev: stat.dev, ino: stat.ino, target: fs.readlinkSync(file) };
+  });
   const cases = [
     { read: "outside-link/canary.txt", code: -32602 },
     { write: "outside-link/canary.txt", code: -32602 },
@@ -39,11 +44,12 @@ test("ACP file requests stay inside the real session workspace", async (t) => {
   const fake = installFakeGrok({ replies: cases.map((item) => item.read
     ? { requestClientFileRead: { path: item.read } }
     : { requestClientFileWrite: { path: item.write, content: "DUMMY_WRITE" } }) });
-  const client = await GrokAcpClient.connectForeground(cwdAlias, {
-    grokBin: fake.env.GROK_BIN, env: fake.env,
-    clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } }
-  });
+  let client: Awaited<ReturnType<typeof GrokAcpClient.connectForeground>>;
   try {
+    client = await GrokAcpClient.connectForeground(cwdAlias, {
+      grokBin: fake.env.GROK_BIN, env: fake.env,
+      clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } }
+    });
     const session = await client.request("session/new", { cwd: cwdAlias, mcpServers: [] });
     for (const item of cases) {
       await client.request("session/prompt", { sessionId: session.sessionId, prompt: [{ type: "text", text: "exercise dummy file request" }] });
@@ -59,16 +65,19 @@ test("ACP file requests stay inside the real session workspace", async (t) => {
     assert.equal(fs.readFileSync(path.join(inside, "new/deep.txt"), "utf8"), "DUMMY_WRITE");
     assert.equal(fs.readFileSync(path.join(workspace, "normal/new.txt"), "utf8"), "DUMMY_WRITE");
   } finally {
-    await client.close();
-    if (process.platform === "linux") {
-      assert.ok(client.proc && Number.isInteger(client.proc.pid));
-      assert.notEqual(client.closeStopUnconfirmed, true);
-    }
-    for (const link of [cwdAlias, path.join(workspace, "outside-link"), path.join(workspace, "inside-link"), path.join(workspace, "dangling-link")]) {
-      assert.ok(fs.lstatSync(link).isSymbolicLink());
-      if (!(process.platform === "win32" && process.env.GROK_TEST_DEFER_CLEANUP === "1")) fs.unlinkSync(link);
-    }
-    removeTempFixture(root, { recursive: true, force: true });
+    try {
+      assert.ok(client, "connection did not return a client with shutdown evidence");
+      await client.close();
+      assert.equal(client.closeStopUnconfirmed, false);
+      for (const link of links) {
+        const stat = fs.lstatSync(link.file, { bigint: true });
+        assert.ok(stat.isSymbolicLink() && stat.dev === link.dev && stat.ino === link.ino, "fixture link identity changed");
+        assert.equal(fs.readlinkSync(link.file), link.target, "fixture link target changed");
+      }
+      if (!(process.platform === "win32" && process.env.GROK_TEST_DEFER_CLEANUP === "1")) for (const link of links) fs.unlinkSync(link.file);
+      removeTempFixture(root, { recursive: true, force: true });
+      removeTempFixture(fake.binDir, { recursive: true, force: true });
+    } catch (error) { t.diagnostic(`Fixture retained: ${root}; ${fake.binDir}: ${error.message}`); throw error; }
   }
 });
 
@@ -76,8 +85,9 @@ test("ACP file requests stay inside the real session workspace", async (t) => {
 test("fake ACP state remains readable while the agent publishes updates", async (t) => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "acp-state-e2e-"));
   const fake = installFakeGrok({ holdPrompt: true });
-  const client = await GrokAcpClient.connectForeground(workspace, { grokBin: fake.env.GROK_BIN, env: fake.env });
+  let client: Awaited<ReturnType<typeof GrokAcpClient.connectForeground>>;
   try {
+    client = await GrokAcpClient.connectForeground(workspace, { grokBin: fake.env.GROK_BIN, env: fake.env });
     const session = await client.request("session/new", { cwd: workspace, mcpServers: [] });
     for (let i = 0; i < 80; i += 1) {
       void client.request("session/prompt", { sessionId: session.sessionId, prompt: [{ type: "text", text: "DUMMY_STATE".repeat(400) }] }).catch(() => {});
@@ -89,11 +99,12 @@ test("fake ACP state remains readable while the agent publishes updates", async 
     }
     assert.equal(fake.readState().prompts.length, 80);
   } finally {
-    await client.close();
-    if (process.platform === "linux") {
-      assert.ok(client.proc && Number.isInteger(client.proc.pid));
-      assert.notEqual(client.closeStopUnconfirmed, true);
-    }
-    removeTempFixture(workspace, { recursive: true, force: true });
+    try {
+      assert.ok(client, "connection did not return a client with shutdown evidence");
+      await client.close();
+      assert.equal(client.closeStopUnconfirmed, false);
+      removeTempFixture(workspace, { recursive: true, force: true });
+      removeTempFixture(fake.binDir, { recursive: true, force: true });
+    } catch (error) { t.diagnostic(`Fixture retained: ${workspace}; ${fake.binDir}: ${error.message}`); throw error; }
   }
 });

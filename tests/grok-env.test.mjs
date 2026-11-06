@@ -40,15 +40,20 @@ test("injected Grok environment is used for preflight, authentication and model 
     const previousModel = process.env.GROK_PLUGIN_MODEL;
     process.env.GROK_BIN = "missing-global-grok-binary";
     process.env.GROK_PLUGIN_MODEL = "grok-4.7";
+    let authStopped = false, turnStopped = false;
     try {
         assert.equal(getGrokAvailability(cwd, env).available, true);
-        assert.equal((await getGrokAuthStatus(cwd, { env })).authenticated, true);
+        const auth = await getGrokAuthStatus(cwd, { env });
+        authStopped = auth.turnStopUnconfirmed !== true;
+        assert.equal(auth.authenticated, true);
         const result = await runGrokTurn(cwd, { env, prompt: "check injected environment", readOnly: true });
+        turnStopped = result.turnStopUnconfirmed !== true;
         assert.equal(result.model, "grok-4.5");
         assert.equal(fake.readState().prompts.length, 1);
     }
     finally {
         try {
+            assert.ok(authStopped && turnStopped, "authentication and turn shutdown were not confirmed");
             if (process.platform === "linux") {
                 if (childProcess.spawn !== observedSpawn)
                     throw new Error("fixture agent observer was replaced");
@@ -77,6 +82,12 @@ test("injected Grok environment is used for preflight, authentication and model 
                     }
                 }
             }
+            removeTempFixture(cwd, { recursive: true, force: true });
+            removeTempFixture(fake.binDir, { recursive: true, force: true });
+        }
+        catch (error) {
+            t.diagnostic(`Fixture retained: ${cwd}; ${fake.binDir}: ${error.message}`);
+            throw error;
         }
         finally {
             if (process.platform === "linux" && childProcess.spawn === observedSpawn) {
@@ -91,7 +102,6 @@ test("injected Grok environment is used for preflight, authentication and model 
                 delete process.env.GROK_PLUGIN_MODEL;
             else
                 process.env.GROK_PLUGIN_MODEL = previousModel;
-            removeTempFixture(cwd, { recursive: true, force: true });
         }
     }
 });

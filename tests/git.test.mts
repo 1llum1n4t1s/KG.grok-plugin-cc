@@ -10,7 +10,14 @@ import {
   ensureGitRepository,
   resolveReviewTarget
 } from "../plugins/grok/scripts/lib/git.mjs";
-import { grokFixtureEnv, initGitRepo as initBaseGitRepo, makeTempDir, run } from "./helpers.mjs";
+import { grokFixtureEnv, initGitRepo as initBaseGitRepo, makeTempDir, removeTempFixture, run } from "./helpers.mjs";
+
+function registerFixtureCleanup(t: import('node:test').TestContext, cwd: string) {
+  t.after(() => {
+    try { removeTempFixture(cwd, { recursive: true, force: true }); }
+    catch (error) { t.diagnostic(`Fixture retained: ${cwd}: ${error.message}`); throw error; }
+  });
+}
 
 function initGitRepo(cwd) {
   initBaseGitRepo(cwd);
@@ -25,8 +32,9 @@ function workingTreeValue(operation) {
   return null;
 }
 
-test("resolveReviewTarget prefers working tree when repo is dirty", () => {
+test("resolveReviewTarget prefers working tree when repo is dirty", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
@@ -37,8 +45,9 @@ test("resolveReviewTarget prefers working tree when repo is dirty", () => {
   if (target) assert.equal(target.mode, "working-tree");
 });
 
-test("resolveReviewTarget falls back to branch diff when repo is clean", () => {
+test("resolveReviewTarget falls back to branch diff when repo is clean", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
@@ -52,8 +61,9 @@ test("resolveReviewTarget falls back to branch diff when repo is clean", () => {
   if (target) assert.equal(target.mode, "branch");
 });
 
-test("default branch names with special characters are passed to git literally", () => {
+test("default branch names with special characters are passed to git literally", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   const branchName = "main&branch-helper&x";
   const helperOutputPath = path.join(cwd, "branch-helper-output");
   initGitRepo(cwd);
@@ -100,8 +110,9 @@ test("default branch names with special characters are passed to git literally",
   }
 });
 
-test("resolveReviewTarget honors explicit base overrides", () => {
+test("resolveReviewTarget honors explicit base overrides", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
@@ -117,8 +128,9 @@ test("resolveReviewTarget honors explicit base overrides", () => {
   assert.equal(target.baseRef, "main");
 });
 
-test("resolveReviewTarget requires an explicit base when no default branch can be inferred", () => {
+test("resolveReviewTarget requires an explicit base when no default branch can be inferred", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
@@ -140,8 +152,9 @@ test("resolveReviewTarget requires an explicit base when no default branch can b
   );
 });
 
-test("repo scope audits the whole source even when the working tree is dirty", () => {
+test("repo scope audits the whole source even when the working tree is dirty", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
@@ -164,8 +177,9 @@ test("repo scope audits the whole source even when the working tree is dirty", (
   assert.doesNotMatch(context.content, /Unstaged Diff/);
 });
 
-test("repo scope rejects --base because an audit is not a diff", () => {
+test("repo scope rejects --base because an audit is not a diff", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
@@ -174,8 +188,9 @@ test("repo scope rejects --base because an audit is not a diff", () => {
   assert.throws(() => resolveReviewTarget(cwd, { scope: "repo", base: "main" }), /--base does not apply to --scope repo/);
 });
 
-test("collectReviewContext keeps inline diffs for tiny adversarial reviews", () => {
+test("collectReviewContext keeps inline diffs for tiny adversarial reviews", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
@@ -187,8 +202,9 @@ test("collectReviewContext keeps inline diffs for tiny adversarial reviews", () 
   if (context) { assert.equal(context.inputMode, "inline-diff"); assert.match(context.content, /INLINE_MARKER/); }
 });
 
-test("collectReviewContext skips untracked directories in working tree review (fails closed while worktree filters cannot be isolated)", () => {
+test("collectReviewContext skips untracked directories in working tree review (fails closed while worktree filters cannot be isolated)", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
@@ -204,6 +220,20 @@ test("collectReviewContext skips untracked directories in working tree review (f
 
 test("collectReviewContext skips untracked symlinks instead of crashing (fails closed while worktree filters cannot be isolated)", (t) => {
   const cwd = makeTempDir();
+  let link: { dev: bigint; ino: bigint; target: string } | undefined;
+  t.after(() => {
+    if (process.platform === "win32" && process.env.GROK_TEST_DEFER_CLEANUP === "1") return;
+    try {
+      const file = path.join(cwd, "broken-link");
+      if (link) {
+        const stat = fs.lstatSync(file, { bigint: true });
+        assert.ok(stat.isSymbolicLink() && stat.dev === link.dev && stat.ino === link.ino, "fixture link identity changed");
+        assert.equal(fs.readlinkSync(file), link.target);
+        fs.unlinkSync(file);
+      }
+      removeTempFixture(cwd, { recursive: true, force: true });
+    } catch (error) { t.diagnostic(`Fixture retained: ${cwd}: ${error.message}`); throw error; }
+  });
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
@@ -211,6 +241,10 @@ test("collectReviewContext skips untracked symlinks instead of crashing (fails c
 
   try {
     fs.symlinkSync("missing-target", path.join(cwd, "broken-link"));
+    const stat = fs.lstatSync(path.join(cwd, "broken-link"), { bigint: true });
+    assert.ok(stat.isSymbolicLink());
+    assert.equal(fs.readlinkSync(path.join(cwd, "broken-link")), "missing-target");
+    link = { dev: stat.dev, ino: stat.ino, target: "missing-target" };
   } catch (error) {
     // Windows は開発者モードか管理者権限が無いとシンボリックリンクを作れない。
     // テスト対象の挙動ではなく前提条件が満たせないだけなので、飛ばして通す。
@@ -225,8 +259,9 @@ test("collectReviewContext skips untracked symlinks instead of crashing (fails c
   assert.throws(() => collectReviewContext(cwd, target), /Review incomplete/);
 });
 
-test("collectReviewContext provides complete inline evidence for larger supported working tree reviews", () => {
+test("collectReviewContext provides complete inline evidence for larger supported working tree reviews", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   for (const name of ["a.js", "b.js", "c.js"]) {
     fs.writeFileSync(path.join(cwd, name), `export const value = "${name}-v1";\n`);
@@ -245,8 +280,9 @@ test("collectReviewContext provides complete inline evidence for larger supporte
   }
 });
 
-test("collectReviewContext falls back to lightweight context for oversized single-file diffs (fails closed while worktree filters cannot be isolated)", () => {
+test("collectReviewContext falls back to lightweight context for oversized single-file diffs (fails closed while worktree filters cannot be isolated)", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "export const value = 'v1';\n");
   run("git", ["add", "app.js"], { cwd });
@@ -257,8 +293,9 @@ test("collectReviewContext falls back to lightweight context for oversized singl
   assert.throws(() => collectReviewContext(cwd, target, { maxInlineDiffBytes: 128 }), /Review incomplete/);
 });
 
-test("collectReviewContext includes complete tracked and untracked working tree evidence", () => {
+test("collectReviewContext includes complete tracked and untracked working tree evidence", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   for (const name of ["a.js", "b.js"]) {
     fs.writeFileSync(path.join(cwd, name), `export const value = "${name}-v1";\n`);
@@ -277,8 +314,9 @@ test("collectReviewContext includes complete tracked and untracked working tree 
   }
 });
 
-test("collectReviewContext caps aggregate untracked file content (fails closed while worktree filters cannot be isolated)", () => {
+test("collectReviewContext caps aggregate untracked file content (fails closed while worktree filters cannot be isolated)", (t) => {
   const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "tracked.js"), "export const tracked = true;\n");
   run("git", ["add", "tracked.js"], { cwd });

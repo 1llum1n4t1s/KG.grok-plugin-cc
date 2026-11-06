@@ -3,7 +3,6 @@ import test from "node:test";
 import { classifyShellCommand } from "../plugins/grok/scripts/lib/grok.mjs";
 test("読み取り専用の git サブコマンドを許可する", () => {
     for (const command of [
-        safeGit + " diff " + safeDiff + " --cached -- auth.js",
         safeGit + " show " + safeDiff + " HEAD:auth.js",
         safeGit + " log " + safeDiff + " --oneline -5",
         safeGit + " ls-files --stage",

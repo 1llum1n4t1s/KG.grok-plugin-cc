@@ -4,7 +4,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,11 +30,21 @@ const REVIEW_JSON = JSON.stringify({
     next_steps: ["Parameterize the query."]
 });
 const runtimeFixtures = [];
+const trackedPosix = process.platform === "linux" || process.platform === "darwin";
 const runtimePreload = String.raw `
 const fs = require("node:fs");
 const childProcess = require("node:child_process");
 const { syncBuiltinESMExports } = require("node:module");
-const log = record => fs.appendFileSync(process.env.RUNTIME_PROCESS_LOG, JSON.stringify(record) + "\n");
+let logFailed = false;
+const log = record => {
+  try { fs.appendFileSync(process.env.RUNTIME_PROCESS_LOG, JSON.stringify(record) + "\n"); }
+  catch (error) { logFailed = true; throw error; }
+};
+process.once("exit", () => {
+  if (!logFailed) {
+    try { log({ type: "tracking-complete", pid: process.pid }); } catch {}
+  }
+});
 function identity(pid) {
   try {
     const stat = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
@@ -73,16 +83,16 @@ function assertFixtureIdentity(file, identity) {
     assert.deepEqual(fixtureIdentity(file), identity, "fixture root identity changed: " + file);
 }
 function recordSyncOwner(repo, result) {
-    if (process.platform !== "linux")
+    if (!trackedPosix)
         return;
     const f = runtimeFixtures.find(item => item.repo === repo);
     assert.ok(f, "fixture owner is not registered");
-    f.owners.push({ pid: result.pid, closed: result.status !== null || result.signal !== null, error: Boolean(result.error) });
+    f.owners.push({ pid: result.pid, closed: result.status !== null || result.signal !== null, error: Boolean(result.error), exitCode: result.status, signal: result.signal });
 }
 function recordChildOwner(f, child) {
-    const owner = { pid: child.pid, closed: false, error: false, child };
+    const owner = { pid: child.pid, closed: false, error: false, exitCode: null, signal: null, child };
     f.owners.push(owner);
-    owner.close = new Promise(resolve => child.once("close", () => { owner.closed = true; resolve(); }));
+    owner.close = new Promise(resolve => child.once("close", (code, signal) => { owner.closed = true; owner.exitCode = code; owner.signal = signal; resolve(); }));
     child.once("error", () => { owner.error = true; });
 }
 async function closeRuntimeFixture(f) {
@@ -103,14 +113,25 @@ async function closeRuntimeFixture(f) {
             ? fs.readFileSync(f.trackingLog, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
         for (const owner of f.owners) {
             assert.ok(Number.isSafeInteger(owner.pid) && owner.pid > 0 && owner.closed && !owner.error, "fixture owner close was not confirmed");
+            assert.ok(Number.isInteger(owner.exitCode) && owner.signal === null, "fixture owner normal exit was not confirmed");
             const ready = records.filter(record => record.type === "ready" && record.pid === owner.pid);
             assert.equal(ready.length, 1, "fixture owner tracking was not confirmed");
-            assert.ok(ready[0].identity?.start, "fixture owner start identity is missing");
+            assert.equal(records.filter(record => record.type === "tracking-complete" && record.pid === owner.pid).length, 1, "fixture owner tracking completion was not confirmed");
+            if (process.platform === "linux")
+                assert.ok(ready[0].identity?.start, "fixture owner start identity is missing");
         }
         for (const record of records.filter(record => record.type === "sync")) {
             assert.ok(record.pid > 0 && !record.error && (record.status !== null || record.signal !== null), "synchronous fake process exit was not confirmed");
         }
         for (const record of records.filter(record => record.type === "spawn")) {
+            if (process.platform === "darwin") {
+                assert.ok(Number.isSafeInteger(record.pid) && record.pid > 0, "fixture child PID is missing");
+                assert.equal(records.filter(entry => entry.type === "close" && entry.pid === record.pid).length, 1, "fixture child close was not confirmed");
+                if (record.detached) {
+                    assert.throws(() => process.kill(-record.pid, 0), { code: "ESRCH" }, "owned process group must be absent");
+                }
+                continue;
+            }
             assert.ok(Number.isSafeInteger(record.pid) && record.pid > 0 && record.identity?.start, "fixture child start identity is missing");
             if (record.detached)
                 assert.equal(record.identity.group, record.pid, "detached child group was not identified");
@@ -164,7 +185,7 @@ async function closeRuntimeFixture(f) {
     }
 }
 test.afterEach(async () => {
-    if (process.platform !== "linux")
+    if (!trackedPosix)
         return;
     const fixtures = runtimeFixtures.splice(0);
     const failures = [];
@@ -179,21 +200,133 @@ test.afterEach(async () => {
     if (failures.length)
         throw new AggregateError(failures, "Runtime fixture cleanup could not be confirmed");
 });
+test("Darwin fixture cleanup retains evidence when a child close record is missing", { skip: process.platform !== "darwin" }, async () => {
+    const root = makeTempDir("grok-runtime-close-evidence-");
+    const trackingLog = path.join(root, "process-ownership.jsonl");
+    const f = {
+        roots: [{ file: root, identity: fixtureIdentity(root) }], links: [],
+        owners: [{ pid: process.pid, closed: true, error: false, exitCode: 0, signal: null }], repo: root, trackingLog
+    };
+    try {
+        fs.writeFileSync(trackingLog, [
+            { type: "ready", pid: process.pid },
+            { type: "tracking-complete", pid: process.pid },
+            { type: "spawn", pid: process.pid, detached: false }
+        ].map(record => JSON.stringify(record)).join("\n") + "\n");
+        await assert.rejects(closeRuntimeFixture(f), error => {
+            assert.ok(error instanceof Error && error.message.includes(root));
+            assert.match(String(error.cause), /fixture child close was not confirmed/);
+            return true;
+        });
+        assert.ok(fs.statSync(root).isDirectory());
+        assert.ok(fs.statSync(trackingLog).isFile());
+    }
+    finally {
+        assertFixtureIdentity(root, f.roots[0].identity);
+        removeTempFixture(root, { recursive: true, force: true });
+    }
+});
+test("fixture cleanup requires a normal owner exit but permits exit code one", { skip: !trackedPosix }, async () => {
+    const root = makeTempDir("grok-runtime-owner-exit-");
+    const trackingLog = path.join(root, "process-ownership.jsonl");
+    const owner = { pid: process.pid, closed: true, error: false, exitCode: null, signal: "SIGTERM" };
+    const f = { roots: [{ file: root, identity: fixtureIdentity(root) }], links: [], owners: [owner], repo: root, trackingLog };
+    let cleaned = false;
+    try {
+        fs.writeFileSync(trackingLog, [
+            { type: "ready", pid: process.pid, identity: { start: "synthetic" } },
+            { type: "tracking-complete", pid: process.pid }
+        ].map(record => JSON.stringify(record)).join("\n") + "\n");
+        await assert.rejects(closeRuntimeFixture(f), error => {
+            assert.ok(error instanceof Error && error.message.includes(root));
+            assert.match(String(error.cause), /fixture owner normal exit was not confirmed/);
+            return true;
+        });
+        assert.ok(fs.statSync(root).isDirectory());
+        assert.ok(fs.statSync(trackingLog).isFile());
+        owner.exitCode = 1;
+        owner.signal = null;
+        await closeRuntimeFixture(f);
+        cleaned = true;
+        assert.equal(fs.existsSync(root), false);
+    }
+    finally {
+        if (!cleaned) {
+            assertFixtureIdentity(root, f.roots[0].identity);
+            removeTempFixture(root, { recursive: true, force: true });
+        }
+    }
+});
+test("fixture cleanup retains evidence when the preload cannot record a spawn", { skip: !trackedPosix }, async (t) => {
+    const root = makeTempDir("grok-runtime-log-failure-");
+    const trackingLog = path.join(root, "process-ownership.jsonl");
+    const preload = path.join(root, "process-ownership.cjs");
+    const failurePreload = path.join(root, "fail-spawn-log.cjs");
+    const f = { roots: [{ file: root, identity: fixtureIdentity(root) }], links: [], owners: [], repo: root, trackingLog };
+    let stopped = false;
+    try {
+        fs.writeFileSync(preload, runtimePreload);
+        fs.writeFileSync(failurePreload, String.raw `
+const fs = require("node:fs");
+const childProcess = require("node:child_process");
+const { EventEmitter } = require("node:events");
+const append = fs.appendFileSync;
+let failed = false;
+fs.appendFileSync = function(file, data) {
+  if (!failed && JSON.parse(String(data)).type === "spawn") {
+    failed = true;
+    throw Object.assign(new Error("fixture spawn log failure"), { code: "EIO" });
+  }
+  return append.apply(this, arguments);
+};
+childProcess.spawn = () => Object.assign(new EventEmitter(), { pid: process.pid });
+`);
+        const preloadArgs = "bun" in process.versions
+            ? ["--no-env-file", "--preload", failurePreload, "--preload", preload]
+            : ["--require", failurePreload, "--require", preload];
+        const result = spawnSync(process.execPath, [...preloadArgs, "-e", 'try { require("node:child_process").spawn("synthetic-child"); } catch { process.exitCode = 1; }'], {
+            cwd: root, env: { ...process.env, RUNTIME_PROCESS_LOG: trackingLog }, encoding: "utf8", timeout: 5000, windowsHide: true
+        });
+        stopped = !result.error && Number.isInteger(result.status) && result.signal === null;
+        assert.ok(stopped, "short-lived preload probe exit was not confirmed");
+        assert.equal(result.status, 1, result.stderr);
+        f.owners.push({ pid: result.pid, closed: true, error: false, exitCode: result.status, signal: result.signal });
+        const records = fs.readFileSync(trackingLog, "utf8").trim().split("\n").map(line => JSON.parse(line));
+        assert.equal(records.filter(record => record.type === "ready" && record.pid === result.pid).length, 1);
+        assert.equal(records.filter(record => record.type === "tracking-complete" && record.pid === result.pid).length, 0);
+        await assert.rejects(closeRuntimeFixture(f), error => {
+            assert.ok(error instanceof Error && error.message.includes(root));
+            assert.match(String(error.cause), /fixture owner tracking completion was not confirmed/);
+            return true;
+        });
+        assert.ok(fs.statSync(root).isDirectory());
+        assert.ok(fs.statSync(trackingLog).isFile());
+    }
+    finally {
+        if (stopped) {
+            assertFixtureIdentity(root, f.roots[0].identity);
+            removeTempFixture(root, { recursive: true, force: true });
+        }
+        else {
+            t.diagnostic(`Fixture retained because preload probe shutdown was not confirmed: ${root}`);
+        }
+    }
+});
 /** 偽 grok と使い捨ての git リポジトリを用意する。 */
 function setupWorkspace(scenario) {
     const f = { roots: [], links: [], owners: [] };
-    if (process.platform === "linux")
+    if (trackedPosix)
         runtimeFixtures.push(f);
     const fake = installFakeGrok(scenario);
     f.fake = fake;
-    if (process.platform === "linux") {
+    if (trackedPosix) {
         const root = { file: fake.binDir };
         f.roots.push(root);
         root.identity = fixtureIdentity(root.file);
     }
     const repo = makeTempDir("grok-plugin-repo-");
     f.repo = repo;
-    if (process.platform === "linux") {
+    if (trackedPosix) {
         const root = { file: repo };
         f.roots.push(root);
         root.identity = fixtureIdentity(root.file);
@@ -205,13 +338,13 @@ function setupWorkspace(scenario) {
     fs.writeFileSync(path.join(repo, "auth.js"), "export const a = 2;\n", "utf8");
     const dataDir = makeTempDir("grok-plugin-data-");
     f.dataDir = dataDir;
-    if (process.platform === "linux") {
+    if (trackedPosix) {
         const root = { file: dataDir };
         f.roots.push(root);
         root.identity = fixtureIdentity(root.file);
     }
     const env = { ...fake.env, CLAUDE_PLUGIN_DATA: dataDir };
-    if (process.platform === "linux") {
+    if (trackedPosix) {
         f.trackingLog = path.join(dataDir, "process-ownership.jsonl");
         const preload = path.join(dataDir, "process-ownership.cjs");
         fs.writeFileSync(preload, runtimePreload);
@@ -225,7 +358,7 @@ function setupWorkspace(scenario) {
         }
     }
     return { fake, repo, env, registerLink(file) {
-            if (process.platform !== "linux")
+            if (!trackedPosix)
                 return;
             const stat = fs.lstatSync(file, { bigint: true });
             assert.ok(stat.isSymbolicLink());
@@ -233,7 +366,7 @@ function setupWorkspace(scenario) {
         } };
 }
 function runtimeArgs(env, args) {
-    return process.platform === "linux" && "bun" in process.versions ? ["--preload", env.RUNTIME_PRELOAD, ...args] : args;
+    return trackedPosix && "bun" in process.versions ? ["--preload", env.RUNTIME_PRELOAD, ...args] : args;
 }
 function companion(args, { repo, env }) {
     const result = run(process.execPath, runtimeArgs(env, [SCRIPT, ...args]), { cwd: repo, env });
@@ -459,8 +592,8 @@ for (const command of ["review", "audit", "adversarial-review"]) {
             replies: [
                 {
                     requestPermissionFor: {
-                        title: "Execute `Get-ChildItem -Recurse src | Select-Object @{N='Lines';E={$_.FullName}}`",
-                        rawInput: { command: "Get-ChildItem -Recurse src | Select-Object @{N='Lines';E={$_.FullName}}" }
+                        title: "Extract source-info hashes from snapshot",
+                        rawInput: { command: `python -c "import json; d=json.load(open('evidence.json'));\n[print(x['path'], x['sha256']) for x in d]"` }
                     },
                     onDenied: { text: "Review in progress.", stopReason: "cancelled" }
                 },
@@ -475,7 +608,12 @@ for (const command of ["review", "audit", "adversarial-review"]) {
         assert.equal(payload.result, null);
         assert.equal(payload.reviewText, "Review in progress.");
         assert.match(payload.permissionDenials.join("\n"), /unsupported shell control/i);
-        assert.equal(workspace.fake.readState().prompts.length, 1);
+        const prompts = workspace.fake.readState().prompts;
+        assert.equal(prompts.length, 1);
+        assert.match(prompts[0], /Do not run Python.*Node\.js, Bun/);
+        assert.match(prompts[0], /Read JSON and verification evidence with read_file/);
+        assert.match(prompts[0], /For multiline files, read_file offset\/limit select lines; they cannot split a single long line\. If you cannot fully inspect the required content, report that evidence as unverified\./);
+        assert.match(prompts[0], /permission denial can terminate the entire Grok turn/);
     });
 }
 for (const stopReason of ["cancelled", "refusal", "max_tokens", "max_turn_requests", "unknown_reason"]) {
@@ -621,7 +759,6 @@ test("review marks a denied subagent request as incomplete even when Grok return
     assert.equal(result.status, 1);
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.result.verdict, "incomplete");
-    assert.equal(payload.reviewText, APPROVE_JSON);
     assert.equal(payload.reviewText, APPROVE_JSON);
     assert.match(payload.permissionDenials.join("\n"), /Delegate to subagent/);
 });
@@ -863,7 +1000,7 @@ for (const mode of ["split stdin", "empty stdin", "positional priority", "prompt
         if (mode === "positional priority" || mode === "prompt file priority")
             args.push(positional);
         const child = spawn(process.execPath, runtimeArgs(env, args), { cwd: repo, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-        if (process.platform === "linux")
+        if (trackedPosix)
             recordChildOwner(runtimeFixtures.find(f => f.repo === repo), child);
         let stdout = "", stderr = "", inputError;
         child.stdout.on("data", chunk => { stdout += chunk; });
