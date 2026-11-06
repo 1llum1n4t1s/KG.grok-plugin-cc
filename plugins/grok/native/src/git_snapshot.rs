@@ -127,13 +127,12 @@ mod windows {
         Ok(info)
     }
 
-    fn final_path(handle: HANDLE) -> Result<Vec<u16>, String> {
-        let mut buffer = vec![0; 32768];
+    fn final_path(handle: HANDLE, buffer: &mut [u16]) -> Result<&[u16], String> {
         let length = unsafe { GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0) };
         if length == 0 || length as usize >= buffer.len() {
             return invalid();
         }
-        buffer.truncate(length as usize);
+        let buffer = &buffer[..length as usize];
         if buffer.len() < 7 || buffer[..4] != [92, 92, 63, 92]
             || !matches!(buffer[4], 65..=90 | 97..=122) || buffer[5..7] != [58, 92]
         {
@@ -180,13 +179,13 @@ mod windows {
         Ok(handle)
     }
 
-    fn check_directory(handle: HANDLE, expected: &str) -> Result<(), String> {
+    fn check_directory(handle: HANDLE, expected: &str, scratch: &mut [u16]) -> Result<(), String> {
         let info = information(handle)?;
         if info.dwFileAttributes & 0x410 != 0x10 {
             return invalid();
         }
-        let mut actual = final_path(handle)?;
-        while actual.last() == Some(&92) { actual.pop(); }
+        let mut actual = final_path(handle, scratch)?;
+        while actual.last() == Some(&92) { actual = &actual[..actual.len() - 1]; }
         let expected: Vec<u16> = format!("\\\\?\\{}", expected.trim_end_matches('\\')).encode_utf16().collect();
         if actual != expected { return invalid(); }
         Ok(())
@@ -209,7 +208,8 @@ mod windows {
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) };
         if raw.is_null() || raw == INVALID_HANDLE_VALUE { return invalid(); }
         let first = unsafe { OwnedHandle::from_raw_handle(raw) };
-        check_directory(first.as_raw_handle(), &drive)?;
+        let mut scratch = vec![0; 32768];
+        check_directory(first.as_raw_handle(), &drive, &mut scratch)?;
         let mut directories = vec![first];
         let mut location = drive.trim_end_matches('\\').to_owned();
         if root.len() > 2 {
@@ -219,7 +219,7 @@ mod windows {
                 let handle = open_relative(parent, component, true)?.ok_or(ERROR)?;
                 location.push('\\');
                 location.push_str(component);
-                check_directory(handle.as_raw_handle(), &location)?;
+                check_directory(handle.as_raw_handle(), &location, &mut scratch)?;
                 directories.push(handle);
             }
         }
@@ -246,7 +246,7 @@ mod windows {
                     missing = true;
                     break;
                 };
-                check_directory(handle.as_raw_handle(), &parent)?;
+                check_directory(handle.as_raw_handle(), &parent, &mut scratch)?;
                 parent_index = directories.len();
                 directories.push(handle);
                 cache.insert(parent.clone(), parent_index);
@@ -265,8 +265,7 @@ mod windows {
                 || unsafe { GetFileType(handle.as_raw_handle()) } != FILE_TYPE_DISK
             { return invalid(); }
             let expected: Vec<u16> = format!("{}{}", prefix, relative.replace('/', "\\")).encode_utf16().collect();
-            let final_name = final_path(handle.as_raw_handle())?;
-            if final_name != expected { return invalid(); }
+            if final_path(handle.as_raw_handle(), &mut scratch)? != expected { return invalid(); }
             let length = ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64;
             if length > MAX_BYTES as u64 || total + length as usize > MAX_BYTES { return invalid(); }
             total += length as usize;
@@ -277,7 +276,7 @@ mod windows {
             if file.read(&mut extra).map_err(|_| ERROR)? != 0 { return invalid(); }
             let after = information(file.as_raw_handle())?;
             if after.nFileSizeHigh != info.nFileSizeHigh || after.nFileSizeLow != info.nFileSizeLow
-                || final_path(file.as_raw_handle())? != final_name
+                || final_path(file.as_raw_handle(), &mut scratch)? != expected
             { return invalid(); }
             entries.push(json!({"path": relative, "content": base64::engine::general_purpose::STANDARD.encode(content)}));
             files.push(file);
