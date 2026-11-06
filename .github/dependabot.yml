@@ -19,6 +19,23 @@ updates:
       - patch
   commit-message:
     prefix: deps
+- package-ecosystem: cargo
+  directory: /plugins/grok/native
+  schedule:
+    interval: weekly
+    day: monday
+    time: '09:00'
+    timezone: Asia/Tokyo
+  open-pull-requests-limit: 5
+  groups:
+    minor-and-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
+  commit-message:
+    prefix: deps
 - package-ecosystem: npm
   directory: /
   schedule:

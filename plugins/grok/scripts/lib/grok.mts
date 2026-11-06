@@ -1,4 +1,4 @@
-import type { AcpNotification, SessionUpdateNotification, StopReason } from "./acp-protocol.js";
+import type { AcpClientOptions, AcpNotification, SessionUpdateNotification, StopReason } from "./acp-protocol.js";
 type ProgressUpdate = { message: string; phase: string | null; sessionId?: string | null; grokSessionId?: string | null; stderrMessage?: string | null; logTitle?: string | null; logBody?: string | null };
 type ProgressReporter = (update: string | ProgressUpdate) => void;
 interface GrokOptions {
@@ -8,7 +8,6 @@ interface GrokOptions {
   diff?: string;
   effort?: string;
   env?: NodeJS.ProcessEnv;
-  foreground?: boolean;
   instructions?: string;
   logBody?: string;
   logTitle?: string;
@@ -16,6 +15,8 @@ interface GrokOptions {
   message?: string;
   model?: string;
   onProgress?: ProgressReporter;
+  permissionHandler?: AcpClientOptions["permissionHandler"];
+  onWriteDenied?: (reason: string) => void;
   outputSchema?: unknown;
   phase?: string;
   prompt?: string;
@@ -471,7 +472,7 @@ function classifyToolCall(params, cwd): { allowed: boolean; reason: string | nul
  * read_file は自動解決される）が、WebFetch は問い合わせる。明示的に許可した
  * 読み取り専用の要求だけを 1 回許可し、未知の要求は拒否する。
  */
-function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => {}) {
+function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => {}): NonNullable<AcpClientOptions["permissionHandler"]> {
   const readOnly = createReadOnlyPermissionResponder();
   return (params) => {
     const verdict = classifyToolCall(params, cwd);
@@ -931,6 +932,8 @@ export async function getGrokAuthStatus(cwd, options: GrokOptions = {}) {
   }
 
   const usingApiKey = Boolean(env.XAI_API_KEY);
+  const permissionDenials: string[] = [];
+  const onDenied = (reason: string) => permissionDenials.push(reason);
 
   try {
     return await withGrok(
@@ -939,6 +942,9 @@ export async function getGrokAuthStatus(cwd, options: GrokOptions = {}) {
         const methods = client.initializeResult?.authMethods ?? [];
         try {
           const session = await client.request("session/new", { cwd, mcpServers: [] });
+          if (permissionDenials.length) {
+            return { authenticated: false, reason: "check-failed", detail: permissionDenials.join("; "), availability };
+          }
           return {
             authenticated: true,
             method: usingApiKey ? "api-key" : "browser-login",
@@ -949,20 +955,21 @@ export async function getGrokAuthStatus(cwd, options: GrokOptions = {}) {
           };
         } catch (error) {
           // session/new の失敗がすべて認証拒否とは限らない。
-          const authenticationRequired = error?.rpcResponseReceived === true && /\bauthentication required\b/i.test(error.message ?? "");
+          const authenticationRequired = !permissionDenials.length && error?.rpcResponseReceived === true && /\bauthentication required\b/i.test(error.message ?? "");
           return {
             authenticated: false,
             reason: authenticationRequired ? "not-authenticated" : "check-failed",
-            detail: error?.message ?? String(error),
+            detail: permissionDenials.length ? permissionDenials.join("; ") : error?.message ?? String(error),
             authMethods: methods.map((method) => method.id),
             availability
           };
         }
       },
-      { grokBin: availability.bin, env }
+      { grokBin: availability.bin, env, readOnly: true,
+        permissionHandler: createReviewPermissionHandler(cwd, options.onProgress, onDenied), onWriteDenied: onDenied }
     );
   } catch (error) {
-    return { authenticated: false, reason: "connect-failed", detail: error?.message ?? String(error), availability,
+    return { authenticated: false, reason: permissionDenials.length ? "check-failed" : "connect-failed", detail: permissionDenials.length ? permissionDenials.join("; ") : error?.message ?? String(error), availability,
       ...(error?.turnStopUnconfirmed ? { turnStopUnconfirmed: true } : {}) };
   }
 }
@@ -990,6 +997,10 @@ export async function runGrokReview(cwd, options: GrokOptions = {}) {
 
   const model = options.model ?? env.GROK_PLUGIN_MODEL ?? DEFAULT_REVIEW_MODEL;
 
+  // 初期化・session/new 中の拒否も JSON 再出力後まで同じ記録へ残す。
+  const permissionDenials: string[] = [];
+  const onDenied = (reason: string) => permissionDenials.push(reason);
+
   return withGrok(
     cwd,
     async (client) => {
@@ -1003,14 +1014,6 @@ export async function runGrokReview(cwd, options: GrokOptions = {}) {
       });
       const sessionId = session.sessionId;
       emitProgress(options.onProgress, `Session ready (${sessionId}).`, "starting", { sessionId });
-
-      // JSON 再出力で初回の拒否記録を消さず、呼び出し側の完了判定へ渡す。
-
-      const permissionDenials: string[] = [];
-      client.setWriteDeniedHandler((reason) => permissionDenials.push(reason));
-      client.setPermissionHandler(createReviewPermissionHandler(cwd, options.onProgress, (reason) => {
-        permissionDenials.push(reason);
-      }));
 
       const promptText = buildReviewPrompt(options);
       const promptOptions = { onProgress: options.onProgress,  };
@@ -1057,7 +1060,8 @@ export async function runGrokReview(cwd, options: GrokOptions = {}) {
         stderr: cleanGrokStderr(client.stderr)
       };
     },
-    { grokBin: availability.bin, env, readOnly: true }
+    { grokBin: availability.bin, env, readOnly: true,
+      permissionHandler: createReviewPermissionHandler(cwd, options.onProgress, onDenied), onWriteDenied: onDenied }
   );
 }
 
@@ -1151,6 +1155,8 @@ export async function runGrokTurn(cwd, options: GrokOptions = {}) {
   }
 
   const model = options.model ?? env.GROK_PLUGIN_MODEL ?? DEFAULT_REVIEW_MODEL;
+  const permissionDenials: string[] = [];
+  const onDenied = (reason: string) => permissionDenials.push(reason);
 
   return withGrok(
     cwd,
@@ -1161,13 +1167,10 @@ export async function runGrokTurn(cwd, options: GrokOptions = {}) {
 
       emitProgress(options.onProgress, `Session ready (${sessionId}).`, "starting", { sessionId });
 
-      const permissionDenials: string[] = [];
-      client.setWriteDeniedHandler((reason) => permissionDenials.push(reason));
-      client.setPermissionHandler(
-        options.readOnly
-          ? createReviewPermissionHandler(cwd, options.onProgress, (reason) => permissionDenials.push(reason))
-          : createAllowAllPermissionResponder()
-      );
+      if (!options.readOnly) {
+        client.setWriteDeniedHandler(onDenied);
+        client.setPermissionHandler(createAllowAllPermissionResponder());
+      }
 
       const promptText = options.outputSchema
         ? `${prompt}\n\n## Required output\nReply with a single JSON object and nothing else. It must validate against this JSON Schema:\n\n${JSON.stringify(options.outputSchema, null, 2)}`
@@ -1198,7 +1201,8 @@ export async function runGrokTurn(cwd, options: GrokOptions = {}) {
         commandExecutions: turnState.commandExecutions
       };
     },
-    { grokBin: availability.bin, env, readOnly: Boolean(options.readOnly) }
+    { grokBin: availability.bin, env, readOnly: Boolean(options.readOnly),
+      ...(options.readOnly ? { permissionHandler: createReviewPermissionHandler(cwd, options.onProgress, onDenied), onWriteDenied: onDenied } : {}) }
   );
 }
 

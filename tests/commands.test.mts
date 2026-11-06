@@ -18,6 +18,12 @@ test("conversation language precedes focus in both host entrypoints", () => {
     assert.match(claude, /before.*focus/i);
     assert.doesNotMatch(claude, /append `--language/);
     assert.match(read(`skills/source-command-${name}/SKILL.md`), /before the focus text/);
+    assert.match(claude, /In Bash[\s\S]*In PowerShell/);
+    assert.match(claude, /do not use `eval`/);
+    assert.doesNotMatch(claude, /grok-companion\.mjs[^\r\n]*"\$ARGUMENTS"/);
+    assert.match(claude, /\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/grok-companion\.mjs/);
+    assert.match(claude, /first standalone `--`[\s\S]*option value remains a value/);
+    assert.match(claude, /Known value flags[\s\S]*aliases `-m`[\s\S]*`-C`/);
   }
 });
 
@@ -148,14 +154,14 @@ test("every command declares frontmatter and routes through a foreground workflo
 
 test("review and adversarial-review wire to their own companion subcommands", () => {
   const review = read("commands/review.md");
-  assert.match(review, /grok-companion\.mjs" review "\$ARGUMENTS"/);
+  assert.match(review, /grok-companion\.mjs> review <safely-quoted-known-flag-argv> -- <safely-quoted-focus1argv>/);
   assert.match(review, /Always run the review in the foreground/i);
   assert.match(review, /`--background`[\s\S]*no longer supported/i);
   assert.doesNotMatch(review, /run_in_background:\s*true/);
   assert.doesNotMatch(review, /AskUserQuestion/);
 
   const adversarial = read("commands/adversarial-review.md");
-  assert.match(adversarial, /grok-companion\.mjs" adversarial-review "\$ARGUMENTS"/);
+  assert.match(adversarial, /grok-companion\.mjs> adversarial-review <safely-quoted-known-flag-argv> -- <safely-quoted-focus1argv>/);
   assert.match(adversarial, /Always run the review in the foreground/i);
   assert.match(adversarial, /`--background`[\s\S]*no longer supported/i);
   assert.doesNotMatch(adversarial, /run_in_background:\s*true/);
@@ -164,7 +170,7 @@ test("review and adversarial-review wire to their own companion subcommands", ()
 
 test("audit entrypoint selects the repository audit workflow", () => {
   const audit = read("commands/audit.md");
-  assert.match(audit, /grok-companion\.mjs" audit "\$ARGUMENTS"/);
+  assert.match(audit, /grok-companion\.mjs> audit <safely-quoted-known-flag-argv> -- <safely-quoted-focus1argv>/);
   assert.match(audit, /Always run the audit in the foreground/i);
   assert.match(audit, /`--background`[\s\S]*no longer supported/i);
   assert.doesNotMatch(audit, /run_in_background:\s*true/);

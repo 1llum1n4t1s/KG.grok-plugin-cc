@@ -31,11 +31,11 @@ Start a new Codex task to load its skills. Install separately in each host if us
 
 Claude Code exposes `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:rescue`, `/grok:x`, and `/grok:setup`. In Codex, select the corresponding `grok:source-command-<name>` skill. Review and audit are read-only; rescue can request edits, while X search stays read-only. Setup checks Grok authentication.
 
-For example, use `/grok:review --scope working-tree` to review local changes, `/grok:audit authentication` to focus an audit, or `/grok:rescue <task>` to delegate a task. Review also accepts `--base <ref>` and `--language <BCP 47 tag>`. Run `/grok:setup` when installation or authentication fails; follow its reported error and Grok’s login guidance.
+On Windows, use `/grok:review --scope working-tree` to review local changes. The `auto` and `working-tree` scopes require a complete safe Windows snapshot and fail if it cannot be collected. On macOS/Linux, explicitly use `/grok:review --scope branch` or `--base <ref>` to review committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use `/grok:audit authentication` to focus a whole-repository audit on any platform, or `/grok:rescue <task>` to delegate a task. Review also accepts `--language <BCP 47 tag>`. Run `/grok:setup` when installation or authentication fails; follow its reported error and Grok’s login guidance.
 
 Each invocation runs a new Grok session in the foreground and returns its result directly. Use Grok's own interface to continue a conversation. Automatic reviews and the former status, result, cancel, state-lock, and task-resume commands are no longer supported by the companion.
 
-The companion starts the locally installed Grok CLI. Review and read-only tasks retain workspace and permission restrictions; explicitly requested write tasks can modify the workspace. External access and authentication are handled by Grok Build. Review Grok's output and changes before relying on them.
+The companion starts the locally installed Grok CLI. It checks paths on ACP file requests and applies a read-only permission allowlist; explicitly requested write tasks can modify the workspace. Grok Build handles its built-in filesystem and shell operations, external access, and authentication. The companion does not mediate every I/O operation or provide an OS sandbox, and does not guarantee complete access isolation, including through symlinks. Review Grok's output and changes before relying on them.
 
 ## Troubleshooting
 
@@ -74,11 +74,11 @@ codex plugin add grok@kagayoi-grok
 
 Claude Code では `/grok:review`、`/grok:adversarial-review`、`/grok:audit`、`/grok:rescue`、`/grok:x`、`/grok:setup` を使います。Codex では対応する `grok:source-command-<name>` スキルを選びます。レビュー・監査と X 検索は読み取り専用です。rescue は編集も依頼できます。setup は Grok の認証を確認します。
 
-例えば `/grok:review --scope working-tree` はローカル変更をレビューし、`/grok:audit authentication` は認証に対象を絞り、`/grok:rescue <task>` はタスクを委任します。レビューには `--base <ref>` と `--language <BCP 47 tag>` も指定できます。起動や認証に失敗したら `/grok:setup` を実行し、表示されたエラーと Grok のログイン案内を確認してください。
+Windows では `/grok:review --scope working-tree` でローカル変更をレビューできます。`auto` と `working-tree` は Windows の安全なスナップショットを完全に取得できることが条件で、取得できなければ失敗します。macOS/Linux では `/grok:review --scope branch` または `--base <ref>` を明示してコミット済みの変更をレビューしてください。未コミット変更は比較差分には含まれませんが、周辺ファイルは作業ツリーから読み取られる場合があります。全 OS で `/grok:audit authentication` によりリポジトリ全体の監査を認証に絞り、`/grok:rescue <task>` でタスクを委任できます。レビューには `--language <BCP 47 tag>` も指定できます。起動や認証に失敗したら `/grok:setup` を実行し、表示されたエラーと Grok のログイン案内を確認してください。
 
 各実行は新しい Grok セッションを前景で開始し、その結果を直接返します。会話の続きは Grok 本体で行ってください。自動レビューと旧 status・result・cancel・state-lock・タスク再開コマンドは利用できません。
 
-ローカルにインストールされた Grok CLI を起動します。レビューと読み取り専用タスクではワークスペースと権限の制限を維持し、明示的に編集を依頼したタスクはワークスペースを変更できます。外部アクセスと認証は Grok Build が担います。結果と変更を確認してから利用してください。
+ローカルにインストールされた Grok CLI を起動します。companion は ACP のファイル要求のパスを検査し、読み取り専用の権限要求を許可リストで判定します。明示的に編集を依頼したタスクはワークスペースを変更できます。組込みのファイル・シェル操作、外部アクセスと認証は Grok Build が担います。companion はすべての I/O を仲介する OS サンドボックスではなく、symlink 経由を含む完全なアクセス隔離は保証しません。結果と変更を確認してから利用してください。
 
 ## トラブルシュート
 

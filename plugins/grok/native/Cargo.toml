@@ -14,7 +14,7 @@ name = "grok-test-shim"
 path = "src/bin/grok-test-shim.rs"
 
 [target.'cfg(windows)'.dependencies]
-base64 = "0.22.1"
+base64 = "0.23.1"
 serde_json = "1.0.149"
 windows-sys = { version = "0.61.2", features = [
     "Wdk_Foundation",

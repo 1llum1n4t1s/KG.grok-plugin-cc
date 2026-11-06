@@ -6,6 +6,7 @@ interface RuntimeAcpOptions extends AcpClientOptions {
   rpcTimeoutMs?: number;
   readOnly?: boolean;
   onStderr?: (chunk: string) => void;
+  onWriteDenied?: (reason: string) => void;
 }
 type PermissionHandler = (params: RequestPermissionParams) => RequestPermissionResponse;
 type PendingRequest = { method: string; resolve: (value: unknown) => void; reject: (error: unknown) => void };
@@ -203,7 +204,7 @@ class AcpClientBase {
     this.notificationHandler = null;
 
     this.permissionHandler = options.permissionHandler ?? null;
-    this.writeDeniedHandler = null;
+    this.writeDeniedHandler = options.onWriteDenied ?? null;
     this.framer = new JsonlFramer((line) => this.handleLine(line));
     this.transport = "unknown";
     /** initialize の応答。モデル一覧や capabilities の確認に使う。 */

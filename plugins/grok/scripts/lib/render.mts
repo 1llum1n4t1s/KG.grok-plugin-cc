@@ -1,24 +1,7 @@
 
-/**
- * severity の並び順。
- *
- * 応答言語を追従させている都合上、schema の enum を守らず severity を
- * 訳してくることがある。未知の値を一律で最下位に落とすと、重大な指摘が
- * 一覧の末尾へ沈んで見落とされるため、未知は medium 相当として扱う。
- */
+/** 検証済み severity の並び順。 */
 function severityRank(severity) {
-  switch (String(severity ?? "").trim().toLowerCase()) {
-    case "critical":
-      return 0;
-    case "high":
-      return 1;
-    case "medium":
-      return 2;
-    case "low":
-      return 4;
-    default:
-      return 3;
-  }
+  return ["critical", "high", "medium", "low"].indexOf(severity);
 }
 
 function formatLineRange(finding) {
@@ -88,22 +71,15 @@ export function validateReviewResultShape(data) {
   return null;
 }
 
-function normalizeReviewFinding(finding, index) {
-  const source = finding && typeof finding === "object" && !Array.isArray(finding) ? finding : {};
-  const lineStart = Number.isInteger(source.line_start) && source.line_start > 0 ? source.line_start : null;
-  const lineEnd =
-    Number.isInteger(source.line_end) && source.line_end > 0 && (!lineStart || source.line_end >= lineStart)
-      ? source.line_end
-      : lineStart;
-
+function normalizeReviewFinding(finding) {
   return {
-    severity: typeof source.severity === "string" && source.severity.trim() ? source.severity.trim() : "low",
-    title: typeof source.title === "string" && source.title.trim() ? source.title.trim() : `Finding ${index + 1}`,
-    body: typeof source.body === "string" && source.body.trim() ? source.body.trim() : "No details provided.",
-    file: typeof source.file === "string" && source.file.trim() ? source.file.trim() : "unknown",
-    line_start: lineStart,
-    line_end: lineEnd,
-    recommendation: typeof source.recommendation === "string" ? source.recommendation.trim() : ""
+    severity: finding.severity,
+    title: finding.title.trim(),
+    body: finding.body.trim(),
+    file: finding.file.trim(),
+    line_start: finding.line_start,
+    line_end: finding.line_end,
+    recommendation: finding.recommendation.trim()
   };
 }
 
@@ -111,10 +87,8 @@ function normalizeReviewResultData(data) {
   return {
     verdict: data.verdict.trim(),
     summary: data.summary.trim(),
-    findings: data.findings.map((finding, index) => normalizeReviewFinding(finding, index)),
-    next_steps: data.next_steps
-      .filter((step) => typeof step === "string" && step.trim())
-      .map((step) => step.trim())
+    findings: data.findings.map((finding) => normalizeReviewFinding(finding)),
+    next_steps: data.next_steps.map((step) => step.trim())
   };
 }
 

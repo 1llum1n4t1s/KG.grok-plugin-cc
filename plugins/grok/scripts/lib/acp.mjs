@@ -161,7 +161,7 @@ class AcpClientBase {
         this.exitError = null;
         this.notificationHandler = null;
         this.permissionHandler = options.permissionHandler ?? null;
-        this.writeDeniedHandler = null;
+        this.writeDeniedHandler = options.onWriteDenied ?? null;
         this.framer = new JsonlFramer((line) => this.handleLine(line));
         this.transport = "unknown";
         /** initialize の応答。モデル一覧や capabilities の確認に使う。 */

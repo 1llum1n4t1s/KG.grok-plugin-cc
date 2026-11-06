@@ -127,7 +127,16 @@ test("resolveReviewTarget requires an explicit base when no default branch can b
 
   assert.throws(
     () => resolveReviewTarget(cwd, { scope: "branch" }),
-    /Unable to detect the repository default branch\. Pass --base <ref> or use --scope working-tree\./
+    (error: Error) => {
+      assert.match(error.message, /Unable to detect the repository default branch\. Pass --base <ref>/);
+      if (process.platform === "win32") {
+        assert.match(error.message, /--scope working-tree \(requires a complete safe snapshot\)/);
+      } else {
+        assert.match(error.message, /committed changes; uncommitted changes are excluded/);
+        assert.doesNotMatch(error.message, /--scope working-tree/);
+      }
+      return true;
+    }
   );
 });
 

@@ -256,7 +256,10 @@ export function detectDefaultBranch(cwd) {
             return `origin/${candidate}`;
         }
     }
-    throw new Error("Unable to detect the repository default branch. Pass --base <ref> or use --scope working-tree.");
+    const guidance = process.platform === "win32"
+        ? "Pass --base <ref> or use --scope working-tree (requires a complete safe snapshot)."
+        : "Pass --base <ref> to review committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use a repository audit to review the whole source.";
+    throw new Error(`Unable to detect the repository default branch. ${guidance}`);
 }
 export function getCurrentBranch(cwd) {
     return gitChecked(cwd, ["branch", "--show-current"]).stdout.trim() || "HEAD";
@@ -265,7 +268,7 @@ export function getWorkingTreeState(cwd) {
     return collectWorkingTreeSnapshot(cwd).state;
 }
 function incompleteSnapshot(reason) {
-    const guidance = process.platform === "win32" ? "" : " Working-tree reviews are unavailable on this platform. Use --scope branch or --base to review committed changes; uncommitted changes are excluded.";
+    const guidance = process.platform === "win32" ? "" : " Working-tree reviews are unavailable on this platform. Use --scope branch or --base to review committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree.";
     return new Error(`Review incomplete: ${reason}${guidance}`);
 }
 function nulRecords(output) {

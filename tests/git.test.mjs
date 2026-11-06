@@ -113,7 +113,17 @@ test("resolveReviewTarget requires an explicit base when no default branch can b
     run("git", ["add", "app.js"], { cwd });
     run("git", ["commit", "-m", "init"], { cwd });
     run("git", ["branch", "-m", "feature-only"], { cwd });
-    assert.throws(() => resolveReviewTarget(cwd, { scope: "branch" }), /Unable to detect the repository default branch\. Pass --base <ref> or use --scope working-tree\./);
+    assert.throws(() => resolveReviewTarget(cwd, { scope: "branch" }), (error) => {
+        assert.match(error.message, /Unable to detect the repository default branch\. Pass --base <ref>/);
+        if (process.platform === "win32") {
+            assert.match(error.message, /--scope working-tree \(requires a complete safe snapshot\)/);
+        }
+        else {
+            assert.match(error.message, /committed changes; uncommitted changes are excluded/);
+            assert.doesNotMatch(error.message, /--scope working-tree/);
+        }
+        return true;
+    });
 });
 test("repo scope audits the whole source even when the working tree is dirty", () => {
     const cwd = makeTempDir();

@@ -78,6 +78,16 @@ let promptIndex = 0;
 function handle(message) {
   const { id, method, params } = message;
 
+  if (scenario.earlyWritePhase === method && !state.earlyRequests) {
+    state.earlyRequests = [];
+    earlyRequest = { message, stage: "permission" };
+    send({ jsonrpc: "2.0", id: 8800, method: "session/request_permission", params: {
+      sessionId: "early-session", toolCall: { toolCallId: "early-write", title: "Write a file", kind: "edit", rawInput: { path: "early-write.txt" } },
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }]
+    } });
+    return;
+  }
+
   switch (method) {
     case "initialize":
       if (scenario.initializeError) {
@@ -206,6 +216,7 @@ function handle(message) {
 }
 
 let pendingReply = null;
+let earlyRequest = null;
 
 function emitReply(id, sessionId, reply) {
   for (const thought of reply.thoughts ?? []) {
@@ -230,6 +241,20 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   if (!line.trim()) return;
   const message = JSON.parse(line);
+
+  if (earlyRequest && message.id === 8800 && !message.method) {
+    state.earlyRequests.push(message);
+    persist();
+    if (earlyRequest.stage === "permission") {
+      earlyRequest.stage = "file";
+      send({ jsonrpc: "2.0", id: 8800, method: "fs/write_text_file", params: { path: "early-write.txt", content: "unexpected" } });
+    } else {
+      const original = earlyRequest.message;
+      earlyRequest = null;
+      handle(original);
+    }
+    return;
+  }
 
   // 権限確認への応答が返ってきた。
   if (pendingReply && message.id !== undefined && !message.method) {

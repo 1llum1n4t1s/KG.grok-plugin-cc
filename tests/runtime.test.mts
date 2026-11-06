@@ -228,14 +228,23 @@ function reviewCompanion(args, workspace) {
 for (const command of ["review", "adversarial-review", "audit"]) {
   test(`BCP47 contract: ${command} preserves English focus with Japanese conversation language`, () => {
     const workspace = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
-    const focus = "focus on retries --language en";
-    const result = reviewCompanion([command, "--language", "ja", focus], workspace);
+    const focus = '\n    "focus on retries"  --language en\n$HOME $(literal) `literal` and \'quotes\'  ';
+    const result = reviewCompanion([command, "--language", "ja", "--", focus], workspace);
     assert.equal(result.status, 0, result.stderr);
     const prompt = workspace.fake.readState().prompts[0];
     assert.match(prompt, /BCP 47 tag "ja"/);
-    assert.ok(prompt.includes(focus));
+    assert.equal(/User focus: ([\s\S]*?)\r?\n<\/task>/.exec(prompt)?.[1], focus);
   });
 }
+
+test("legacy single argv review arguments retain automatic splitting", () => {
+  const workspace = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
+  const result = companion(["audit", '--language ja --wait "legacy focus"'], workspace);
+  assert.equal(result.status, 0, result.stderr);
+  const prompt = workspace.fake.readState().prompts[0];
+  assert.match(prompt, /BCP 47 tag "ja"/);
+  assert.equal(/User focus: ([\s\S]*?)\r?\n<\/task>/.exec(prompt)?.[1], "legacy focus");
+});
 
 for (const [tag, normalized] of [
   ["en-GB-oed", "en-gb-oed"], ["i-klingon", "i-klingon"],
@@ -696,6 +705,33 @@ test("review still completes for an approve verdict without permission denials",
   assert.deepEqual(payload.permissionDenials, []);
 });
 
+for (const phase of ["initialize", "session/new"] as const) {
+  for (const command of ["review", "task", "setup"]) {
+    test(`${command} denies and records writes requested during ${phase}`, () => {
+      const workspace = setupWorkspace({ earlyWritePhase: phase, replies: [{ text: APPROVE_JSON }] });
+      const args = command === "task" ? [command, "--json", "inspect"] : [command, "--json"];
+      const result = reviewCompanion(args, workspace);
+      assert.equal(result.status, 1, result.stderr);
+      const state = workspace.fake.readState();
+      assert.equal(state.earlyRequests.length, 2);
+      assert.notEqual(state.earlyRequests[0].result?.outcome?.optionId, "allow");
+      assert.equal(state.earlyRequests[1].error?.code, -32601);
+      assert.equal(fs.existsSync(path.join(workspace.repo, "early-write.txt")), false);
+      const payload = JSON.parse(result.stdout);
+      if (command === "setup") {
+        assert.equal(payload.authenticated, false);
+        assert.equal(payload.reason, "check-failed");
+        assert.match(payload.detail, /ACP file write request was denied/);
+      } else {
+        assert.equal(payload.permissionDenials.length, 2);
+        assert.match(payload.permissionDenials.join(" "), /ACP file write request was denied/);
+        assert.equal(payload.stopReason, "end_turn");
+        if (command === "review") assert.equal(payload.result.verdict, "incomplete");
+      }
+    });
+  }
+}
+
 test("review rejects an unsolicited ACP file write", () => {
   const { fake, repo, env } = setupWorkspace({
     replies: [{ text: REVIEW_JSON, requestClientFileWrite: { path: "unexpected.txt", content: "written" } }]
@@ -750,8 +786,11 @@ test("review writes findings in the language requested via --language", () => {
 
 test("review falls back to the focus language, then English, when --language is absent", () => {
   const withFocus = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
-  reviewCompanion(["review", "--wait", "focus on retries"], withFocus);
-  assert.match(withFocus.fake.readState().prompts[0], /same language as the user focus/);
+  const focus = " \nfocus on retries\n ";
+  reviewCompanion(["review", "--wait", "--", focus], withFocus);
+  const focusedPrompt = withFocus.fake.readState().prompts[0];
+  assert.match(focusedPrompt, /same language as the user focus/);
+  assert.equal(/User focus: ([\s\S]*?)\r?\n<\/task>/.exec(focusedPrompt)?.[1], focus);
 
   const bare = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
   reviewCompanion(["review", "--wait"], bare);
@@ -784,10 +823,11 @@ ${result.stderr}`);
   assert.doesNotMatch(prompt, /export const a = 2;/);
 });
 
-test("audit applies a risk-directed deep investigation when focus is omitted", () => {
+for (const focus of [undefined, " \n  "]) {
+test(`audit applies a risk-directed deep investigation when focus is ${focus === undefined ? "omitted" : "whitespace only"}`, () => {
   const { fake, repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
 
-  const result = companion(["audit", "--wait"], { repo, env });
+  const result = companion(["audit", "--json", ...(focus === undefined ? [] : ["--", focus])], { repo, env });
 
   assert.equal(result.status, 0, result.stderr);
   const prompt = fake.readState().prompts[0];
@@ -800,7 +840,10 @@ test("audit applies a risk-directed deep investigation when focus is omitted", (
   assert.match(prompt, /do not call spawn_subagent/i);
   assert.match(prompt, /<depth_gate>/);
   assert.doesNotMatch(prompt, /No extra focus provided\./);
+  assert.match(prompt, /in English\./);
+  assert.doesNotMatch(prompt, /same language as the user focus/);
 });
+}
 
 test("JSON audit keeps progress silent and returns its direct review result", () => {
   const { fake, repo, env } = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });

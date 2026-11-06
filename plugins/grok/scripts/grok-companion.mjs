@@ -12,6 +12,8 @@ const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const aliases = { fast: "grok-4.20-0309-non-reasoning", reasoning: "grok-4.20-0309-reasoning", multi: "grok-4.20-multi-agent-0309", build: "grok-build-0.1", latest: "grok-4.7" };
 const usage = `Usage: grok-companion.mjs <setup|review|adversarial-review|audit|task> [options] [prompt]
 Review: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json
+Review scopes auto and working-tree require Windows and fail if a complete safe snapshot cannot be collected.
+On macOS/Linux, use --scope branch or --base <ref> for committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use audit for the whole repository.
 Task: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json
 Each command runs a new foreground Grok session. For resuming, use Grok's own resume command.`;
 function parse(argv, values, booleans) {
@@ -91,7 +93,7 @@ async function main() {
             disabled("automatic review gate");
         if (positionals.length)
             throw new Error(`Unknown setup argument: ${positionals[0]}`);
-        const status = await getGrokAuthStatus(path.resolve(options.cwd ?? process.cwd()), { foreground: true });
+        const status = await getGrokAuthStatus(path.resolve(options.cwd ?? process.cwd()));
         const guidance = setupGuidance(status);
         const report = { ...status, ...(guidance ? { guidance } : {}) };
         const message = status.authenticated && !status.turnStopUnconfirmed ? `Grok is authenticated (${status.method}).` : status.authenticated ? "Grok setup check incomplete." : `Grok setup check failed: ${status.detail ?? status.reason}.`;
@@ -105,14 +107,14 @@ async function main() {
         if (options.background)
             disabled("--background");
         const cwd = path.resolve(options.cwd ?? process.cwd());
-        const focus = positionals.join(" ").trim();
+        const focus = positionals.join(" ");
         const target = resolveReviewTarget(cwd, { base: options.base, scope: command === "audit" ? "repo" : options.scope });
         const context = collectReviewContext(cwd, target);
         const reviewName = command === "audit" ? "Audit" : command === "adversarial-review" ? "Adversarial Review" : "Review";
         const prompt = interpolateTemplate(loadPromptTemplate(root, command), { REVIEW_KIND: reviewName, TARGET_LABEL: target.label,
-            USER_FOCUS: focus || (command === "audit" ? "Map the architecture and trace the highest-risk execution paths, trust boundaries, failure paths, concurrency, and tests." : "No extra focus provided."),
-            REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance, RESPONSE_LANGUAGE_RULE: languageRule(options.language, focus), REVIEW_INPUT: context.content });
-        const result = await runGrokReview(context.repoRoot, { foreground: true, instructions: prompt, model: model(options.model), outputSchema: readOutputSchema(path.join(root, "schemas", "review-output.schema.json")) });
+            USER_FOCUS: focus.trim() ? focus : (command === "audit" ? "Map the architecture and trace the highest-risk execution paths, trust boundaries, failure paths, concurrency, and tests." : "No extra focus provided."),
+            REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance, RESPONSE_LANGUAGE_RULE: languageRule(options.language, focus.trim()), REVIEW_INPUT: context.content });
+        const result = await runGrokReview(context.repoRoot, { instructions: prompt, model: model(options.model), outputSchema: readOutputSchema(path.join(root, "schemas", "review-output.schema.json")) });
         const parsed = parseStructuredOutput(result.reviewText, { status: result.status, stopReason: result.stopReason, error: result.error?.message ?? null, failureMessage: result.error?.message ?? result.stderr });
         if (!parsed.parseError)
             parsed.parseError = validateReviewResultShape(parsed.parsed);
@@ -143,7 +145,7 @@ async function main() {
         const prompt = options["prompt-file"] ? fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8") : positionals.length ? positionals.join(" ") : await readStdinIfPiped();
         if (!prompt.trim())
             throw new Error("A prompt is required for this Grok run.");
-        const result = await runGrokTurn(cwd, { foreground: true, prompt, model: model(options.model), effort: options.effort, readOnly: !options.write });
+        const result = await runGrokTurn(cwd, { prompt, model: model(options.model), effort: options.effort, readOnly: !options.write });
         const diagnostic = errorDiagnostic(result.error);
         console.log(options.json ? JSON.stringify({ ...result, error: diagnostic }, null, 2) : result.finalMessage || result.error?.message || result.stderr || "Grok returned no output.");
         if (!options.json && diagnostic?.rpcCode != null)

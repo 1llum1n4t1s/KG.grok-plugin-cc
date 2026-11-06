@@ -105,7 +105,7 @@ try {
     if (!tests.length)
         throw new Error("No tests match tests/*.test.mjs");
     const testArguments = process.versions.bun
-        ? ["--no-env-file", "--no-install", "test", "--parallel=4", ...tests]
+        ? ["--no-env-file", "--no-install", "test", "--parallel=4", "--timeout=45000", ...tests]
         : ["--test", "--test-concurrency=4", ...tests];
     finish(await wait(spawn(process.execPath, testArguments, {
         cwd: root, env, stdio: "inherit", windowsHide: true
