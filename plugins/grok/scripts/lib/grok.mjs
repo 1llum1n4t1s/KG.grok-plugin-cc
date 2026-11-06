@@ -425,8 +425,8 @@ function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => 
         emitProgress(onProgress, `Denied during read-only review (${reason}): ${shortenText(params?.toolCall?.title ?? "unknown tool", 60)}`, "running");
         const options = Array.isArray(params?.options) ? params.options : [];
         const reject = options.find((option) => ["reject_once", "reject_always"].includes(option?.kind));
-        // reject_once を返せばモデルは別の手段へ切り替えられる。cancelled を返すと
-        // ターンごと終了してしまうので、選べる拒否肢が無いときの最後の手段にする。
+        // 拒否肢があれば選ぶ。ただし Grok Build は選択による拒否でも
+        // permission_rejected としてターンを終了することがある。
         return reject
             ? { outcome: { outcome: "selected", optionId: reject.optionId } }
             : { outcome: { outcome: "cancelled" } };
@@ -954,11 +954,13 @@ function buildReviewPrompt(options = {}) {
     parts.push("\n## Ground rules\n" +
         "- Read whatever files you need from the working tree to judge the change in context.\n" +
         "- Prefer your built-in file-reading tools (read_file, list_dir, and grep). Simple read-only repository commands such as rg are also available. Do not modify files or run commands with side effects.\n" +
+        "- The shell uses a command allowlist, not a judgment of whether a script looks read-only. Do not run Python (python/python3/py), Node.js, Bun, other interpreters, or shell wrappers (powershell/pwsh/bash/sh/cmd), including inline scripts with -c, -e, or -Command. Read JSON and verification evidence with read_file and inspect the returned text directly. For multiline files, read_file offset/limit select lines; they cannot split a single long line. If you cannot fully inspect the required content, report that evidence as unverified. Do not run a script to extract or summarize fields.\n" +
+        "- Plain shell command names available for read-only inspection are: " + [...READ_ONLY_COMMANDS].join(", ") + ". Their arguments still undergo the read-only checks below. Git and Test-Path have separate restricted forms. If a command is unavailable on this OS, use built-in file tools instead of wrapping it in another shell. ACP file requests must stay within the repository; report evidence you cannot access as unverified.\n" +
         "- Every Git command must start with: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + ". Then use a supported read-only subcommand. For diff, log, show and whatchanged, put --no-ext-diff and --no-textconv immediately after the subcommand as its first two arguments (either order), before any other option, revision or -- path separator. Status and blame are denied. Diff must put --cached or --staged immediately after those two guards, or use an exact 40-digit SHA-1 OID..OID or 64-digit SHA-256 OID..OID there. For fixed ranges, only supported display flags may follow; put paths after -- and do not add revisions or use HEAD/branch names. Use the fixed comparison from collection guidance. Grep requires --cached first; --no-index and modified ls-files checks are denied. These flags suppress textconv/external diff; they do not establish an OS sandbox. Example: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + " diff --no-ext-diff --no-textconv --cached --stat. Use complete option names supported by that specific subcommand and separate short options; options from another subcommand, unknown options, custom pretty formats and --submodule=diff are denied. For example, grep --cached --text is supported, but cat-file --text is denied; use cat-file -p to read an object. Use file tools if a command is unsupported.\n" +
         "- For recent commit history, use --since=YYYY-MM-DD with git log and --oneline, not a custom percent-based format. Example: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + " log --no-ext-diff --no-textconv --since=2026-09-28 --oneline. Replace the example date with the requested starting date.\n" +
         "- Avoid PowerShell script blocks and variables, command substitution, backticks, redirection, and executable paths: the read-only shell policy rejects these even in a read-only command.\n" +
         "- Perform all review perspectives yourself in this session. Subagent delegation is unavailable in this read-only runtime; do not call spawn_subagent or other delegation tools, even if repository instructions recommend parallel reviewers.\n" +
-        "- If an operation is denied, continue the inspection directly with supported read-only tools and report the limitation. Never claim approval for an incomplete inspection; use the incomplete verdict.\n" +
+        "- A permission denial can terminate the entire Grok turn, so choose supported tools before making a request. If the turn continues after a denial, use supported read-only tools and report the limitation. Never claim approval for an incomplete inspection; use the incomplete verdict.\n" +
         "- Report only defects you can point to a specific file and line for.");
     if (options.outputSchema) {
         parts.push(buildStructuredOutputInstruction(options.outputSchema));

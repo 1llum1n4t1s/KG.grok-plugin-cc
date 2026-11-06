@@ -41,6 +41,8 @@ The companion starts the locally installed Grok CLI. It checks paths on ACP file
 
 If an invocation reports HTTP 402 with `usage balance exhausted`, Grok Build's usage balance is exhausted. Retry after that balance recovers. A timeout, permission denial, incomplete review, or unconfirmed agent stop is a failed invocation; do not treat partial output as a completed review or task.
 
+During read-only reviews, Python, Node.js, Bun, and shell wrappers are denied even for scripts intended only to read files. Grok Build can end the turn with `cancelled` after a permission rejection. Use built-in file tools to inspect JSON and other evidence; unavailable evidence remains unverified. The review prompt supplies these restrictions before inspection starts.
+
 For source builds, development commands, and validation, see [Development](CONTRIBUTING.md#english). Runtime structure and boundaries are described in [DESIGN.md](DESIGN.md).
 
 <a id="japanese"></a>
@@ -83,5 +85,7 @@ Windows では `/grok:review --scope working-tree` でローカル変更をレ�
 ## トラブルシュート
 
 HTTP 402 と `usage balance exhausted` が表示された場合は、Grok Build の利用枠が不足しています。利用枠の回復後に再実行してください。タイムアウト、権限拒否、不完全なレビュー、agent の終了未確認は実行失敗です。途中の出力を完了したレビューやタスクとして扱わないでください。
+
+読み取り専用レビューでは、読取りだけを意図したスクリプトでも Python・Node.js・Bun・別シェル経由の実行は拒否します。Grok Build は権限拒否後に `cancelled` でターンを終了することがあります。JSON などの証拠は組込みのファイル読取りツールで確認し、アクセスできない証拠は未検証とします。レビュー開始時のプロンプトにも、この制約を渡します。
 
 ソースからのビルド、開発用コマンドと検証手順は [開発ガイド](CONTRIBUTING.md#日本語)、実行時の構造と境界は [DESIGN.md](DESIGN.md) を参照してください。
