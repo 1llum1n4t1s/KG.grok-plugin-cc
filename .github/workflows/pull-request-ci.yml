@@ -9,8 +9,9 @@ permissions:
 
 jobs:
   ci:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     name: CI
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64, m3mb14]
     # 容量境界の実機テストに加え、依存関係の導入とビルドの時間を確保する。
     timeout-minutes: 90
 
@@ -44,8 +45,9 @@ jobs:
         run: node scripts/bump-version.mjs --check
 
   node-22-smoke:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     name: Node.js 22.0 distribution smoke
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64, m3mb14]
     timeout-minutes: 15
     steps:
       - name: Check out repository
