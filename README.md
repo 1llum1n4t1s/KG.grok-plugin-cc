@@ -31,7 +31,7 @@ Start a new Codex task to load its skills. Install separately in each host if us
 
 Claude Code exposes `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:rescue`, `/grok:x`, and `/grok:setup`. In Codex, select the corresponding `grok:source-command-<name>` skill. Review and audit are read-only; rescue can request edits, while X search stays read-only. Setup checks Grok authentication.
 
-On Windows, use `/grok:review --scope working-tree` to review local changes. The `auto` and `working-tree` scopes require a complete safe Windows snapshot and fail if it cannot be collected. On macOS/Linux, explicitly use `/grok:review --scope branch` or `--base <ref>` to review committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use `/grok:audit authentication` to focus a whole-repository audit on any platform, or `/grok:rescue <task>` to delegate a task. Review also accepts `--language <BCP 47 tag>`. Run `/grok:setup` when installation or authentication fails; follow its reported error and Grok’s login guidance.
+On Windows, use `/grok:review --scope working-tree` to review local changes. The `auto` and `working-tree` scopes require a complete safe Windows snapshot and fail if it cannot be collected. On macOS/Linux, explicitly use `/grok:review --scope branch` or `--base <ref>` to review committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use `/grok:audit authentication` to focus a whole-repository audit on any platform, or `/grok:rescue <task>` to delegate a task. Review, adversarial review, and audit also accept `--language <BCP 47 tag>`. Run `/grok:setup` when installation or authentication fails; follow its reported error and Grok’s login guidance.
 
 Each invocation runs a new Grok session in the foreground and returns its result directly. Use Grok's own interface to continue a conversation. Automatic reviews and the former status, result, cancel, state-lock, and task-resume commands are no longer supported by the companion.
 
@@ -76,7 +76,7 @@ codex plugin add grok@kagayoi-grok
 
 Claude Code では `/grok:review`、`/grok:adversarial-review`、`/grok:audit`、`/grok:rescue`、`/grok:x`、`/grok:setup` を使います。Codex では対応する `grok:source-command-<name>` スキルを選びます。レビュー・監査と X 検索は読み取り専用です。rescue は編集も依頼できます。setup は Grok の認証を確認します。
 
-Windows では `/grok:review --scope working-tree` でローカル変更をレビューできます。`auto` と `working-tree` は Windows の安全なスナップショットを完全に取得できることが条件で、取得できなければ失敗します。macOS/Linux では `/grok:review --scope branch` または `--base <ref>` を明示してコミット済みの変更をレビューしてください。未コミット変更は比較差分には含まれませんが、周辺ファイルは作業ツリーから読み取られる場合があります。全 OS で `/grok:audit authentication` によりリポジトリ全体の監査を認証に絞り、`/grok:rescue <task>` でタスクを委任できます。レビューには `--language <BCP 47 tag>` も指定できます。起動や認証に失敗したら `/grok:setup` を実行し、表示されたエラーと Grok のログイン案内を確認してください。
+Windows では `/grok:review --scope working-tree` でローカル変更をレビューできます。`auto` と `working-tree` は Windows の安全なスナップショットを完全に取得できることが条件で、取得できなければ失敗します。macOS/Linux では `/grok:review --scope branch` または `--base <ref>` を明示してコミット済みの変更をレビューしてください。未コミット変更は比較差分には含まれませんが、周辺ファイルは作業ツリーから読み取られる場合があります。全 OS で `/grok:audit authentication` によりリポジトリ全体の監査を認証に絞り、`/grok:rescue <task>` でタスクを委任できます。レビュー・敵対的レビュー・監査には `--language <BCP 47 tag>` も指定できます。起動や認証に失敗したら `/grok:setup` を実行し、表示されたエラーと Grok のログイン案内を確認してください。
 
 各実行は新しい Grok セッションを前景で開始し、その結果を直接返します。会話の続きは Grok 本体で行ってください。自動レビューと旧 status・result・cancel・state-lock・タスク再開コマンドは利用できません。
 

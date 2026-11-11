@@ -58,7 +58,12 @@ export function parseArgs<V extends string = string, B extends string = string>(
         continue;
       }
 
+      // 未知の長いオプションは本文の始まりとみなす。以後のトークンからフラグを
+      // 取り出すと、本文中の `--write` 等が解釈されてしまう（codex-runtime 契約）。
       positionals.push(token);
+      if (stopAtFirstPositional) {
+        passthrough = true;
+      }
       continue;
     }
 
@@ -80,7 +85,11 @@ export function parseArgs<V extends string = string, B extends string = string>(
       continue;
     }
 
+    // 未知の短いオプションも長いオプションと同様に本文の始まりとして扱う。
     positionals.push(token);
+    if (stopAtFirstPositional) {
+      passthrough = true;
+    }
   }
 
   return { options: options as Partial<Record<V, string>> & Partial<Record<B, boolean>>, positionals };

@@ -166,6 +166,14 @@ const WRITE_SIDE_EFFECT_PATTERN = /(^|\s)(>>?|\btee\b)(\s|$)|(^|\s)-i(\s|$)/;
  * 埋め込むだけで別のコマンドが先に走るため、中身を見ずに一律で拒否する。
  */
 const COMMAND_SUBSTITUTION_PATTERN = /\$\(|\$\{|`/;
+const UNICODE_QUOTE_PATTERN = /[‘-„]/;
+/**
+ * タブ以外の制御文字・書式文字。PowerShell は U+0085（NEL）等を空白として扱うが、
+ * JS の `\s` は含まないため、tokenizer が 1 語とみなした引数を shell 側は 2 語に分け、
+ * 語頭を見る検査（rg --pre、find -delete、git --output 等）を迂回できてしまう。
+ */
+// 改行（\r \n）は従来どおり UNSAFE_SHELL_SYNTAX_PATTERN が「shell control」として拒否する。
+const UNSAFE_CONTROL_CHARACTER_PATTERN = /(?![\t\r\n])[\p{Cc}\p{Cf}]/u;
 const UNSAFE_SHELL_SYNTAX_PATTERN = /[\r\n{}]|(?<!&)&(?!&)|[<>]|\^|%[^%]+%|![A-Za-z_][A-Za-z0-9_]*!|\$[A-Za-z_]/;
 const OUTSIDE_PATH_PATTERN = /(^|[\s"'=\\/])(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]:|[\\/]{2}|\/(?!dev\/null\b))/;
 /**
@@ -230,6 +238,12 @@ function tokenizeCommand(segment) {
         if ((tokens.length > 0 && match.index === previousEnd) || (/["']/.test(match[3] ?? "") && !quotedSince)) {
             return null;
         }
+        // PowerShell は引数モードでも引用なしの `(...)` と `@(...)` / `@{...}` / `@name` を
+        // 式として先に評価する。許可コマンドの引数に埋め込むだけで別コマンドが走るため、
+        // 引用なしの括弧と先頭 `@` は拒否する。引用内の括弧（正規表現など）は 1 語の文字列なので許可する。
+        if (match[3] !== undefined && (/[()]/.test(match[3]) || match[3].startsWith("@"))) {
+            return null;
+        }
         tokens.push(quotedSince ? quotedSince[1] + quotedSince[2] : match[1] ?? match[2] ?? match[3]);
         previousEnd = pattern.lastIndex;
     }
@@ -288,6 +302,15 @@ export function classifyShellCommand(command, cwd = null) {
     if (COMMAND_SUBSTITUTION_PATTERN.test(text)) {
         return { allowed: false, reason: "uses command substitution" };
     }
+    // PowerShell は Unicode の引用符（‘ ’ ‚ ‛ “ ” „）も ASCII の引用符と同じ文字列境界に使う。
+    // ASCII で開いてスマート引用符で閉じると、下の tokenizer が引用内とみなした括弧式が
+    // PowerShell では引用外として評価されるため、これらの文字は位置を問わず拒否する。
+    if (UNICODE_QUOTE_PATTERN.test(text)) {
+        return { allowed: false, reason: "uses Unicode quotation marks that some shells treat as string delimiters" };
+    }
+    if (UNSAFE_CONTROL_CHARACTER_PATTERN.test(text)) {
+        return { allowed: false, reason: "uses control or format characters that shells may split differently" };
+    }
     if (UNSAFE_SHELL_SYNTAX_PATTERN.test(text)) {
         return { allowed: false, reason: "uses unsupported shell control or expansion syntax" };
     }
@@ -295,7 +318,7 @@ export function classifyShellCommand(command, cwd = null) {
     for (const segment of segments) {
         const tokens = tokenizeCommand(segment);
         if (!tokens) {
-            return { allowed: false, reason: "uses unsupported shell quoting" };
+            return { allowed: false, reason: "uses unsupported shell quoting or unquoted expression syntax" };
         }
         // 環境変数で Git や検索ツールの実行内容を変えられるため、前置きは許可しない。
         if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? "")) {
@@ -783,20 +806,69 @@ function buildResultStatus(turnState) {
             return "unknown";
     }
 }
+/** Windows の環境変数は大文字小文字を区別しないため、`Path` 等の表記揺れも拾う。 */
+function readWindowsEnv(env, name) {
+    const key = Object.keys(env).find((candidate) => candidate.toUpperCase() === name);
+    return key === undefined ? undefined : env[key];
+}
+/**
+ * Windows で区切りのない実行ファイル名を、PATH と PATHEXT だけから絶対パスへ解決する。
+ *
+ * Grok は cmd.exe 経由で起動するため、素の名前を渡すと cmd.exe は PATH より先に
+ * カレントディレクトリ（＝レビュー対象のリポジトリ）を探す。リポジトリ内に置かれた
+ * 同名の grok.exe / grok.cmd が本物の代わりに実行されないよう、作業ディレクトリを
+ * 探索対象から外して自前で解決する。PATH 上の相対ディレクトリも cwd 依存になるため除外する。
+ */
+function resolveWindowsCommandOnPath(name, env) {
+    const extensions = (readWindowsEnv(env, "PATHEXT") || ".COM;.EXE;.BAT;.CMD")
+        .split(";").map((extension) => extension.trim()).filter(Boolean);
+    const candidates = path.win32.extname(name) ? [name] : extensions.map((extension) => name + extension);
+    for (const directory of String(readWindowsEnv(env, "PATH") ?? "").split(";")) {
+        const dir = directory.trim().replace(/^"(.*)"$/, "$1");
+        if (!dir || !path.win32.isAbsolute(dir))
+            continue;
+        for (const candidate of candidates) {
+            const full = path.win32.join(dir, candidate);
+            try {
+                if (fs.statSync(full).isFile())
+                    return full;
+            }
+            catch {
+                // 存在しない候補は次を探す。
+            }
+        }
+    }
+    return null;
+}
+/** パス区切りやドライブ指定を含まない、PATH 探索に委ねる名前か。 */
+function isBareCommandName(command) {
+    return !/[\\/:]/.test(command);
+}
 /** `grok` 実行ファイルの場所。GROK_BIN で上書きできる。 */
 function resolveGrokBin(env = process.env) {
-    if (env.GROK_BIN) {
-        return env.GROK_BIN;
+    const configured = env.GROK_BIN;
+    let bin = configured || "grok";
+    if (!configured) {
+        const home = env.USERPROFILE ?? env.HOME ?? os.homedir();
+        const bundled = path.join(home, ".grok", "bin", process.platform === "win32" ? "grok.exe" : "grok");
+        if (fs.existsSync(bundled)) {
+            return bundled;
+        }
     }
-    const home = env.USERPROFILE ?? env.HOME ?? os.homedir();
-    const bundled = path.join(home, ".grok", "bin", process.platform === "win32" ? "grok.exe" : "grok");
-    if (fs.existsSync(bundled)) {
-        return bundled;
+    // Windows の素の名前は cwd を先に探されるため、ここで絶対パスへ固定する。
+    // 見つからなければ素の名前のまま返し、getGrokAvailability が起動前に未導入として扱う。
+    if (process.platform === "win32" && isBareCommandName(bin)) {
+        bin = resolveWindowsCommandOnPath(bin, env) ?? bin;
     }
-    return "grok";
+    return bin;
 }
 export function getGrokAvailability(cwd, env = process.env) {
     const bin = resolveGrokBin(env);
+    // PATH で解決できなかった素の名前を cmd.exe へ渡すと、レビュー対象リポジトリ内の
+    // 同名ファイルが実行され得る。起動せずに未導入として返す。
+    if (process.platform === "win32" && isBareCommandName(bin)) {
+        return { available: false, bin, reason: "not-installed", detail: `${bin} was not found on PATH` };
+    }
     // Windows では cmd.exe 経由で起動する。`process.env.SHELL`（Git Bash）だと
     // パスのバックスラッシュがエスケープとして食われ、`.cmd` ラッパーも起動できない。
     const spawnOptions = { cwd, env, shell: process.platform === "win32" };
@@ -958,7 +1030,7 @@ function buildReviewPrompt(options = {}) {
         "- Plain shell command names available for read-only inspection are: " + [...READ_ONLY_COMMANDS].join(", ") + ". Their arguments still undergo the read-only checks below. Git and Test-Path have separate restricted forms. If a command is unavailable on this OS, use built-in file tools instead of wrapping it in another shell. ACP file requests must stay within the repository; report evidence you cannot access as unverified.\n" +
         "- Every Git command must start with: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + ". Then use a supported read-only subcommand. For diff, log, show and whatchanged, put --no-ext-diff and --no-textconv immediately after the subcommand as its first two arguments (either order), before any other option, revision or -- path separator. Status and blame are denied. Diff must put --cached or --staged immediately after those two guards, or use an exact 40-digit SHA-1 OID..OID or 64-digit SHA-256 OID..OID there. For fixed ranges, only supported display flags may follow; put paths after -- and do not add revisions or use HEAD/branch names. Use the fixed comparison from collection guidance. Grep requires --cached first; --no-index and modified ls-files checks are denied. These flags suppress textconv/external diff; they do not establish an OS sandbox. Example: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + " diff --no-ext-diff --no-textconv --cached --stat. Use complete option names supported by that specific subcommand and separate short options; options from another subcommand, unknown options, custom pretty formats and --submodule=diff are denied. For example, grep --cached --text is supported, but cat-file --text is denied; use cat-file -p to read an object. Use file tools if a command is unsupported.\n" +
         "- For recent commit history, use --since=YYYY-MM-DD with git log and --oneline, not a custom percent-based format. Example: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + " log --no-ext-diff --no-textconv --since=2026-09-28 --oneline. Replace the example date with the requested starting date.\n" +
-        "- Avoid PowerShell script blocks and variables, command substitution, backticks, redirection, and executable paths: the read-only shell policy rejects these even in a read-only command.\n" +
+        "- Avoid PowerShell script blocks and variables, unquoted parentheses or leading @ (quote search patterns that contain parentheses), command substitution, backticks, redirection, and executable paths: the read-only shell policy rejects these even in a read-only command.\n" +
         "- Perform all review perspectives yourself in this session. Subagent delegation is unavailable in this read-only runtime; do not call spawn_subagent or other delegation tools, even if repository instructions recommend parallel reviewers.\n" +
         "- A permission denial can terminate the entire Grok turn, so choose supported tools before making a request. If the turn continues after a denial, use supported read-only tools and report the limitation. Never claim approval for an incomplete inspection; use the incomplete verdict.\n" +
         "- Report only defects you can point to a specific file and line for.");

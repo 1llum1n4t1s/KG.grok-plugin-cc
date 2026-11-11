@@ -39,7 +39,7 @@ The scripts never invoke rustup or its proxies. After the developer explicitly i
 
 `check-generated` compiles into the ignored `plugins/grok/.generated/check/` build directory and compares the output with the checked-in JavaScript, allowing Git line-ending conversion. CI runs this check **before** building to catch stale or missing distribution files. It also rejects `.mjs` files without a corresponding `.mts` source. The check directory is reusable build output, not part of the distribution runtime.
 
-Tests use the `node:test` API and fake Grok processes, with Bun as the default runner and actual Node in compatibility CI; they do not require a real Grok account. Some process-lifecycle E2E tests require POSIX and are skipped on Windows. Run those tests on Linux or macOS before treating that coverage as verified.
+Tests use the `node:test` API and fake Grok processes, with Bun as the default runner and actual Node in compatibility CI; they do not require a real Grok account. Some E2E tests require POSIX and are skipped on Windows: process lifecycle and spawn failure, the foreground bridge, foreground language handling, and setup guidance. Run those tests on Linux or macOS before treating that coverage as verified.
 
 CI runs the full suite, build, generated-file check, and the independent version check on Linux with the pinned development Node.js. It invokes `node scripts/check-generated.mjs`, `node scripts/run-tests.mjs`, and `node scripts/bump-version.mjs --check` explicitly. An additional job runs committed foreground and runtime smoke tests on Node.js 22.0.0. Windows CI also uses `node scripts/build-windows-helper.mjs --check` and the Node test runner to build the native test shim, run Rust unit tests, and exercise process ownership, shutdown, and Git snapshot boundaries. The runner passes the shim as `GROK_TEST_SHIM`; `GROK_GIT_NATIVE_FIXTURE_ROOT` points under runner temp. Keep the live repository version check separate from version fixture tests.
 
@@ -65,7 +65,7 @@ Windows helper の正本は `plugins/grok/native/` と Git 管理する `Cargo.l
 
 `build` は全 TypeScript の型検査と隣接する `.mjs` の生成を行います。`check-generated` は Git 除外済みの `plugins/grok/.generated/check/` へ生成し、コミット対象の JavaScript と比較します。Git による改行変換は許容します。CI ではビルド前に照合し、生成物の更新漏れ・欠落と、対応する `.mts` がない `.mjs` を検出します。照合ディレクトリは再利用できるビルド出力であり、配布ランタイムからは参照しません。
 
-テストは `node:test` APIとfake Grokを使い、既定はBun、互換CIは実際のNodeで実行します。実アカウントは必要ありません。POSIX専用のプロセス終了E2EはWindowsでスキップされるため、検証済みとするにはLinuxまたはmacOSでも実行してください。
+テストは `node:test` APIとfake Grokを使い、既定はBun、互換CIは実際のNodeで実行します。実アカウントは必要ありません。POSIX専用のE2E（プロセス終了・起動失敗、前景ブリッジ、前景の言語処理、setup案内）はWindowsでスキップされるため、検証済みとするにはLinuxまたはmacOSでも実行してください。
 
 CIは固定Node.jsのLinuxで全テスト・ビルド・生成物照合・独立した実リポジトリのversion検証を行います。`node scripts/check-generated.mjs`、`node scripts/run-tests.mjs`、`node scripts/bump-version.mjs --check` を明示実行し、追加ジョブはNode.js 22.0.0で前景接続とランタイムのsmoke testを行います。Windowsも `node scripts/build-windows-helper.mjs --check` とNodeのtest runnerを使い、native shim・Rust単体テスト・プロセス所有・終了・Git snapshot境界を検証します。shimは `GROK_TEST_SHIM`、隔離領域はrunner temp内の `GROK_GIT_NATIVE_FIXTURE_ROOT` で渡します。実リポジトリのversion検証はversion fixtureテストと独立して維持します。
 

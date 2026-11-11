@@ -1020,6 +1020,38 @@ test("task accepts legacy --wait as a foreground no-op", () => {
   assert.doesNotMatch(fake.readState().prompts[0], /--wait/);
 });
 
+// 失敗条件: 単一引数の依頼文を第二のシェル解析で分割し、引用符・連続空白・改行を壊すこと。
+test("task preserves a single-argument prompt verbatim", () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+  const prompt = 'Don\'t change the API; rename "foo"  to bar\n  keep indentation';
+  const result = companion(["task", prompt], { repo, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(fake.readState().prompts[0].includes(prompt), "prompt text must reach Grok unchanged");
+});
+
+// 失敗条件: 既知オプションで始まらない `-` 始まりの依頼文（箇条書き、未知の語の後ろにある --write）を
+// 旧形式として再分割し、改行を潰したり --write を抽出して書込み権限で実行したりすること。
+// 先頭語が既知オプション（例: `--write fix`）の単一引数は旧ホスト互換として分割を維持する。
+for (const prompt of ["- [ ] fix \"a\"\n- [ ] keep  spacing", "--writer の意味を調べて --write"]) {
+  test(`task keeps a dash-leading single prompt verbatim: ${JSON.stringify(prompt.slice(0, 8))}`, () => {
+    const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+    const result = companion(["task", prompt], { repo, env });
+    assert.equal(result.status, 0, result.stderr);
+    const state = fake.readState();
+    assert.ok(state.prompts[0].includes(prompt), "prompt text must reach Grok unchanged");
+  });
+}
+
+// 失敗条件: 未知オプションの後ろから既知フラグを取り出し、本文中の --write で書込みを許可すること。
+test("task treats an unknown option as the start of the prompt", () => {
+  const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
+  const result = companion(["task", "--unknown-flag", "--write", "--json", "inspect"], { repo, env });
+  assert.equal(result.status, 0, result.stderr);
+  const prompt = fake.readState().prompts[0];
+  assert.match(prompt, /--unknown-flag --write --json inspect/);
+  assert.throws(() => JSON.parse(result.stdout), "--json inside the prompt must not switch output mode");
+});
+
 test("removed job controls and task resumption reject without reading legacy state", () => {
   const workspace = setupWorkspace({ replies: [{ text: "unexpected" }] });
   const legacy = path.join(workspace.env.CLAUDE_PLUGIN_DATA, "state.json");

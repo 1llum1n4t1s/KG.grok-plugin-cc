@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import process from "node:process";
 import fs from "node:fs";
+import path from "node:path";
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { getGrokAuthStatus, getGrokAvailability, runGrokTurn } from "../plugins/grok/scripts/lib/grok.mjs";
+import { getGrokAuthStatus, getGrokAvailability, resolveGrokBin, runGrokTurn } from "../plugins/grok/scripts/lib/grok.mjs";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
 import { makeTempDir, removeTempFixture } from "./helpers.mjs";
 test("injected Grok environment is used for preflight, authentication and model selection", async (t) => {
@@ -104,4 +105,28 @@ test("injected Grok environment is used for preflight, authentication and model 
                 process.env.GROK_PLUGIN_MODEL = previousModel;
         }
     }
+});
+// 失敗条件: Windows で素の `grok` を cmd.exe へ渡し、レビュー対象リポジトリ（cwd）内の
+// 同名ファイルを PATH 上の本物より先に実行すること。cmd.exe の cwd 優先探索が有効な
+// 環境（NoDefaultCurrentDirectoryInExePath を渡さない）で、目印を書くだけの無害な grok.cmd を置いて確認する。
+test("Windows resolves a bare grok name from PATH only, never from the reviewed repository", { skip: process.platform !== "win32" }, (t) => {
+    const repo = makeTempDir("grok-env-cwd-shadow-");
+    const home = makeTempDir("grok-env-home-");
+    const pathDir = makeTempDir("grok-env-path-");
+    t.after(() => [repo, home, pathDir].forEach((dir) => removeTempFixture(dir, { recursive: true, force: true })));
+    const marker = path.join(repo, "shadow-ran.txt");
+    fs.writeFileSync(path.join(repo, "grok.cmd"), `@echo off\r\necho shadow> "${marker}"\r\necho grok 0.0.0\r\n`, "utf8");
+    const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+    const base = { SystemRoot: systemRoot, ComSpec: process.env.ComSpec, PATHEXT: ".COM;.EXE;.BAT;.CMD", USERPROFILE: home, GROK_BIN: "grok" };
+    // PATH に grok が無ければ、cwd の偽物を起動せずに未導入として返す。
+    const missing = getGrokAvailability(repo, { ...base, PATH: path.join(systemRoot, "System32") });
+    assert.equal(missing.available, false);
+    assert.equal(missing.reason, "not-installed");
+    assert.equal(fs.existsSync(marker), false, "the repository grok.cmd must not run");
+    // PATH 上にあれば絶対パスへ固定する。環境変数名の大文字小文字（Path）も区別しない。
+    const real = path.join(pathDir, "grok.cmd");
+    fs.writeFileSync(real, "@echo off\r\necho grok 9.9.9\r\n", "utf8");
+    const resolved = resolveGrokBin({ ...base, Path: `${path.join(systemRoot, "System32")};${pathDir}` });
+    assert.equal(resolved.toLowerCase(), real.toLowerCase());
+    assert.equal(fs.existsSync(marker), false, "the repository grok.cmd must not run");
 });

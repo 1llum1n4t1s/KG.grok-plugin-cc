@@ -47,6 +47,33 @@ test("改行や各 shell 固有の連結・展開構文は拒否する", () => {
         assert.equal(classifyShellCommand(command).allowed, false, command);
     }
 });
+// PowerShell は引数モードでも引用なしの括弧式・配列式を先に評価する。
+// 許可コマンドの引数へ埋め込むだけで別コマンドが走るため、無害な目印で拒否を確認する。
+test("引用なしの PowerShell 括弧式と先頭 @ を拒否する", () => {
+    for (const command of [
+        "echo (RERE_CANARY)",
+        "echo @(RERE_CANARY)",
+        "cat (RERE_CANARY)",
+        "echo a,(RERE_CANARY)",
+        "rg -n foo(bar src",
+        "rg RERE_CANARY @RERE_CANARY",
+        "ls | grep (RERE_CANARY)",
+        // ASCII で開きスマート引用符で閉じると、PowerShell では括弧が引用外になる。
+        "rg \"a” (RERE_CANARY) “b\" src",
+        "rg 'a’ (RERE_CANARY) ‘b' src",
+        // PowerShell は U+0085 等を空白として分割するが、JS の \s は含まない。語頭検査の迂回を拒否する。
+        "rg x\u0085--pre=RERE_CANARY src",
+        "find .\u0085-delete",
+        "rg RERE_CANARY​src"
+    ]) {
+        assert.equal(classifyShellCommand(command).allowed, false, command);
+    }
+});
+test("引用内の括弧と語中の @ は通常の文字列として許可する", () => {
+    for (const command of ["rg -n \"foo(bar\" src", "rg -n 'call(x)' src", "grep -n user@example.com README.md"]) {
+        assert.equal(classifyShellCommand(command).allowed, true, command);
+    }
+});
 test("書き込み可能な git 照会風サブコマンドとリポジトリ外パスを拒否する", () => {
     for (const command of [
         "git branch scratch",

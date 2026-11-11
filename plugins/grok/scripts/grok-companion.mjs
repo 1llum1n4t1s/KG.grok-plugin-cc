@@ -17,7 +17,13 @@ On macOS/Linux, use --scope branch or --base <ref> for committed changes; uncomm
 Task: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json
 Each command runs a new foreground Grok session. For resuming, use Grok's own resume command.`;
 function parse(argv, values, booleans) {
-    const args = argv.length === 1 ? splitRawArgumentString(argv[0]) : argv;
+    // 旧ホストは `--language ja --wait "focus"` のような生の引数列を 1 引数で渡すため、
+    // 先頭語がこのコマンドの既知オプションである単一引数だけ互換分割する。
+    // 通常の依頼文・focus（`- [ ] 箇条書き` など `-` で始まる文も含む）を 1 引数で受けた場合は
+    // 第二のシェル解析をせず、引用符・連続空白・改行を原文のまま保持する（codex-runtime 契約）。
+    const known = new Set([...values, ...booleans].map(name => `--${name}`).concat(["-C", "-m"]));
+    const firstWord = argv.length === 1 ? (argv[0].trimStart().split(/\s/, 1)[0] ?? "").replace(/=.*$/s, "") : "";
+    const args = argv.length === 1 && known.has(firstWord) ? splitRawArgumentString(argv[0]) : argv;
     return parseArgs(args, { valueOptions: values, booleanOptions: booleans, aliasMap: { C: "cwd", m: "model" }, stopAtFirstPositional: true });
 }
 function disabled(name) { throw new Error(`${name} is no longer supported. Use Grok's own commands to resume or manage sessions.`); }

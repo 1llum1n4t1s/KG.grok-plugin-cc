@@ -220,6 +220,11 @@ test("rescue forwards one concrete task and grants write access only on request"
   assert.match(rescue, /require a concrete task/i);
   assert.match(rescue, /grok-companion\.mjs" task once in the foreground/i);
   assert.match(rescue, /use --write for requested edits; omit it for read-only work/i);
+  // Codex 実行契約と同じく、複数行の依頼は --prompt-file で渡す（AGENTS.md）。
+  for (const entry of [rescue, read("claude-skills/grok-cli-runtime/SKILL.md"), read("commands/x.md")]) {
+    assert.match(entry, /options before the task, then `--`/i);
+    assert.match(entry, /multiline text.*--prompt-file/i);
+  }
 });
 
 test("setup entries run the helper and follow its guidance without installing automatically", () => {
