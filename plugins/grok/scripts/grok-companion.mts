@@ -6,6 +6,7 @@ import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, resolveReviewTarget } from "./lib/git.mjs";
 import { getGrokAuthStatus, parseStructuredOutput, readOutputSchema, runGrokReview, runGrokTurn } from "./lib/grok.mjs";
+import { normalizeLanguageTag } from "./lib/language.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { renderReviewResult, validateReviewResultShape } from "./lib/render.mjs";
 
@@ -17,15 +18,18 @@ Review scopes auto and working-tree require Windows and fail if a complete safe 
 On macOS/Linux, use --scope branch or --base <ref> for committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use audit for the whole repository.
 Task: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json
 Each command runs a new foreground Grok session. For resuming, use Grok's own resume command.`;
+// 短いオプションの別名。parseArgs の aliasMap と、互換分割で既知とみなす `-C` / `-m` の
+// 両方をこの 1 つの定義から導出し、片方だけ更新される食い違いを防ぐ。
+const shortAliases = { C: "cwd", m: "model" };
 function parse<V extends string, B extends string>(argv: string[], values: V[], booleans: B[]) {
   // 旧ホストは `--language ja --wait "focus"` のような生の引数列を 1 引数で渡すため、
   // 先頭語がこのコマンドの既知オプションである単一引数だけ互換分割する。
   // 通常の依頼文・focus（`- [ ] 箇条書き` など `-` で始まる文も含む）を 1 引数で受けた場合は
   // 第二のシェル解析をせず、引用符・連続空白・改行を原文のまま保持する（codex-runtime 契約）。
-  const known = new Set<string>([...values, ...booleans].map(name => `--${name}`).concat(["-C", "-m"]));
+  const known = new Set<string>([...values, ...booleans].map(name => `--${name}`).concat(Object.keys(shortAliases).map(name => `-${name}`)));
   const firstWord = argv.length === 1 ? (argv[0].trimStart().split(/\s/, 1)[0] ?? "").replace(/=.*$/s, "") : "";
   const args = argv.length === 1 && known.has(firstWord) ? splitRawArgumentString(argv[0]) : argv;
-  return parseArgs(args, { valueOptions: values, booleanOptions: booleans, aliasMap: { C: "cwd", m: "model" }, stopAtFirstPositional: true });
+  return parseArgs(args, { valueOptions: values, booleanOptions: booleans, aliasMap: shortAliases, stopAtFirstPositional: true });
 }
 function disabled(name) { throw new Error(`${name} is no longer supported. Use Grok's own commands to resume or manage sessions.`); }
 function model(value) { return aliases[value] ?? value; }
@@ -47,27 +51,18 @@ function errorDiagnostic(error) {
   return { message: error.message, rpcCode: error.rpcCode ?? null, data,
     ...(usageExhausted ? { classification: "usage-balance-exhausted", guidance: "Grokの利用枠が不足しています（HTTP 402）。利用枠の回復後に再実行してください。" } : {}) };
 }
-function normalizeLanguageTag(language) {
-  if (/[^A-Za-z0-9-]/.test(String(language))) throw new Error(`Invalid BCP 47 language tag "${language}".`);
-  const tag = String(language).toLowerCase();
-  // RFC 5646 の祖父タグと、Intl が扱わない extlang・private-use を許容する。
-  const grandfathered = new Set([
-    "en-gb-oed", "i-ami", "i-bnn", "i-default", "i-enochian", "i-hak", "i-klingon",
-    "i-lux", "i-mingo", "i-navajo", "i-pwn", "i-tao", "i-tay", "i-tsu",
-    "sgn-be-fr", "sgn-be-nl", "sgn-ch-de", "art-lojban", "cel-gaulish", "no-bok",
-    "no-nyn", "zh-guoyu", "zh-hakka", "zh-min", "zh-min-nan", "zh-xiang"
-  ]);
-  const langtag = /^(?:[a-z]{2,3}(?:-[a-z]{3}){0,3}|[a-z]{4}|[a-z]{5,8})(?:-[a-z]{4})?(?:-(?:[a-z]{2}|[0-9]{3}))?(?<variants>(?:-(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3}))*)(?<extensions>(?:-[0-9a-wy-z](?:-[a-z0-9]{2,8})+)*)(?:-x(?:-[a-z0-9]{1,8})+)?$/;
-  const match = langtag.exec(tag);
-  if (!grandfathered.has(tag) && !/^x(?:-[a-z0-9]{1,8})+$/.test(tag)) {
-    if (!match) throw new Error(`Invalid BCP 47 language tag "${language}".`);
-    const variants = match.groups.variants.split("-").filter(Boolean);
-    const singletons = Array.from(match.groups.extensions.matchAll(/-([0-9a-wy-z])(?:-[a-z0-9]{2,8})+/g), (item) => item[1]);
-    if (new Set(variants).size !== variants.length || new Set(singletons).size !== singletons.length) {
-      throw new Error(`Invalid BCP 47 language tag "${language}".`);
-    }
-  }
-  try { return new Intl.Locale(language).toString(); } catch { return tag; }
+// review / task 共通のターン未完了判定。
+// permissionDenials は意図的に `?.` を付けない（未定義なら例外になる従来の挙動を保つ）。
+// review 側は parseError を先に短絡評価するため、この関数を呼ぶ位置も変えないこと。
+function turnIncomplete(result) {
+  return result.status !== "completed" || result.stopReason !== "end_turn" || result.turnStopUnconfirmed || result.permissionDenials.length;
+}
+// 非 JSON 出力時の stderr 診断。順序（RPC コード、利用枠案内、停止未確認）は表示契約なので保つ。
+// stdout の本文を出した後に呼ぶ。main().catch 側の停止未確認表示は別経路なのでここへ統合しない。
+function reportTurnDiagnostics(diagnostic, result) {
+  if (diagnostic?.rpcCode != null) console.error(`Grok session/prompt RPC error code: ${diagnostic.rpcCode}`);
+  if (diagnostic?.guidance) console.error(diagnostic.guidance);
+  if (result.turnStopUnconfirmed) console.error("Grok agent stop could not be confirmed.");
 }
 function languageRule(language, focus) {
   const fields = "every human-readable field (summary, finding titles and bodies, recommendations, next steps)";
@@ -108,13 +103,11 @@ async function main() {
     const parsed: ReturnType<typeof parseStructuredOutput> & { permissionDenials?: string[] } = parseStructuredOutput(result.reviewText, { status: result.status, stopReason: result.stopReason, error: result.error?.message ?? null, failureMessage: result.error?.message ?? result.stderr });
     if (!parsed.parseError) parsed.parseError = validateReviewResultShape(parsed.parsed);
     parsed.permissionDenials = result.permissionDenials;
-    const incomplete = parsed.parseError || result.status !== "completed" || result.stopReason !== "end_turn" || result.turnStopUnconfirmed || result.permissionDenials.length || parsed.parsed?.verdict === "incomplete";
+    const incomplete = parsed.parseError || turnIncomplete(result) || parsed.parsed?.verdict === "incomplete";
     if (incomplete && parsed.parsed && !parsed.parseError) parsed.parsed.verdict = "incomplete";
     const diagnostic = errorDiagnostic(result.error);
     console.log(options.json ? JSON.stringify({ ...result, error: diagnostic, result: parsed.parseError ? null : parsed.parsed, parseError: parsed.parseError }, null, 2) : renderReviewResult(parsed, { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }));
-    if (!options.json && diagnostic?.rpcCode != null) console.error(`Grok session/prompt RPC error code: ${diagnostic.rpcCode}`);
-    if (!options.json && diagnostic?.guidance) console.error(diagnostic.guidance);
-    if (!options.json && result.turnStopUnconfirmed) console.error("Grok agent stop could not be confirmed.");
+    if (!options.json) reportTurnDiagnostics(diagnostic, result);
     if (incomplete) process.exitCode = 1;
     return;
   }
@@ -128,10 +121,8 @@ async function main() {
     const result = await runGrokTurn(cwd, { prompt, model: model(options.model), effort: options.effort, readOnly: !options.write });
     const diagnostic = errorDiagnostic(result.error);
     console.log(options.json ? JSON.stringify({ ...result, error: diagnostic }, null, 2) : result.finalMessage || result.error?.message || result.stderr || "Grok returned no output.");
-    if (!options.json && diagnostic?.rpcCode != null) console.error(`Grok session/prompt RPC error code: ${diagnostic.rpcCode}`);
-    if (!options.json && diagnostic?.guidance) console.error(diagnostic.guidance);
-    if (!options.json && result.turnStopUnconfirmed) console.error("Grok agent stop could not be confirmed.");
-    if (result.status !== "completed" || result.stopReason !== "end_turn" || result.turnStopUnconfirmed || result.permissionDenials.length) process.exitCode = 1;
+    if (!options.json) reportTurnDiagnostics(diagnostic, result);
+    if (turnIncomplete(result)) process.exitCode = 1;
     return;
   }
   throw new Error(`Unknown command: ${command}\n${usage}`);

@@ -54,7 +54,7 @@ export function getAcpPromptSuccessEvidence(response: unknown, client: unknown) 
   return record && record.client === client ? record.evidence : null;
 }
 /** ACP のプロトコル版。grok 0.2.x は 1 を返す。 */
-export const ACP_PROTOCOL_VERSION = 1;
+const ACP_PROTOCOL_VERSION = 1;
 
 const DIRECT_HANDSHAKE_TIMEOUT_MS = 10_000;
 const CONTROL_RPC_TIMEOUT_MS = 30_000;
@@ -587,6 +587,7 @@ class SpawnedAcpClient extends AcpClientBase {
       child.once("spawn", () => { spawnObserved = true; this.#posixSpawnNeverStarted = false; startedResolve(); });
       child.on("error", (error) => { spawnError ??= error; startedReject(error); this.handleExit(error); });
       for (const pipe of [child.stdin, child.stdout, child.stderr]) pipe?.on("error", error => this.handleExit(error));
+      // 制御 pipe の error で未処理例外にしない。pipe 欠落の検査より前に一度だけ登録する。
       child.stdio?.[3]?.on("error", () => {});
       child.once("exit", () => { childExited = true; });
       this.#posixChildClosed = new Promise((resolve) => {
@@ -620,7 +621,6 @@ class SpawnedAcpClient extends AcpClientBase {
       let exitData = "";
       (child.stdio[3] as Readable).setEncoding("utf8");
       child.stdio[3].on("data", chunk => { if (exitData.length <= 1024) exitData += chunk; });
-      child.stdio[3].on("error", () => {});
       child.stdio[3].on("end", () => {
         if (exitData.length > 1024) return;
         try {
@@ -673,7 +673,6 @@ class SpawnedAcpClient extends AcpClientBase {
     this.proc.stdout.on("data", (chunk) => this.handleChunk(chunk));
 
     // guard 違反時も先に子の所有・終了監視を登録し、呼出元の close へ渡す。
-
     if (this.windowsOwnedAgent) await this.windowsOwnedAgent.ready;
     if (this.closed || this.closeStarted) throw new Error("Direct Grok agent was closed before its ACP handshake.");
     await withTimeout(this.performInitialize(), DIRECT_HANDSHAKE_TIMEOUT_MS);

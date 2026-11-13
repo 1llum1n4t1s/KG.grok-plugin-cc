@@ -122,7 +122,10 @@ function appendReasoningSection(lines, reasoningSummary) {
   }
 }
 
-/** getGrokAvailability の戻り値を 1 行にする。 */
+/**
+ * 構造化レビュー結果（parseStructuredOutput の戻り値に実行状態を添えたもの）を
+ * 利用者向けの Markdown へ描画する。未完了・JSON 不正・形の不一致は承認扱いにしない。
+ */
 export function renderReviewResult(parsedResult, meta) {
   const unfinished = parsedResult.status && parsedResult.status !== "completed";
   const validationError = parsedResult.parsed ? validateReviewResultShape(parsedResult.parsed) : null;
@@ -185,7 +188,7 @@ export function renderReviewResult(parsedResult, meta) {
 
   if (data.verdict === "incomplete") {
     lines.push("Review incomplete; this result must not be treated as approval.", "");
-    if (parsedResult.status && parsedResult.status !== "completed") {
+    if (unfinished) {
       lines.push(`Stop reason: ${parsedResult.stopReason ?? "unknown"}`, "");
       if (parsedResult.error) lines.push(`Error: ${parsedResult.error}`, "");
     }

@@ -40,7 +40,7 @@ export function getAcpPromptSuccessEvidence(response, client) {
     return record && record.client === client ? record.evidence : null;
 }
 /** ACP のプロトコル版。grok 0.2.x は 1 を返す。 */
-export const ACP_PROTOCOL_VERSION = 1;
+const ACP_PROTOCOL_VERSION = 1;
 const DIRECT_HANDSHAKE_TIMEOUT_MS = 10_000;
 const CONTROL_RPC_TIMEOUT_MS = 30_000;
 const CLOSE_TIMEOUT_MS = 1_000;
@@ -528,6 +528,7 @@ class SpawnedAcpClient extends AcpClientBase {
             child.on("error", (error) => { spawnError ??= error; startedReject(error); this.handleExit(error); });
             for (const pipe of [child.stdin, child.stdout, child.stderr])
                 pipe?.on("error", error => this.handleExit(error));
+            // 制御 pipe の error で未処理例外にしない。pipe 欠落の検査より前に一度だけ登録する。
             child.stdio?.[3]?.on("error", () => { });
             child.once("exit", () => { childExited = true; });
             this.#posixChildClosed = new Promise((resolve) => {
@@ -570,7 +571,6 @@ class SpawnedAcpClient extends AcpClientBase {
             child.stdio[3].setEncoding("utf8");
             child.stdio[3].on("data", chunk => { if (exitData.length <= 1024)
                 exitData += chunk; });
-            child.stdio[3].on("error", () => { });
             child.stdio[3].on("end", () => {
                 if (exitData.length > 1024)
                     return;

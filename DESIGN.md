@@ -13,9 +13,11 @@ Claude Code と Codex から既存の Grok Build CLI を呼び出す薄い橋渡
 | 構成 | 責務 |
 | --- | --- |
 | `plugins/grok/commands/`、`agents/`、`claude-skills/` | Claude Code の入口と専用 helper |
-| `plugins/grok/skills/` | Codex の公開入口 |
+| `plugins/grok/skills/` | Codex の公開入口。Claude Code も既定の `skills/` を追加で読み込むため、各 `SKILL.md` に `disable-model-invocation: true` を付けて Claude Code の常時一覧と自動呼出しから外す |
 | `plugins/grok/scripts/grok-companion.mjs` | CLI 引数、対象とプロンプト、前景実行と結果表示 |
 | `plugins/grok/scripts/lib/grok.mjs` と ACP 関連 | Grok の新規プロセスへの直接接続、権限と結果 |
+| `plugins/grok/scripts/lib/shell-allowlist.mjs` | 読み取り専用実行で許可するシェルコマンドの判定。セキュリティ境界の判定を実行本体から分け、`grok.mjs` は既存の公開名 `classifyShellCommand` を再 export する |
+| `plugins/grok/scripts/lib/language.mjs` | `--language` の BCP 47 言語タグの検証と正規化。Grok 起動前に拒否できるよう、単体テストの対象として companion から分けている |
 | `plugins/grok/native/` | Windows の `supervisor`、`identity`、`git-snapshot` を実装する Rust helper とテスト用 shim |
 | `plugins/grok/bin/win32-{ia32,x64,arm64}/grok-windows-helper.exe` | Rust 1.97.1 で生成し Git 管理する Windows 配布バイナリ。ビルド用 `native/target/` は配布しない |
 | `plugins/grok/prompts/`、`plugins/grok/schemas/` | レビュープロンプトと構造化結果の契約 |

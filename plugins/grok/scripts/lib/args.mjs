@@ -13,6 +13,14 @@ export function parseArgs(argv, config = {}) {
     const options = {};
     const positionals = [];
     let passthrough = false;
+    // 位置引数を記録し、stopAtFirstPositional なら以後を丸ごと本文として扱う。
+    // ループの制御（continue）は呼び出し側に残し、ここでは状態更新だけを行う。
+    const pushPositional = (token) => {
+        positionals.push(token);
+        if (stopAtFirstPositional) {
+            passthrough = true;
+        }
+    };
     for (let index = 0; index < argv.length; index += 1) {
         const token = argv[index];
         if (passthrough) {
@@ -24,10 +32,7 @@ export function parseArgs(argv, config = {}) {
             continue;
         }
         if (!token.startsWith("-") || token === "-") {
-            positionals.push(token);
-            if (stopAtFirstPositional) {
-                passthrough = true;
-            }
+            pushPositional(token);
             continue;
         }
         if (token.startsWith("--")) {
@@ -52,10 +57,7 @@ export function parseArgs(argv, config = {}) {
             }
             // 未知の長いオプションは本文の始まりとみなす。以後のトークンからフラグを
             // 取り出すと、本文中の `--write` 等が解釈されてしまう（codex-runtime 契約）。
-            positionals.push(token);
-            if (stopAtFirstPositional) {
-                passthrough = true;
-            }
+            pushPositional(token);
             continue;
         }
         const shortKey = token.slice(1);
@@ -74,10 +76,7 @@ export function parseArgs(argv, config = {}) {
             continue;
         }
         // 未知の短いオプションも長いオプションと同様に本文の始まりとして扱う。
-        positionals.push(token);
-        if (stopAtFirstPositional) {
-            passthrough = true;
-        }
+        pushPositional(token);
     }
     return { options: options, positionals };
 }

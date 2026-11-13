@@ -257,10 +257,11 @@ test("Git safety: explicit configuration and diff guards are required", () => {
   for (const sub of ["status", "log", "show", "diff", "whatchanged", "blame", "grep", "cat-file"]) {
     assert.equal(classifyShellCommand("git " + sub).allowed, false, sub);
   }
+  // ls-files --stage と rev-parse --show-toplevel は冒頭の許可テストで同じ入力を確認済み。
   for (const args of [
-    "ls-files --stage", "diff " + safeDiff + " --cached --stat HEAD -- src",
+    "diff " + safeDiff + " --cached --stat HEAD -- src",
     "log " + safeDiff + " --oneline -5", "show " + safeDiff + " HEAD:app.js",
-    "grep --cached -n needle -- src", "rev-parse --show-toplevel"
+    "grep --cached -n needle -- src"
   ]) assert.equal(classifyShellCommand(safeGit + " " + args).allowed, true, args);
   for (const args of ["--stat", "--no-ext-diff", "--no-textconv", "-- --no-ext-diff --no-textconv"]) {
     assert.equal(classifyShellCommand(safeGit + " diff " + args).allowed, false, args);
@@ -357,12 +358,13 @@ test("Git option compatibility: grep supports its complete color option with saf
 });
 
 // 同じ分類境界の異なる worktree 参照を検証する。
+// status --porcelain と blame --no-textconv auth.js は status / blame 専用のテストで確認済み。
 test("Git shell boundary rejects unproven worktree execution", () => {
   for (const args of [
-    "status --porcelain", "diff " + safeDiff, "diff " + safeDiff + " HEAD",
+    "diff " + safeDiff, "diff " + safeDiff + " HEAD",
     "diff " + safeDiff + " auth.js", "diff " + safeDiff + " --cached --submodule=diff",
     "grep -n needle -- src", "grep --cached --no-index needle -- src",
-    "ls-files --modified", "ls-files -m", "blame --no-textconv auth.js",
+    "ls-files --modified", "ls-files -m",
     "blame --no-textconv HEAD -- auth.js"
   ]) assert.equal(classifyShellCommand(safeGit + " " + args).allowed, false, args);
 });

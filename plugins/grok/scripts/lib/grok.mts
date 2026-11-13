@@ -1,10 +1,9 @@
 import type { AcpClientOptions, AcpNotification, SessionUpdateNotification, StopReason } from "./acp-protocol.js";
-type ProgressUpdate = { message: string; phase: string | null; sessionId?: string | null; grokSessionId?: string | null; stderrMessage?: string | null; logTitle?: string | null; logBody?: string | null };
+type ProgressUpdate = { message: string; phase: string | null; sessionId?: string | null; grokSessionId?: string | null; logTitle?: string | null; logBody?: string | null };
 type ProgressReporter = (update: string | ProgressUpdate) => void;
 interface GrokOptions {
   grokBin?: string;
   onStderr?: (chunk: string) => void;
-  defaultPrompt?: string;
   diff?: string;
   effort?: string;
   env?: NodeJS.ProcessEnv;
@@ -51,7 +50,6 @@ interface TurnCollectorState {
  *     stopReason を伴って解決するため、その推測機構は不要になり削除した。
  *   - `externalAgentConfig/import`（Claude セッションの取り込み）に相当する
  *     機能が Grok に無いため、importExternalAgentSession は移植していない。
- *
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -68,6 +66,7 @@ import {
   createReadOnlyPermissionResponder
 } from "./acp.mjs";
 import { binaryAvailable } from "./process.mjs";
+import { READ_ONLY_COMMANDS, classifyShellCommand } from "./shell-allowlist.mjs";
 function looksLikeVerificationCommand(command) {
   return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(command);
 }
@@ -92,145 +91,6 @@ const DEFAULT_REVIEW_MODEL = "grok-4.7";
  * シェルは classifyShellCommand が中身を見て可否を決める。
  */
 const MUTATING_TOOL_PATTERN = /(write|edit|create|delete|remove|rename|patch|apply_|multi_edit|str_replace)/i;
-
-/**
- * 読み取り専用として許可するコマンド。
- * git はサブコマンドまで見て、履歴や作業ツリーを変えないものだけ通す。
- */
-/**
- * 汎用インタプリタ（node / python など）は載せない。
- * `-e` や `-c` の引数一つで任意の書き込みができてしまい、
- * コマンド名だけでは読み取り専用を保証できないため。
- * ack / ag の pager と tree の出力ファイル指定も同じ理由で載せない。
- * 情報を取りたいときは Grok 自身のファイル読み取りツールを使わせる。
- */
-const READ_ONLY_COMMANDS = new Set([
-  "cat", "head", "tail", "type",
-  "ls", "dir", "pwd", "find", "stat", "wc",
-  "rg", "grep", "egrep", "fgrep",
-  "echo", "which", "where", "basename", "dirname", "realpath",
-  "jq", "cut", "sed", "tr", "diff"
-]);
-
-const READ_ONLY_GIT_SUBCOMMANDS = new Set([
-  "diff", "show", "log", "status", "blame", "ls-files", "ls-tree", "rev-parse",
-  "describe", "cat-file", "shortlog", "grep", "whatchanged"
-]);
-// 同じ綴りでも別サブコマンドでは危険な一意省略になり得る（cat-file --text）。
-// 完全名を所有するサブコマンドだけで許可し、共通の長名許可リストを使わない。
-const SAFE_GIT_DIFF_OPTIONS = [
-  "--no-ext-diff", "--no-textconv", "--stat", "--shortstat", "--numstat",
-  "--name-only", "--name-status", "--raw", "--patch", "--no-patch", "--binary",
-  "--cached", "--staged", "--check", "--summary", "--compact-summary",
-  "--full-index", "--no-renames", "--find-renames", "--find-copies",
-  "--ignore-all-space", "--ignore-space-change", "--ignore-space-at-eol",
-  "--ignore-cr-at-eol", "--ignore-blank-lines", "--no-color", "--relative",
-  "--exit-code", "--quiet", "--text"
-];
-const SAFE_GIT_REVISION_OPTIONS = [
-  "--all", "--branches", "--tags", "--remotes", "--first-parent", "--no-merges",
-  "--merges", "--reverse", "--topo-order", "--date-order", "--parents",
-  "--children", "--left-right", "--boundary", "--graph", "--cherry-pick",
-  "--cherry-mark", "--follow", "--abbrev-commit", "--no-abbrev-commit", "--count"
-];
-const SAFE_GIT_HISTORY_OPTIONS = new Set([
-  ...SAFE_GIT_DIFF_OPTIONS, ...SAFE_GIT_REVISION_OPTIONS, "--oneline", "--decorate", "--no-decorate"
-]);
-const SAFE_GIT_LONG_OPTIONS_BY_SUBCOMMAND = new Map([
-  ["diff", new Set([...SAFE_GIT_DIFF_OPTIONS, "--no-index"])],
-  ["log", SAFE_GIT_HISTORY_OPTIONS], ["show", SAFE_GIT_HISTORY_OPTIONS],
-  ["whatchanged", SAFE_GIT_HISTORY_OPTIONS],
-  ["blame", new Set([
-    ...SAFE_GIT_DIFF_OPTIONS, ...SAFE_GIT_REVISION_OPTIONS,
-    "--porcelain", "--line-porcelain", "--incremental", "--long"
-  ])],
-  ["status", new Set(["--short", "--porcelain", "--long", "--branch", "--show-stash", "--ignored", "--no-renames", "--find-renames"])],
-  ["ls-files", new Set(["--cached", "--stage", "--unmerged", "--deleted", "--modified", "--others", "--ignored", "--exclude-standard", "--full-name", "--error-unmatch"])],
-  ["ls-tree", new Set(["--name-only", "--name-status", "--long", "--full-name", "--full-tree"])],
-  ["rev-parse", new Set([
-    "--all", "--branches", "--tags", "--remotes", "--show-toplevel", "--show-prefix", "--show-cdup",
-    "--is-inside-work-tree", "--is-bare-repository", "--git-dir", "--git-common-dir", "--verify",
-    "--symbolic", "--symbolic-full-name", "--abbrev-ref", "--short", "--quiet"
-  ])],
-  ["describe", new Set(["--all", "--tags", "--contains", "--long", "--always", "--exact-match"])],
-  ["cat-file", new Set()],
-  ["shortlog", new Set([...SAFE_GIT_REVISION_OPTIONS, "--numbered", "--summary"])],
-  ["grep", new Set([
-    "--cached", "--no-index", "--no-recurse-submodules", "--no-textconv", "--no-color", "--full-name",
-    "--count", "--quiet", "--ignore-case", "--fixed-strings", "--extended-regexp", "--basic-regexp",
-    "--perl-regexp", "--line-number", "--files-with-matches", "--files-without-match",
-    "--invert-match", "--word-regexp", "--text"
-  ])]
-]);
-
-function isSafeGitOption(token, sub) {
-  if (!token.startsWith("-")) return true;
-  // 単独の短名と検証済み数値形式だけを認め、短名の組合せは認めない。
-  if (/^-(?:[0-9]+|[pnzburwtlvaHIEFqsmSLneAfBt]|[UMC][0-9]*|n[0-9]+)$/.test(token)) return true;
-  if (SAFE_GIT_LONG_OPTIONS_BY_SUBCOMMAND.get(sub)?.has(token)) return true;
-  const diff = ["diff", "log", "show", "whatchanged", "blame"].includes(sub);
-  const history = ["log", "show", "whatchanged", "blame", "shortlog"].includes(sub);
-  if (diff && /^--unified=[0-9]+$/.test(token)) return true;
-  if (sub === "log" && /^--since=[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(token)) return true;
-  if (history && /^--(?:max-count|skip)=[0-9]+$/.test(token)) return true;
-  if (["diff", "log", "show", "whatchanged", "blame", "ls-tree", "describe"].includes(sub) && /^--abbrev=[0-9]+$/.test(token)) return true;
-  if (sub === "status" && /^(?:--porcelain=(?:v1|v2|1|2)|--untracked-files=(?:no|normal|all))$/.test(token)) return true;
-  if (["diff", "log", "show", "whatchanged"].includes(sub) && /^--submodule=(?:short|log)$/.test(token)) return true;
-  if ((diff || sub === "grep") && /^--color=(?:never|auto)$/.test(token)) return true;
-  if (["log", "show", "whatchanged", "shortlog"].includes(sub) && /^--(?:pretty|format)=(?:oneline|short|medium|full|fuller|reference|raw)$/.test(token)) return true;
-  return ["log", "show", "whatchanged"].includes(sub) && /^--diff-merges=(?:off|none|first-parent|separate|combined|dense-combined)$/.test(token);
-}
-
-function isSafeFixedObjectDiff(args) {
-  if (!/^(?:[a-f0-9]{40}\.\.[a-f0-9]{40}|[a-f0-9]{64}\.\.[a-f0-9]{64})$/.test(args[2] ?? "")) return false;
-  const separator = args.indexOf("--", 3);
-  const options = separator < 0 ? args.slice(3) : args.slice(3, separator);
-  const simpleOptions = new Set([
-    "--stat", "--shortstat", "--numstat", "--name-only", "--name-status", "--raw",
-    "--patch", "--no-patch", "--binary", "--check", "--summary", "--compact-summary",
-    "--full-index", "--no-renames", "--ignore-all-space", "--ignore-space-change",
-    "--ignore-space-at-eol", "--ignore-cr-at-eol", "--ignore-blank-lines", "--no-color",
-    "--exit-code", "--quiet", "--text", "--submodule=short", "-p", "-u", "-w", "-b", "-z"
-  ]);
-  if (options.some((arg) => !simpleOptions.has(arg) && !/^--(?:unified|abbrev)=[0-9]+$/.test(arg))) return false;
-  // 追加 revision や暗黙の path を認めず、path は -- の後だけで明示する。
-  if (separator >= 0 && (separator === args.length - 1 ||
-      args.slice(separator + 1).some((arg) => !arg || arg.startsWith("-") || arg.includes(":")))) return false;
-  return true;
-}
-
-/** ファイルへ書き出すリダイレクトと、その場編集を示す痕跡。 */
-const WRITE_SIDE_EFFECT_PATTERN = /(^|\s)(>>?|\btee\b)(\s|$)|(^|\s)-i(\s|$)/;
-
-/**
- * コマンド置換。`git log $(rm -rf .)` のように、許可コマンドの引数へ
- * 埋め込むだけで別のコマンドが先に走るため、中身を見ずに一律で拒否する。
- */
-const COMMAND_SUBSTITUTION_PATTERN = /\$\(|\$\{|`/;
-const UNICODE_QUOTE_PATTERN = /[‘-„]/;
-/**
- * タブ以外の制御文字・書式文字。PowerShell は U+0085（NEL）等を空白として扱うが、
- * JS の `\s` は含まないため、tokenizer が 1 語とみなした引数を shell 側は 2 語に分け、
- * 語頭を見る検査（rg --pre、find -delete、git --output 等）を迂回できてしまう。
- */
-// 改行（\r \n）は従来どおり UNSAFE_SHELL_SYNTAX_PATTERN が「shell control」として拒否する。
-const UNSAFE_CONTROL_CHARACTER_PATTERN = /(?![\t\r\n])[\p{Cc}\p{Cf}]/u;
-const UNSAFE_SHELL_SYNTAX_PATTERN = /[\r\n{}]|(?<!&)&(?!&)|[<>]|\^|%[^%]+%|![A-Za-z_][A-Za-z0-9_]*!|\$[A-Za-z_]/;
-const OUTSIDE_PATH_PATTERN = /(^|[\s"'=\\/])(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]:|[\\/]{2}|\/(?!dev\/null\b))/;
-
-/**
- * 許可コマンドの中でも、引数次第でシェルへ抜けたり書き込んだりできるもの。
- * `git` と同じく、名前だけでなく引数まで見て判定する。
- */
-const UNSAFE_FIND_ARGUMENTS = new Set(["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls", "-fprint", "-fprintf", "-fprint0"]);
-
-/** sed は行番号を指定した表示だけ許可する。任意の sed スクリプトには実行・書き込み命令がある。 */
-function isSafeSedPrint(tokens) {
-  const args = tokens.slice(1);
-  return args[0] === "-n" &&
-    /^(?:\d+|\$)(?:,(?:\d+|\$))?p$/.test(args[1] ?? "") &&
-    args.slice(2).every((arg) => arg && !arg.startsWith("-"));
-}
 
 function cleanGrokStderr(stderr) {
   return String(stderr ?? "")
@@ -260,201 +120,7 @@ function emitLogEvent(onProgress, options: GrokOptions = {}) {
   });
 }
 
-/**
- * シェルコマンドが読み取り専用かどうかを判定する。
- *
- * `&&` `||` `;` `|` で区切った各セグメントの先頭コマンドを見て、すべてが
- * 許可リストに載っていて、かつファイルへの書き出しを含まない場合だけ許可する。
- * 判断できないものは拒否側に倒す。
- *
- */
-/**
- * コマンド行を語へ分ける。引用符で囲まれた部分は 1 語として扱う。
- * Windows の `"C:\Program Files\Git\bin\git.exe" diff` を素の空白分割で壊さないため。
- */
-function tokenizeCommand(segment) {
-  const tokens = [];
-  const pattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
-  let previousEnd = 0;
-  let match;
-  while ((match = pattern.exec(segment)) !== null) {
-    // 日付に限定した Git 履歴の値だけは、両シェルで等価な二重引用を認める。
-    const quotedSince = /^(--since=)"([0-9]{4}-[0-9]{2}-[0-9]{2})"$/.exec(match[3] ?? "");
-    // 引用部分と通常文字が隣接する語は shell では 1 語に連結される。
-    // この簡易 tokenizer で同じ解釈を保証できないため拒否する。
-    if ((tokens.length > 0 && match.index === previousEnd) || (/["']/.test(match[3] ?? "") && !quotedSince)) {
-      return null;
-    }
-    // PowerShell は引数モードでも引用なしの `(...)` と `@(...)` / `@{...}` / `@name` を
-    // 式として先に評価する。許可コマンドの引数に埋め込むだけで別コマンドが走るため、
-    // 引用なしの括弧と先頭 `@` は拒否する。引用内の括弧（正規表現など）は 1 語の文字列なので許可する。
-    if (match[3] !== undefined && (/[()]/.test(match[3]) || match[3].startsWith("@"))) {
-      return null;
-    }
-    tokens.push(quotedSince ? quotedSince[1] + quotedSince[2] : match[1] ?? match[2] ?? match[3]);
-    previousEnd = pattern.lastIndex;
-  }
-  return tokens;
-}
-
-function isWithinPath(root, target) {
-  const relative = path.relative(root, target);
-  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
-
-/** Test-Path の単一パスを作業領域内へ閉じ込める。存在しない末尾は既存の祖先まで検査する。 */
-function isSafeTestPath(target, cwd) {
-  const nativeDrivePath = process.platform === "win32" && /^[A-Za-z]:[\\/]/.test(target) &&
-    target.indexOf(":", 2) === -1;
-  if (!target || !cwd || target.startsWith("~") ||
-      (target.includes(":") && !nativeDrivePath) ||
-      target.split(/[\\/]/).some((part) => /[. ]$/.test(part))) {
-    return false;
-  }
-  const root = path.resolve(cwd);
-  const resolved = path.resolve(root, target);
-  if (!isWithinPath(root, resolved)) {
-    return false;
-  }
-
-  try {
-    const realRoot = fs.realpathSync.native(root);
-    let existing = resolved;
-    while (true) {
-      try {
-        fs.lstatSync(existing);
-        break;
-      } catch (error) {
-        if (error?.code !== "ENOENT") return false;
-        const parent = path.dirname(existing);
-        if (parent === existing) return false;
-        existing = parent;
-      }
-    }
-    return isWithinPath(realRoot, fs.realpathSync.native(existing));
-  } catch {
-    return false;
-  }
-}
-
-export function classifyShellCommand(command: string, cwd: string | null = null): { allowed: boolean; reason: string | null } {
-  const text = String(command ?? "").trim();
-  if (!text) {
-    return { allowed: false, reason: "empty command" };
-  }
-
-  if (WRITE_SIDE_EFFECT_PATTERN.test(text)) {
-    return { allowed: false, reason: "writes to a file or edits in place" };
-  }
-
-  // 置換の中身は先頭トークンの判定が届かないので、セグメント分割より前に弾く。
-  if (COMMAND_SUBSTITUTION_PATTERN.test(text)) {
-    return { allowed: false, reason: "uses command substitution" };
-  }
-
-  // PowerShell は Unicode の引用符（‘ ’ ‚ ‛ “ ” „）も ASCII の引用符と同じ文字列境界に使う。
-  // ASCII で開いてスマート引用符で閉じると、下の tokenizer が引用内とみなした括弧式が
-  // PowerShell では引用外として評価されるため、これらの文字は位置を問わず拒否する。
-  if (UNICODE_QUOTE_PATTERN.test(text)) {
-    return { allowed: false, reason: "uses Unicode quotation marks that some shells treat as string delimiters" };
-  }
-  if (UNSAFE_CONTROL_CHARACTER_PATTERN.test(text)) {
-    return { allowed: false, reason: "uses control or format characters that shells may split differently" };
-  }
-
-  if (UNSAFE_SHELL_SYNTAX_PATTERN.test(text)) {
-    return { allowed: false, reason: "uses unsupported shell control or expansion syntax" };
-  }
-
-  const segments = text.split(/\|\||&&|[;|]/).map((segment) => segment.trim()).filter(Boolean);
-  for (const segment of segments) {
-    const tokens = tokenizeCommand(segment);
-    if (!tokens) {
-      return { allowed: false, reason: "uses unsupported shell quoting or unquoted expression syntax" };
-    }
-    // 環境変数で Git や検索ツールの実行内容を変えられるため、前置きは許可しない。
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? "")) {
-      return { allowed: false, reason: "sets an environment variable" };
-    }
-    // パス付き実行ファイルは任意の同名バイナリへ差し替えられる。
-    if (/[\\/]/.test(tokens[0] ?? "") || /^[A-Za-z]:/.test(tokens[0] ?? "")) {
-      return { allowed: false, reason: "uses an executable path outside the command allowlist" };
-    }
-    const head = (tokens[0] ?? "").replace(/\.(exe|cmd|bat)$/i, "").toLowerCase();
-    if (!head) {
-      return { allowed: false, reason: `could not parse "${segment}"` };
-    }
-    if (tokens[0].toLowerCase() === "test-path") {
-      if (tokens.length !== 3 || tokens[1].toLowerCase() !== "-literalpath" ||
-          !isSafeTestPath(tokens[2], cwd)) {
-        return { allowed: false, reason: "Test-Path requires one literal path within the repository" };
-      }
-      continue;
-    }
-    if (tokens.slice(1).some((token) => OUTSIDE_PATH_PATTERN.test(` ${token}`))) {
-      return { allowed: false, reason: "uses an absolute path or a path that may leave the repository" };
-    }
-
-    if (head === "git") {
-      if (!READ_ONLY_GIT_GLOBAL_ARGS.every((arg, index) => tokens[index + 1] === arg)) {
-        return { allowed: false, reason: "git requires the explicit read-only global options shown in the review instructions" };
-      }
-      const subIndex = READ_ONLY_GIT_GLOBAL_ARGS.length + 1;
-      const sub = tokens[subIndex] ?? "";
-      if (!READ_ONLY_GIT_SUBCOMMANDS.has(sub)) {
-        return { allowed: false, reason: `git ${sub || "(no subcommand)"} is not read-only` };
-      }
-      const args = tokens.slice(subIndex + 1);
-      const separator = args.indexOf("--");
-      const options = separator < 0 ? args : args.slice(0, separator);
-      // Git は作業ツリー照合中に clean/process filter を起動し得る。
-      // インデックス上のデータに限定できない呼び出しは許可しない。
-      if (sub === "status" || sub === "blame") {
-        return { allowed: false, reason: `git ${sub} cannot be safely restricted to repository objects` };
-      }
-      if (sub === "diff" && ((!["--cached", "--staged"].includes(args[2]) && !isSafeFixedObjectDiff(args)) || options.includes("--no-index"))) {
-        return { allowed: false, reason: "git diff requires --cached, --staged or an exact OID..OID range immediately after the read-only diff options; fixed ranges require explicit -- before paths" };
-      }
-      if (sub === "grep" && (args[0] !== "--cached" || options.includes("--no-index"))) {
-        return { allowed: false, reason: "git grep requires --cached as its first argument" };
-      }
-      if (sub === "ls-files" && options.some((arg) => arg === "--modified" || arg === "-m")) {
-        return { allowed: false, reason: "git ls-files modified checks may invoke worktree filters" };
-      }
-      if (["diff", "show", "log", "whatchanged"].includes(sub) &&
-          !(args.slice(0, 2).includes("--no-ext-diff") && args.slice(0, 2).includes("--no-textconv"))) {
-        // -S 等の値に消費された同名トークンを、安全オプションとして数えない。
-        return { allowed: false, reason: "git diff/log/show/whatchanged require --no-ext-diff and --no-textconv as the first two subcommand arguments" };
-      }
-      if (options.some((arg) => !isSafeGitOption(arg, sub))) {
-        return { allowed: false, reason: "git uses an unsupported option, abbreviation or short-option combination" };
-      }
-      continue;
-    }
-
-    if (!READ_ONLY_COMMANDS.has(head)) {
-      return { allowed: false, reason: `${head} is not on the read-only allowlist` };
-    }
-
-    if (head === "sed" && !isSafeSedPrint(tokens)) {
-      return { allowed: false, reason: "sed script is not a line-range print" };
-    }
-    if (head === "rg" && tokens.slice(1).some((token) => /^--(?:pre(?:-glob)?|hostname-bin)(?:=|$)/.test(token))) {
-      return { allowed: false, reason: "rg uses an external command" };
-    }
-
-    if (head === "find" && tokens.slice(1).some((token) => UNSAFE_FIND_ARGUMENTS.has(token))) {
-      return { allowed: false, reason: `${head} is being used in a way that can write or run other commands` };
-    }
-  }
-
-  return { allowed: true, reason: null };
-}
-
-/**
- * 権限要求を読み取り専用の観点で判定する。
- *
- */
+/** 権限要求を読み取り専用の観点で判定する。 */
 function classifyToolCall(params, cwd): { allowed: boolean; reason: string | null } {
   const call = params?.toolCall ?? {};
   const rawInput = call.rawInput ?? {};
@@ -710,7 +376,7 @@ function collectConfigValueIds(option) {
 /**
  * セッション設定を 1 件反映する。反映できなければ理由を返して呼び出し側に委ねる。
  */
-async function applySessionConfigOption(client, sessionId, option, wanted, options: GrokOptions = {}) {
+async function applySessionConfigOption(client, sessionId, option, wanted) {
   const available = collectConfigValueIds(option);
   const value =
     available.find((id) => id === wanted) ??
@@ -723,8 +389,7 @@ async function applySessionConfigOption(client, sessionId, option, wanted, optio
   }
 
   if (option.currentValue !== value) {
-    const request = () => client.request("session/set_config_option", { sessionId, configId: option.id, value });
-    await request();
+    await client.request("session/set_config_option", { sessionId, configId: option.id, value });
   }
   return { applied: true, value, reason: null };
 }
@@ -756,8 +421,7 @@ async function applyRequestedModel(client, response, options) {
   }
 
   try {
-    const request = () => client.request("session/set_model", { sessionId: response.sessionId, modelId: requested });
-    await request();
+    await client.request("session/set_model", { sessionId: response.sessionId, modelId: requested });
     emitProgress(options.onProgress, `Model set to ${requested}.`, "starting");
     return requested;
   } catch (error) {
@@ -776,7 +440,7 @@ async function applyRequestedModel(client, response, options) {
     return current;
   }
 
-  const result = await applySessionConfigOption(client, response.sessionId, option, requested, options);
+  const result = await applySessionConfigOption(client, response.sessionId, option, requested);
   if (!result.applied) {
     emitProgress(
       options.onProgress,
@@ -813,7 +477,7 @@ async function applyRequestedEffort(client, response, options) {
   }
 
   try {
-    const result = await applySessionConfigOption(client, response.sessionId, option, requested, options);
+    const result = await applySessionConfigOption(client, response.sessionId, option, requested);
     if (!result.applied) {
       emitProgress(
         options.onProgress,
@@ -838,11 +502,10 @@ async function applyRequestedEffort(client, response, options) {
  * セッションを開始し、必要ならモデルと推論レベルを差し替える。
  */
 async function startSession(client, cwd, options: GrokOptions = {}) {
-  const request = () => client.request("session/new", {
+  const response = await client.request("session/new", {
     cwd,
     mcpServers: options.mcpServers ?? []
   });
-  const response = await request();
 
   // session/new が返す currentModelId は差し替え前の値なので、実効モデルを別に持つ。
   const effectiveModel = await applyRequestedModel(client, response, options);
@@ -1005,8 +668,7 @@ export async function getGrokAuthStatus(cwd, options: GrokOptions = {}) {
   }
 
   const usingApiKey = Boolean(env.XAI_API_KEY);
-  const permissionDenials: string[] = [];
-  const onDenied = (reason: string) => permissionDenials.push(reason);
+  const { permissionDenials, onDenied } = createPermissionDenialLog();
 
   try {
     return await withGrok(
@@ -1047,6 +709,33 @@ export async function getGrokAuthStatus(cwd, options: GrokOptions = {}) {
   }
 }
 
+/**
+ * Grok の起動可否を確かめ、未導入・非対応版なら案内付きで失敗させる。
+ * レビューとタスクの入口で同じ検査と文言を使うための補助。
+ */
+function requireGrokAvailability(cwd, env) {
+  const availability = getGrokAvailability(cwd, env);
+  if (!availability.available) {
+    throw new Error(grokMissingMessage(availability));
+  }
+  return availability;
+}
+
+/** 明示指定、環境変数 GROK_PLUGIN_MODEL、既定モデルの順で実行モデルを決める。 */
+function resolveRunModel(options: GrokOptions, env: NodeJS.ProcessEnv) {
+  return options.model ?? env.GROK_PLUGIN_MODEL ?? DEFAULT_REVIEW_MODEL;
+}
+
+/**
+ * 権限拒否の記録と、それへ追記する通知関数の組を作る。
+ * 初期化・session/new 中の拒否も同じ記録へ残し、結果と判定に使う。
+ */
+function createPermissionDenialLog() {
+  const permissionDenials: string[] = [];
+  const onDenied = (reason: string) => permissionDenials.push(reason);
+  return { permissionDenials, onDenied };
+}
+
 function grokMissingMessage(availability) {
   if (availability?.reason === "missing-agent-stdio") {
     return "This Grok Build version does not expose `grok agent stdio`. Update it with `grok update`, then rerun `/grok:setup`.";
@@ -1063,16 +752,12 @@ function grokMissingMessage(availability) {
  */
 export async function runGrokReview(cwd, options: GrokOptions = {}) {
   const env = options.env ?? process.env;
-  const availability = getGrokAvailability(cwd, env);
-  if (!availability.available) {
-    throw new Error(grokMissingMessage(availability));
-  }
+  const availability = requireGrokAvailability(cwd, env);
 
-  const model = options.model ?? env.GROK_PLUGIN_MODEL ?? DEFAULT_REVIEW_MODEL;
+  const model = resolveRunModel(options, env);
 
   // 初期化・session/new 中の拒否も JSON 再出力後まで同じ記録へ残す。
-  const permissionDenials: string[] = [];
-  const onDenied = (reason: string) => permissionDenials.push(reason);
+  const { permissionDenials, onDenied } = createPermissionDenialLog();
 
   return withGrok(
     cwd,
@@ -1089,7 +774,7 @@ export async function runGrokReview(cwd, options: GrokOptions = {}) {
       emitProgress(options.onProgress, `Session ready (${sessionId}).`, "starting", { sessionId });
 
       const promptText = buildReviewPrompt(options);
-      const promptOptions = { onProgress: options.onProgress,  };
+      const promptOptions = { onProgress: options.onProgress };
       let turnState = await runPrompt(client, sessionId, promptText, promptOptions);
       let repaired = false;
 
@@ -1219,19 +904,15 @@ function buildJsonRepairPrompt(parseError, schema) {
  */
 export async function runGrokTurn(cwd, options: GrokOptions = {}) {
   const env = options.env ?? process.env;
-  const availability = getGrokAvailability(cwd, env);
-  if (!availability.available) {
-    throw new Error(grokMissingMessage(availability));
-  }
+  const availability = requireGrokAvailability(cwd, env);
 
-  const prompt = options.prompt?.trim() || options.defaultPrompt || "";
+  const prompt = options.prompt?.trim() || "";
   if (!prompt) {
     throw new Error("A prompt is required for this Grok run.");
   }
 
-  const model = options.model ?? env.GROK_PLUGIN_MODEL ?? DEFAULT_REVIEW_MODEL;
-  const permissionDenials: string[] = [];
-  const onDenied = (reason: string) => permissionDenials.push(reason);
+  const model = resolveRunModel(options, env);
+  const { permissionDenials, onDenied } = createPermissionDenialLog();
 
   return withGrok(
     cwd,
@@ -1247,11 +928,7 @@ export async function runGrokTurn(cwd, options: GrokOptions = {}) {
         client.setPermissionHandler(createAllowAllPermissionResponder());
       }
 
-      const promptText = options.outputSchema
-        ? `${prompt}\n\n## Required output\nReply with a single JSON object and nothing else. It must validate against this JSON Schema:\n\n${JSON.stringify(options.outputSchema, null, 2)}`
-        : prompt;
-
-      const turnState = await runPrompt(client, sessionId, promptText, { onProgress: options.onProgress,  });
+      const turnState = await runPrompt(client, sessionId, prompt, { onProgress: options.onProgress });
 
       emitLogEvent(options.onProgress, {
         phase: "completed",
@@ -1349,4 +1026,5 @@ export function readOutputSchema(schemaPath) {
   return readJsonFile(schemaPath);
 }
 
-export { resolveGrokBin, stripJsonFence };
+// 許可判定は shell-allowlist.mjs へ移した。既存の公開名を grok.mjs からも保つ。
+export { classifyShellCommand, resolveGrokBin };
