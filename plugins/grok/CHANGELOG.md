@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 1.1.8
+
+- Codex skills are no longer loaded into every Claude Code session, and the Claude Code model no longer invokes Grok through them automatically. The `/grok:*` commands remain available for explicit use.
+- Reviews and audits no longer pass non-ASCII file names such as Japanese names in Git's quoted form (`"\346\227…"`) to the changed-file and audit file lists.
+- Automatic working-tree reviews reuse the snapshot taken while selecting the target, reducing Git launches. Branch comparisons with many changed files skip fetching a diff body that would not be used.
+
+## 1.1.7
+
+- Read-only reviews and audits now reject unquoted parenthesized expressions and leading `@` expressions that PowerShell evaluates first, as well as Unicode quotes, control characters, and format characters that shells treat as string or word boundaries.
+- On Windows, a bare `grok` command name is resolved to its absolute path on PATH, so a same-named file inside the reviewed repository is never executed.
+- A task request passed as a single argument is no longer re-split; quotes, repeated spaces, and line breaks are preserved. Everything after an unknown option is treated as the request text, and later flags are not interpreted.
+- Documented passing `--` and the request as one argument after the options, and using `--prompt-file` for multi-line requests, in the rescue and X search entry points.
+
+## 1.1.6
+
+- Clarified which read-only commands and built-in tools reviews and audits may use, reducing cancellations caused by permission denials.
+- Clarified the limits on reading long single-line JSON and the requirement to report findings as unverified when the needed evidence cannot be fully checked.
+
+## 1.1.5
+
+- Preserved line breaks and spacing in review and audit instructions and applied the requested language correctly.
+- Checked read-only permission requests from the start of the connection and reflected denials in the result.
+- Clarified when Windows working-tree snapshots and macOS/Linux branch comparisons are available.
+- Updated the dependencies of the bundled Windows helper.
+
 ## 1.1.4
 
 - Replaced Windows PowerShell, CIM, and batch helpers with native Rust helpers, including prebuilt ia32, x64, and arm64 binaries so users do not need Rust or MSVC.

@@ -1,6 +1,6 @@
 {
   "name": "kg-grok-plugin-cc",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "private": true,
   "type": "module",
   "description": "Use Grok Build from Claude Code to review code or delegate tasks.",
@@ -10,7 +10,7 @@
   },
   "packageManager": "pnpm@12.18.0",
   "volta": {
-    "node": "26.13.0"
+    "node": "26.13.1"
   },
   "scripts": {
     "bump-version": "bun --no-env-file --no-install scripts/bump-version.mjs",
