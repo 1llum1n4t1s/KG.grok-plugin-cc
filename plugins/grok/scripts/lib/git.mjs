@@ -155,6 +155,25 @@ function assertReadOnlyGitSupport(cwd, options = {}) {
         throw new Error(`Git capability check failed: ${formatCommandFailure(probe)}`);
     }
 }
+/**
+ * `git ... -z` のパス一覧を名前の配列にする。
+ * -z なしだと core.quotePath=true（Git 既定）で非 ASCII が "\346..." と引用されるため -z で受け取る。
+ * 名前の先頭・末尾の空白も保つよう、出力全体の trim はしない。
+ * nulRecords は末尾 NUL を必須とする working-tree 用の厳格な検査なので、ここでは使わない。
+ * UTF-8 として不正なバイト列の名前は U+FFFD に置き換わる（8 進引用のような可逆表現は失う）。
+ * 一覧はレビューの参考情報で、Git への再入力には使わないため、失敗にはせず劣化表示として許容する。
+ */
+function splitNulPaths(output) {
+    return String(output ?? "").split("\0").filter(Boolean);
+}
+/**
+ * 表示用の一覧で使うパス表記。-z は改行・タブ等の引用も外すため、改行入りの名前で
+ * 節見出し（`## ...`）を偽装できてしまう。制御文字を含む名前だけ JSON 文字列として
+ * 再エスケープする（replacementPatch のヘッダーと同じ考え方）。件数と changedFiles は生の名前のまま扱う。
+ */
+function displayPath(name) {
+    return /[\x00-\x1f\x7f]/.test(name) ? JSON.stringify(name) : name;
+}
 function listUniqueFiles(...groups) {
     return [...new Set(groups.flat().filter(Boolean))].sort();
 }
@@ -482,7 +501,13 @@ export function collectWorkingTreeSnapshot(cwd, options = {}) {
         head: metadata.head, files: entries, state, buildDiffs };
 }
 export function captureWorkingTreeReviewSnapshot(cwd, options = {}) {
-    const snapshot = collectWorkingTreeSnapshot(cwd);
+    return buildWorkingTreeReviewSnapshot(collectWorkingTreeSnapshot(cwd), options);
+}
+/**
+ * 取得済みの完全 snapshot からレビュー用の差分本文を組み立てる。
+ * 取り直した snapshot でも再利用した snapshot でも、差分生成とサイズ上限の検査を必ず通す。
+ */
+function buildWorkingTreeReviewSnapshot(snapshot, options = {}) {
     const { stagedDiff, unstagedDiff } = snapshot.buildDiffs();
     const untrackedPaths = new Set(snapshot.state.untracked);
     const untracked = snapshot.files.filter((file) => untrackedPaths.has(file.path)).map((file) => replacementPatch(file.path, null, Buffer.from(file.content, "base64"), "100644", file.mode)).join("\n");
@@ -492,8 +517,24 @@ export function captureWorkingTreeReviewSnapshot(cwd, options = {}) {
         throw incompleteSnapshot("complete working tree evidence exceeds the inline size limit.");
     return { fingerprint: snapshot.fingerprint, context, complete: true, state: snapshot.state, files: snapshot.files };
 }
+/**
+ * 自動スコープで dirty と判定した target に、判定に使った完全 snapshot を結び付ける。
+ * collectReviewContext は target をそのまま戻り値へ含めるため、target の列挙可能プロパティに
+ * すると最大 8MiB の内容が残ってしまう。target をキーにした WeakMap で保持し、取り出したら破棄する。
+ */
+const resolvedWorkingTreeSnapshots = new WeakMap();
+/** target に結び付いた snapshot を取り出して破棄する。repoRoot が一致するときだけ使う。 */
+function takeResolvedWorkingTreeSnapshot(target, repoRoot) {
+    if (!target || typeof target !== "object")
+        return null;
+    const held = resolvedWorkingTreeSnapshots.get(target);
+    if (!held)
+        return null;
+    resolvedWorkingTreeSnapshots.delete(target);
+    return held.repoRoot === repoRoot ? held.snapshot : null;
+}
 export function resolveReviewTarget(cwd, options = {}) {
-    ensureGitRepository(cwd);
+    const repoRoot = ensureGitRepository(cwd);
     const requestedScope = options.scope ?? "auto";
     const baseRef = options.base ?? null;
     const supportedScopes = new Set(["auto", "working-tree", "branch", "repo"]);
@@ -534,12 +575,16 @@ export function resolveReviewTarget(cwd, options = {}) {
             explicit: true
         };
     }
-    if (getWorkingTreeState(cwd).isDirty) {
-        return {
+    // getWorkingTreeState と同じ完全 snapshot を取り、dirty なら収集側で 1 回だけ再利用する。
+    const snapshot = collectWorkingTreeSnapshot(cwd);
+    if (snapshot.state.isDirty) {
+        const target = {
             mode: "working-tree",
             label: "working tree diff",
             explicit: false
         };
+        resolvedWorkingTreeSnapshots.set(target, { repoRoot, snapshot });
+        return target;
     }
     const detectedBase = detectDefaultBranch(cwd);
     return {
@@ -552,11 +597,11 @@ export function resolveReviewTarget(cwd, options = {}) {
 function formatSection(title, body) {
     return [`## ${title}`, "", body.trim() ? body : "(none)", ""].join("\n");
 }
-function collectBranchContext(cwd, baseRef, options = {}) {
+// 唯一の呼出元 collectReviewContext が比較・変更一覧・現在のブランチを取得済みなので、
+// ここでは取り直さない（Git の起動回数を増やさない）。
+function collectBranchContext(cwd, baseRef, currentBranch, options) {
     const includeDiff = options.includeDiff !== false;
-    const comparison = options.comparison ?? buildBranchComparison(cwd, baseRef);
-    const currentBranch = getCurrentBranch(cwd);
-    const changedFiles = options.changedFiles ?? gitChecked(cwd, ["diff", "--name-only", comparison.commitRange]).stdout.trim().split("\n").filter(Boolean);
+    const { comparison, changedFiles } = options;
     const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", comparison.commitRange]).stdout.trim();
     const diffStat = gitChecked(cwd, ["diff", "--stat", comparison.commitRange]).stdout.trim();
     return {
@@ -571,7 +616,7 @@ function collectBranchContext(cwd, baseRef, options = {}) {
             : [
                 formatSection("Commit Log", logOutput),
                 formatSection("Diff Stat", diffStat),
-                formatSection("Changed Files", changedFiles.join("\n"))
+                formatSection("Changed Files", changedFiles.map(displayPath).join("\n"))
             ].join("\n"),
         changedFiles,
         comparison
@@ -579,20 +624,17 @@ function collectBranchContext(cwd, baseRef, options = {}) {
 }
 function formatCappedListing(entries) {
     if (entries.length <= MAX_REPO_LISTING_ENTRIES) {
-        return entries.join("\n");
+        return entries.map(displayPath).join("\n");
     }
     const shown = entries.slice(0, MAX_REPO_LISTING_ENTRIES);
-    return [...shown, `(+${entries.length - shown.length} more files - run \`git ls-files\` for the full list)`].join("\n");
+    return [...shown.map(displayPath), `(+${entries.length - shown.length} more files - run \`git ls-files\` for the full list)`].join("\n");
 }
 // リポジトリ監査は差分を渡さない。棚卸し（ファイル一覧と直近ログ）だけを渡し、
 // 中身は Grok が read-only コマンドで自分で読む前提にする。
 function collectRepoContext(cwd) {
     const listingOptions = { maxBuffer: MAX_FILE_LISTING_BYTES };
-    const trackedFiles = gitChecked(cwd, ["ls-files"], listingOptions).stdout.trim().split("\n").filter(Boolean);
-    const untrackedFiles = gitChecked(cwd, ["ls-files", "--others", "--exclude-standard"], listingOptions)
-        .stdout.trim()
-        .split("\n")
-        .filter(Boolean);
+    const trackedFiles = splitNulPaths(gitChecked(cwd, ["ls-files", "-z"], listingOptions).stdout);
+    const untrackedFiles = splitNulPaths(gitChecked(cwd, ["ls-files", "--others", "--exclude-standard", "-z"], listingOptions).stdout);
     const logOutput = git(cwd, ["log", "--oneline", "--decorate", "-n", "15"]).stdout.trim();
     return {
         mode: "repo",
@@ -617,7 +659,7 @@ function buildAdversarialCollectionGuidance(options = {}) {
         (command ? ` Use this fixed object comparison: ${command}. Put optional display flags after the range, and paths only after --. Do not substitute HEAD, branch names or extra revisions.` : "");
 }
 export function collectReviewContext(cwd, target, options = {}) {
-    const repoRoot = getRepoRoot(cwd);
+    const repoRoot = ensureGitRepository(cwd);
     const currentBranch = getCurrentBranch(repoRoot);
     const maxInlineFiles = normalizeMaxInlineFiles(options.maxInlineFiles);
     const maxInlineDiffBytes = normalizeMaxInlineDiffBytes(options.maxInlineDiffBytes);
@@ -639,7 +681,12 @@ export function collectReviewContext(cwd, target, options = {}) {
         };
     }
     if (target.mode === "working-tree") {
-        const snapshot = captureWorkingTreeReviewSnapshot(repoRoot, { maxInlineDiffBytes });
+        // 自動スコープの resolve 時に取った snapshot があれば取り直さない。明示 --scope working-tree や
+        // 手組みの target では snapshot が無いので、従来どおりここで取得する。
+        const resolved = takeResolvedWorkingTreeSnapshot(target, repoRoot);
+        const snapshot = resolved
+            ? buildWorkingTreeReviewSnapshot(resolved, { maxInlineDiffBytes })
+            : captureWorkingTreeReviewSnapshot(repoRoot, { maxInlineDiffBytes });
         const state = snapshot.state;
         diffBytes = Buffer.byteLength(snapshot.context);
         includeDiff = true;
@@ -652,11 +699,16 @@ export function collectReviewContext(cwd, target, options = {}) {
     else {
         const comparison = buildBranchComparison(repoRoot, target.baseRef);
         assertCompleteBranchComparison(repoRoot, comparison);
-        const changedFiles = gitChecked(repoRoot, ["diff", "--name-only", comparison.commitRange]).stdout.trim().split("\n").filter(Boolean);
-        const diffOutput = collectBoundedGitOutput(repoRoot, ["diff", "--binary", "--no-ext-diff", "--submodule=short", comparison.commitRange], maxInlineDiffBytes);
+        const changedFiles = splitNulPaths(gitChecked(repoRoot, ["diff", "--name-only", "-z", comparison.commitRange]).stdout);
+        // ファイル数だけで軽量表示に決まる場合は、diff 本文（最大 256KiB）を取得しない。
+        // このとき diffBytes は未計測として null を返す（companion は diffBytes を使わない）。
+        const tooManyFiles = options.includeDiff == null && changedFiles.length > maxInlineFiles;
+        const diffOutput = tooManyFiles
+            ? { bytes: null, stdout: undefined }
+            : collectBoundedGitOutput(repoRoot, ["diff", "--binary", "--no-ext-diff", "--submodule=short", comparison.commitRange], maxInlineDiffBytes);
         diffBytes = diffOutput.bytes;
-        includeDiff = options.includeDiff ?? (changedFiles.length <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
-        details = collectBranchContext(repoRoot, target.baseRef, { includeDiff, comparison, changedFiles, diffOutput: diffOutput.stdout });
+        includeDiff = options.includeDiff ?? (!tooManyFiles && diffBytes <= maxInlineDiffBytes);
+        details = collectBranchContext(repoRoot, target.baseRef, currentBranch, { includeDiff, comparison, changedFiles, diffOutput: diffOutput.stdout });
     }
     return {
         cwd: repoRoot,

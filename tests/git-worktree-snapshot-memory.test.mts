@@ -98,7 +98,7 @@ function installMemoryGit(t, fixture) {
         !rest.some((arg) => arg === "--path" || arg.startsWith("--path=")));
     }
     let stdout = "";
-    if (query === "rev-parse") stdout = rest.includes("--show-toplevel") ? process.cwd() : rest.includes("--show-object-format") ? "sha1" : oid;
+    if (query === "rev-parse") stdout = rest.includes("--show-toplevel") ? fixture.toplevel ?? process.cwd() : rest.includes("--show-object-format") ? "sha1" : oid;
     if (query === "branch") stdout = "feature";
     if (query === "symbolic-ref") stdout = "refs/remotes/origin/main";
     if (query === "diff" && rest.includes("--cached") && rest.includes("--name-only")) {
@@ -314,3 +314,62 @@ for (const autocrlf of ["true", "input"]) {
     });
   }
 }
+
+// 自動スコープで dirty と判定した snapshot を、同じ target の収集で 1 回だけ再利用する。
+// helper の起動回数で取り直しの有無を観測する（resolve 時に 2 回、取り直すたびに 2 回）。
+function countHelperRuns(fixture) {
+  const counter = { runs: 0 };
+  fixture.onSpawn = (command) => { if (command === windowsHelperPath()) counter.runs += 1; };
+  return counter;
+}
+
+test("Worktree snapshot reuse: auto scope collection reuses the resolved snapshot once", (t) => {
+  const fixture: Record<string, unknown> = { content: "changed\n", untracked: "notes.txt\0" };
+  const counter = countHelperRuns(fixture);
+  const unsafe = installMemoryGit(t, fixture);
+  const target = resolveReviewTarget(process.cwd());
+  assert.equal(target.mode, "working-tree");
+  assert.equal(target.explicit, false);
+  // 再利用の保持は target の列挙可能プロパティに出さない。
+  assert.deepEqual(Object.keys(target), ["mode", "label", "explicit"]);
+  const afterResolve = counter.runs;
+  assert.ok(afterResolve > 0);
+
+  const context = collectReviewContext(process.cwd(), target);
+  assert.equal(counter.runs, afterResolve);
+  assert.equal(context.target, target);
+  assert.deepEqual(Object.keys(context.target), ["mode", "label", "explicit"]);
+  assert.equal(context.inputMode, "inline-diff");
+  assert.match(context.content, /\+changed/);
+  assert.match(context.content, /\+untracked/);
+  assert.deepEqual(context.changedFiles, ["app.js", "notes.txt"]);
+
+  // 1 回使った snapshot は破棄し、同じ target の 2 回目は従来どおり取り直す。
+  const again = collectReviewContext(process.cwd(), target);
+  assert.equal(counter.runs, afterResolve * 2);
+  assert.equal(again.content, context.content);
+  assert.deepEqual(unsafe, []);
+});
+
+test("Worktree snapshot reuse: the inline size limit still applies to a reused snapshot", (t) => {
+  const fixture: Record<string, unknown> = { content: "changed\n" };
+  const counter = countHelperRuns(fixture);
+  installMemoryGit(t, fixture);
+  const target = resolveReviewTarget(process.cwd());
+  const afterResolve = counter.runs;
+  assert.throws(() => collectReviewContext(process.cwd(), target, { maxInlineDiffBytes: 1 }),
+    /complete working tree evidence exceeds the inline size limit\./);
+  assert.equal(counter.runs, afterResolve);
+});
+
+test("Worktree snapshot reuse: a different repository root re-captures instead of reusing", (t) => {
+  const fixture: Record<string, unknown> = { content: "changed\n" };
+  const counter = countHelperRuns(fixture);
+  installMemoryGit(t, fixture);
+  const target = resolveReviewTarget(process.cwd());
+  const afterResolve = counter.runs;
+  fixture.toplevel = path.join(process.cwd(), "other-root");
+  const context = collectReviewContext(process.cwd(), target);
+  assert.equal(context.repoRoot, fixture.toplevel);
+  assert.equal(counter.runs, afterResolve * 2);
+});

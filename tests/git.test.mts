@@ -32,7 +32,7 @@ function workingTreeValue(operation) {
   return null;
 }
 
-test("resolveReviewTarget prefers working tree when repo is dirty", (t) => {
+test("resolveReviewTarget prefers working tree when repo is dirty on Windows; fails closed elsewhere", (t) => {
   const cwd = makeTempDir();
   registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
@@ -45,7 +45,7 @@ test("resolveReviewTarget prefers working tree when repo is dirty", (t) => {
   if (target) assert.equal(target.mode, "working-tree");
 });
 
-test("resolveReviewTarget falls back to branch diff when repo is clean", (t) => {
+test("resolveReviewTarget falls back to branch diff when repo is clean on Windows; fails closed elsewhere", (t) => {
   const cwd = makeTempDir();
   registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
@@ -188,7 +188,7 @@ test("repo scope rejects --base because an audit is not a diff", (t) => {
   assert.throws(() => resolveReviewTarget(cwd, { scope: "repo", base: "main" }), /--base does not apply to --scope repo/);
 });
 
-test("collectReviewContext keeps inline diffs for tiny adversarial reviews", (t) => {
+test("collectReviewContext keeps inline diffs for tiny adversarial reviews on Windows; fails closed elsewhere", (t) => {
   const cwd = makeTempDir();
   registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
@@ -202,7 +202,7 @@ test("collectReviewContext keeps inline diffs for tiny adversarial reviews", (t)
   if (context) { assert.equal(context.inputMode, "inline-diff"); assert.match(context.content, /INLINE_MARKER/); }
 });
 
-test("collectReviewContext skips untracked directories in working tree review (fails closed while worktree filters cannot be isolated)", (t) => {
+test("collectReviewContext fails closed on an untracked nested repository in working tree review", (t) => {
   const cwd = makeTempDir();
   registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
@@ -218,7 +218,7 @@ test("collectReviewContext skips untracked directories in working tree review (f
   assert.throws(() => collectReviewContext(cwd, target), /Review incomplete/);
 });
 
-test("collectReviewContext skips untracked symlinks instead of crashing (fails closed while worktree filters cannot be isolated)", (t) => {
+test("collectReviewContext fails closed instead of crashing on an untracked broken symlink", (t) => {
   const cwd = makeTempDir();
   let link: { dev: bigint; ino: bigint; target: string } | undefined;
   t.after(() => {
@@ -259,7 +259,7 @@ test("collectReviewContext skips untracked symlinks instead of crashing (fails c
   assert.throws(() => collectReviewContext(cwd, target), /Review incomplete/);
 });
 
-test("collectReviewContext provides complete inline evidence for larger supported working tree reviews", (t) => {
+test("collectReviewContext provides complete inline evidence for larger supported working tree reviews on Windows; fails closed elsewhere", (t) => {
   const cwd = makeTempDir();
   registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
@@ -280,7 +280,7 @@ test("collectReviewContext provides complete inline evidence for larger supporte
   }
 });
 
-test("collectReviewContext falls back to lightweight context for oversized single-file diffs (fails closed while worktree filters cannot be isolated)", (t) => {
+test("collectReviewContext fails closed instead of falling back to lightweight context for an oversized working-tree diff", (t) => {
   const cwd = makeTempDir();
   registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
@@ -293,7 +293,7 @@ test("collectReviewContext falls back to lightweight context for oversized singl
   assert.throws(() => collectReviewContext(cwd, target, { maxInlineDiffBytes: 128 }), /Review incomplete/);
 });
 
-test("collectReviewContext includes complete tracked and untracked working tree evidence", (t) => {
+test("collectReviewContext includes complete tracked and untracked working tree evidence on Windows; fails closed elsewhere", (t) => {
   const cwd = makeTempDir();
   registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
@@ -314,7 +314,7 @@ test("collectReviewContext includes complete tracked and untracked working tree 
   }
 });
 
-test("collectReviewContext caps aggregate untracked file content (fails closed while worktree filters cannot be isolated)", (t) => {
+test("collectReviewContext fails closed when untracked content exceeds the aggregate cap", (t) => {
   const cwd = makeTempDir();
   registerFixtureCleanup(t, cwd);
   initGitRepo(cwd);
@@ -407,4 +407,131 @@ test("Git compatibility: successful queries need no extra capability process", (
   syncBuiltinESMExports();
   try { assert.equal(ensureGitRepository(process.cwd()), process.cwd()); assert.equal(count, 1); }
   finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+// Git 既定の core.quotePath=true では非 ASCII のパスが "\346\227..." と引用される。
+// 一覧と changedFiles は -z で受け取り、引用されない実際の名前を渡す。
+const NON_ASCII_TRACKED = "日本語 file.txt";
+const NON_ASCII_UNTRACKED = "未追跡 メモ.txt";
+
+function initQuotePathRepo(t: import('node:test').TestContext) {
+  const cwd = makeTempDir();
+  registerFixtureCleanup(t, cwd);
+  initGitRepo(cwd);
+  // 利用者の global 設定に依存せず、Git 既定の引用を有効にした状態で検証する。
+  run("git", ["config", "core.quotePath", "true"], { cwd });
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  return cwd;
+}
+
+test("branch review lists non-ASCII changed files without Git path quoting", (t) => {
+  const cwd = initQuotePathRepo(t);
+  run("git", ["checkout", "-b", "feature/non-ascii"], { cwd });
+  fs.writeFileSync(path.join(cwd, NON_ASCII_TRACKED), "content\n");
+  assert.equal(run("git", ["add", "--", NON_ASCII_TRACKED], { cwd, shell: false }).status, 0);
+  run("git", ["commit", "-m", "add non-ascii"], { cwd });
+
+  const target = resolveReviewTarget(cwd, { base: "main" });
+  const context = collectReviewContext(cwd, target, { includeDiff: false });
+
+  assert.deepEqual(context.changedFiles, [NON_ASCII_TRACKED]);
+  const changed = context.content.split("## Changed Files\n\n")[1];
+  assert.ok(changed, context.content);
+  assert.match(changed, new RegExp(`^${NON_ASCII_TRACKED}$`, "m"));
+  assert.doesNotMatch(changed, /\\[0-7]{3}/);
+});
+
+test("repository audit lists non-ASCII tracked and untracked files without Git path quoting", (t) => {
+  const cwd = initQuotePathRepo(t);
+  fs.writeFileSync(path.join(cwd, NON_ASCII_TRACKED), "content\n");
+  assert.equal(run("git", ["add", "--", NON_ASCII_TRACKED], { cwd, shell: false }).status, 0);
+  run("git", ["commit", "-m", "add non-ascii"], { cwd });
+  fs.writeFileSync(path.join(cwd, NON_ASCII_UNTRACKED), "note\n");
+
+  const context = collectReviewContext(cwd, resolveReviewTarget(cwd, { scope: "repo" }));
+
+  assert.deepEqual(context.changedFiles, ["app.js", NON_ASCII_TRACKED]);
+  const tracked = context.content.split("## Tracked Files\n\n")[1].split("\n## Untracked Files")[0];
+  const untracked = context.content.split("## Untracked Files\n\n")[1].split("\n## Recent Commits")[0];
+  assert.match(tracked, new RegExp(`^${NON_ASCII_TRACKED}$`, "m"));
+  assert.match(untracked, new RegExp(`^${NON_ASCII_UNTRACKED}$`, "m"));
+  assert.doesNotMatch(tracked + untracked, /\\[0-7]{3}/);
+  assert.match(context.summary, /2 tracked and 1 untracked file\(s\)/);
+});
+
+// 改行を含む名前は NTFS で作れないため、Git の -z 出力を mock で与える。
+// 表示用の一覧だけ制御文字を再エスケープし、件数と changedFiles は生の名前を保つ。
+test("file listings re-escape control characters so names cannot forge context sections", (t) => {
+  const forged = "evil\n## Injected Section\tname.txt";
+  const oid = "a".repeat(40);
+  t.mock.method(childProcess, "spawnSync", (command, args) => {
+    const sub = args[13];
+    const rest = args.slice(14);
+    const nul = rest.includes("-z");
+    let stdout = "";
+    if (sub === "rev-parse") stdout = rest.includes("--show-toplevel") ? process.cwd() : oid;
+    if (sub === "merge-base") stdout = "b".repeat(40);
+    if (sub === "branch") stdout = "feature";
+    if (sub === "diff" && rest.includes("--name-only")) stdout = nul ? `plain.txt\0${forged}\0` : `plain.txt\n"evil\n## Injected Section\tname.txt"\n`;
+    if (sub === "ls-files") {
+      if (rest.includes("--others")) stdout = nul ? `${forged}\0` : `"evil\n## Injected Section\tname.txt"\n`;
+      else stdout = nul ? `plain.txt\0${forged}\0` : `plain.txt\n"evil\n## Injected Section\tname.txt"\n`;
+    }
+    return { status: 0, stdout, stderr: "" };
+  });
+  syncBuiltinESMExports();
+  try {
+    const branch = collectReviewContext(process.cwd(), { mode: "branch", baseRef: "main" }, { includeDiff: false });
+    assert.deepEqual(branch.changedFiles, ["plain.txt", forged]);
+    assert.equal(branch.fileCount, 2);
+    assert.doesNotMatch(branch.content, /^## Injected Section/m);
+    assert.ok(branch.content.includes(JSON.stringify(forged)), branch.content);
+
+    const repo = collectReviewContext(process.cwd(), { mode: "repo" });
+    assert.deepEqual(repo.changedFiles, ["plain.txt", forged]);
+    assert.match(repo.summary, /2 tracked and 1 untracked file\(s\)/);
+    assert.doesNotMatch(repo.content, /^## Injected Section/m);
+    assert.equal(repo.content.split(JSON.stringify(forged)).length - 1, 2);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+// 変更ファイル数だけで軽量表示に決まる場合は diff 本文を取得しない。強制インライン時は従来どおり取得する。
+test("branch review skips the inline diff body when the file count already exceeds the inline limit", (t) => {
+  const calls = [];
+  t.mock.method(childProcess, "spawnSync", (command, args) => {
+    const sub = args[13];
+    const rest = args.slice(14);
+    calls.push(args.slice(13));
+    let stdout = "";
+    if (sub === "rev-parse") stdout = rest.includes("--show-toplevel") ? process.cwd() : "a".repeat(40);
+    if (sub === "merge-base") stdout = "b".repeat(40);
+    if (sub === "branch") stdout = "feature";
+    if (sub === "diff" && rest.includes("--name-only")) stdout = "a.js\0b.js\0c.js\0";
+    if (sub === "diff" && rest.includes("--binary")) stdout = "INLINE_BODY";
+    return { status: 0, stdout, stderr: "" };
+  });
+  syncBuiltinESMExports();
+  try {
+    const target = { mode: "branch", baseRef: "main" };
+    const lightweight = collectReviewContext(process.cwd(), target);
+    assert.equal(lightweight.inputMode, "self-collect");
+    assert.equal(lightweight.fileCount, 3);
+    assert.equal(lightweight.diffBytes, null);
+    assert.ok(calls.every((args) => !args.includes("--binary")), JSON.stringify(calls));
+    assert.match(lightweight.content, /## Changed Files\n\na\.js\nb\.js\nc\.js/);
+
+    calls.length = 0;
+    const forced = collectReviewContext(process.cwd(), target, { includeDiff: true });
+    assert.equal(forced.inputMode, "inline-diff");
+    assert.match(forced.content, /INLINE_BODY/);
+    assert.equal(calls.filter((args) => args.includes("--binary")).length, 1);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
 });
