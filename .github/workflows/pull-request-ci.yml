@@ -31,11 +31,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # check-generated は tsconfig.acp.json の全量型検査・生成を別領域で行い、
+      # コミット済み .mjs との一致まで確かめるため、別途の build 工程は置かない。
       - name: Check committed JavaScript against TypeScript
         run: node scripts/check-generated.mjs
-
-      - name: Run build
-        run: pnpm exec tsc -p tsconfig.acp.json
 
       - name: Run test suite
         run: node scripts/run-tests.mjs
@@ -108,7 +107,7 @@ jobs:
             node-architecture: x86
             expected-arch: ia32
           - runner: windows-11-arm
-            node-version: '26.13.0'
+            node-version: '26.13.1'
             node-architecture: arm64
             expected-arch: arm64
     defaults:

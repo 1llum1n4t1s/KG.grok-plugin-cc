@@ -14,7 +14,7 @@
 - 既存 Node.js / TypeScript は Node.js 22 以降で動作する配布ランタイムとホスト連携の互換性を保つ用途で維持する。PowerShell（7 を含む）・Windows バッチは既存分を含め実装に使用しない。Bash は使用できる。移行は依頼範囲に限り、Windows helper は `plugins/grok/native/` の Rust を正本とする。
 - TypeScript の正本は `.mts`。同じ場所の `.mjs` は `pnpm build` で生成し、直接編集しない。以下で参照する `.mjs` の実装・テストを変更するときも対応する `.mts` を編集する。利用者環境でビルドせず実行できるよう生成物も Git 管理する。Windows helper は `plugins/grok/bin/win32-{ia32,x64,arm64}/grok-windows-helper.exe` を Git 管理し、利用者環境でのダウンロード・ビルドは行わない。
 - Windows helper 変更時は Rust 1.97.1、VS 18.11.12328.437、既定 VC toolset 14.51.36231、Windows SDK 10.0.26100.0 を用意して `pnpm build:native`、`pnpm check:native`、`cargo test --locked --manifest-path plugins/grok/native/Cargo.toml` と Windows の所有プロセス・Git 境界テストを実行する。配布生成は固定 Rust flags を使用し、VS / VC の版の相違や SDK 不足は失敗する。CI の `windows-2025-vs2026` は同梱 exe を上書きせず SHA-256 の完全一致を必須確認する。再生成手順は CONTRIBUTING.md を参照する。
-- 実装変更後は `pnpm build`、`pnpm check-generated`、`pnpm test` を実行する。`build` は `tsconfig.acp.json` の TypeScript を型検査し、同じ場所へ `.mjs` を生成する。CI はビルド前に `check-generated` でコミット済み生成物との一致を確認する。
+- 実装変更後は `pnpm build`、`pnpm check-generated`、`pnpm test` を実行する。`build` は `tsconfig.acp.json` の TypeScript を型検査し、同じ場所へ `.mjs` を生成する。CI は `check-generated` で型検査付きコンパイルとコミット済み生成物との一致を確認し、別のビルド工程は持たない。
 - manifest の整合性は `pnpm check-version` で確認する。
 - ホスト連携を変えるときは `tests/commands.test.mjs` の関連ケースと `hooks/hooks.json` の空の登録を照合する。テストの fake Grok と一時ディレクトリを使って、実アカウントへの実行と分離する。一時領域は `tests/helpers.mjs` と同様にリポジトリ外へ置き、Git 基点の検出がテスト対象へ干渉しないようにする。
 - 標準入力の読取りを変えるときは `scripts/lib/fs.mjs` の非同期 API と全呼出し元の `await` を照合し、`tests/runtime.test.mjs` のパイプ入力・プロンプト優先順位を確認する。
