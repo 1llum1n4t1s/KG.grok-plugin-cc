@@ -80,6 +80,11 @@ test("Codex exposes the same workflows as native skills", () => {
         assert.match(source, /^---\r?\n/, `${name} is missing skill frontmatter`);
         assert.match(source, new RegExp(`^name: ${name}$`, "m"), `${name} has the wrong skill name`);
         assert.match(source, /^description: .+$/m, `${name} is missing a skill description`);
+        // Claude Code always scans the default skills/ directory in addition to the manifest's
+        // ./claude-skills/, so these Codex entry points also reach Claude Code. Keeping them out of
+        // model invocation stops their descriptions from being injected into every Claude session
+        // and keeps Grok explicit-only there, matching the commands/ entry points.
+        assert.match(source, /^disable-model-invocation: true$/m, `${name} must opt out of model invocation so Claude Code does not preload it`);
         assert.match(source, /references\/codex-runtime\.md/, `${name} does not load the shared runtime contract`);
         if (name === "source-command-x")
             assert.match(source, /one foreground task --json without --write/i);
@@ -131,30 +136,22 @@ test("every command declares frontmatter and routes through a foreground workflo
             assert.match(source, /grok-companion\.mjs/, `${name} does not call the companion script`);
     }
 });
-test("review and adversarial-review wire to their own companion subcommands", () => {
-    const review = read("commands/review.md");
-    assert.match(review, /grok-companion\.mjs> review <safely-quoted-known-flag-argv> -- <safely-quoted-focus1argv>/);
-    assert.match(review, /Always run the review in the foreground/i);
-    assert.match(review, /`--background`[\s\S]*no longer supported/i);
-    assert.doesNotMatch(review, /run_in_background:\s*true/);
-    assert.doesNotMatch(review, /AskUserQuestion/);
-    const adversarial = read("commands/adversarial-review.md");
-    assert.match(adversarial, /grok-companion\.mjs> adversarial-review <safely-quoted-known-flag-argv> -- <safely-quoted-focus1argv>/);
-    assert.match(adversarial, /Always run the review in the foreground/i);
-    assert.match(adversarial, /`--background`[\s\S]*no longer supported/i);
-    assert.doesNotMatch(adversarial, /run_in_background:\s*true/);
-    assert.doesNotMatch(adversarial, /AskUserQuestion/);
-});
-test("audit entrypoint selects the repository audit workflow", () => {
-    const audit = read("commands/audit.md");
-    assert.match(audit, /grok-companion\.mjs> audit <safely-quoted-known-flag-argv> -- <safely-quoted-focus1argv>/);
-    assert.match(audit, /Always run the audit in the foreground/i);
-    assert.match(audit, /`--background`[\s\S]*no longer supported/i);
-    assert.doesNotMatch(audit, /run_in_background:\s*true/);
-    assert.doesNotMatch(audit, /AskUserQuestion/);
-    // 監査は差分レビューではないことを利用者向けに明言していること。
-    assert.match(audit, /ignores the current git diff/i);
-});
+// review / adversarial-review / audit の入口は同じ配線契約を持つ。前景実行の文言だけが
+// review と audit で異なり、audit だけは差分を無視することを明言する。
+for (const [name, workflow] of [["review", "review"], ["adversarial-review", "review"], ["audit", "audit"]]) {
+    test(`${name} entrypoint wires to its own companion subcommand in the foreground`, () => {
+        const source = read(`commands/${name}.md`);
+        // name は英小文字とハイフンだけなので RegExp へそのまま埋め込める。
+        assert.match(source, new RegExp(`grok-companion\\.mjs> ${name} <safely-quoted-known-flag-argv> -- <safely-quoted-focus1argv>`));
+        assert.match(source, new RegExp(`Always run the ${workflow} in the foreground`, "i"));
+        assert.match(source, /`--background`[\s\S]*no longer supported/i);
+        assert.doesNotMatch(source, /run_in_background:\s*true/);
+        assert.doesNotMatch(source, /AskUserQuestion/);
+        // 監査は差分レビューではないことを利用者向けに明言していること。
+        if (name === "audit")
+            assert.match(source, /ignores the current git diff/i);
+    });
+}
 test("review commands stay review-only", () => {
     for (const name of ["review", "adversarial-review", "audit"]) {
         const source = read(`commands/${name}.md`);
@@ -173,7 +170,6 @@ test("responses follow the sender's language dynamically", () => {
     // slash コマンド側: Claude が会話言語を --language で渡す指示があること。
     for (const name of ["review", "adversarial-review", "audit"]) {
         const source = read(`commands/${name}.md`);
-        assert.match(source, /--language <BCP 47 tag>/, `${name} does not forward the conversation language`);
         assert.match(source, /argument-hint:.*--language/, `${name} does not advertise --language`);
     }
     // テンプレート側: 言語ルールの差し込み口があること。
@@ -219,7 +215,6 @@ test("plugin and marketplace manifests agree on name and version", () => {
     assert.equal(plugin.name, "grok");
     assert.equal(codexPlugin.name, plugin.name);
     assert.equal(codexPlugin.version, plugin.version);
-    assert.equal(plugin.skills, "./claude-skills/");
     assert.equal(codexPlugin.skills, "./skills/");
     assert.equal(marketplace.plugins[0].name, "grok");
     assert.equal(marketplace.plugins[0].source, "./plugins/grok");

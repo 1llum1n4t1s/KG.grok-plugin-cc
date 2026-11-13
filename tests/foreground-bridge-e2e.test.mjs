@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
-import { initGitRepo } from "./helpers.mjs";
+import { initGitRepo, removeTempFixture } from "./helpers.mjs";
 const cli = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
 const output = JSON.stringify({ verdict: "approve", summary: "Reviewed", findings: [], next_steps: [] });
 test("foreground review ignores old state, enforces read-only permission, and closes its agent", { skip: process.platform === "win32", timeout: 45000 }, () => {
@@ -110,7 +110,8 @@ GrokAcpClient.connectForeground = async (...args) => {
         assert.match(resume.stderr, /Grok.s own commands/);
     }
     finally {
-        fs.rmSync(workspace, { recursive: true, force: true });
-        fs.rmSync(fake.binDir, { recursive: true, force: true });
+        // 削除ガードと保持フラグ（GROK_TEST_DEFER_CLEANUP）を通すため helpers 経由で清掃する。
+        removeTempFixture(workspace, { recursive: true, force: true });
+        removeTempFixture(fake.binDir, { recursive: true, force: true });
     }
 });

@@ -14,7 +14,7 @@ test("foreground task stops the owned agent descendant before reporting success"
         directory = fs.mkdtempSync(path.join(os.tmpdir(), "grok-foreground-owned-"));
         const env = grokFixtureEnv(fixture, path.join(directory, "grok"));
         const result = spawnSync(process.execPath, [cli, "task", "--json", "inspect"], {
-            env: { ...env, XAI_API_KEY: "fixture", GROK_COMPANION_DISABLE_BROKER: "1" },
+            env: { ...env, XAI_API_KEY: "fixture" },
             encoding: "utf8", timeout: 15000, windowsHide: true
         });
         assert.equal(result.status, 0, result.stderr || result.error?.message || result.stdout);

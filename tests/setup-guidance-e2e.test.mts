@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
+import { removeTempFixture } from "./helpers.mjs";
 
 const cli = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
 
@@ -31,10 +32,8 @@ test("setup explains installation, update, authentication and actual check failu
     fs.writeFileSync(oldBin, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo old; exit 0; fi\nexit 1\n', { mode: 0o755 });
     const old = check({ ...fake.env, GROK_BIN: oldBin }, "grok-missing", /grok update/);
     assert.equal(old.availability.reason, "missing-agent-stdio");
-    fs.writeFileSync(fake.env.FAKE_GROK_SCENARIO, JSON.stringify({ authError: true }));
-    const auth = check(fake.env, "not-authenticated", /grok login/);
-    assert.match(auth.guidance, /--device-auth/);
-    assert.match(auth.guidance, /XAI_API_KEY/);
+    // 未認証の案内は Windows でも走る runtime.test の
+    // "setup reports not-authenticated instead of crashing" が JSON・テキストの両方で確かめる。
     fs.writeFileSync(fake.env.FAKE_GROK_SCENARIO, JSON.stringify({ sessionError: "fixture session failure" }));
     check(fake.env, "check-failed", null, /fixture session failure/);
     fs.writeFileSync(fake.env.FAKE_GROK_SCENARIO, JSON.stringify({ initializeError: "fixture connect failure" }));
@@ -42,6 +41,7 @@ test("setup explains installation, update, authentication and actual check failu
     fs.writeFileSync(fake.env.FAKE_GROK_SCENARIO, "{}");
     check(fake.env, null, null);
   } finally {
-    fs.rmSync(fake.binDir, { recursive: true, force: true });
+    // 削除ガードと保持フラグ（GROK_TEST_DEFER_CLEANUP）を通すため helpers 経由で清掃する。
+    removeTempFixture(fake.binDir, { recursive: true, force: true });
   }
 });

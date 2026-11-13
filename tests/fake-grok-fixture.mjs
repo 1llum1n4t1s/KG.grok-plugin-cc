@@ -301,10 +301,7 @@ export function installFakeGrok(scenario = {}) {
             FAKE_GROK_SCENARIO: scenarioPath,
             FAKE_GROK_STATE: statePath,
             // 実物の資格情報を巻き込まないよう明示的に差し替える。
-            XAI_API_KEY: "fake-key-for-tests",
-            // 共有ブローカーは detached プロセスとして残るため、テストでは使わない。
-            // 各コマンドが自分で偽 grok を起動し、終了時に確実に片付ける。
-            GROK_COMPANION_DISABLE_BROKER: "1"
+            XAI_API_KEY: "fake-key-for-tests"
         },
         readState() {
             return fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf8")) : null;

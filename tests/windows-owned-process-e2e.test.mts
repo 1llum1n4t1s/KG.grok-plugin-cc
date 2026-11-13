@@ -56,7 +56,7 @@ for (const mode of ["parent", "supervisor"] as const) {
       ...grokFixtureEnv(fixture, path.join(directory, "grok")),
       POSIX_OWNED_FIXTURE: directory, POSIX_OWNED_MODE: "remaining",
       WINDOWS_OWNED_DETACHED_DESCENDANT: "1",
-      XAI_API_KEY: "fixture", GROK_COMPANION_DISABLE_BROKER: "1",
+      XAI_API_KEY: "fixture",
       TMPDIR: directory, TMP: directory, TEMP: directory
     };
     const script = `

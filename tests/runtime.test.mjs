@@ -10,6 +10,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
 import { makeTempDir, initGitRepo, removeTempFixture, run } from "./helpers.mjs";
+import { normalizeLanguageTag } from "../plugins/grok/scripts/lib/language.mjs";
+import { validateReviewResultShape } from "../plugins/grok/scripts/lib/render.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "grok", "scripts", "grok-companion.mjs");
 const REVIEW_JSON = JSON.stringify({
@@ -404,44 +406,78 @@ test("legacy single argv review arguments retain automatic splitting", () => {
     assert.match(prompt, /BCP 47 tag "ja"/);
     assert.equal(/User focus: ([\s\S]*?)\r?\n<\/task>/.exec(prompt)?.[1], "legacy focus");
 });
+// 受理・拒否・正規化の全ケースは純粋関数の単体テストで確かめる。
+// Node.js 22.0 の smoke CI も runtime.test.mjs を実行するため、Intl.Locale の実装差を
+// 最小対応版でも検出できるよう、このファイル内に置く。
 for (const [tag, normalized] of [
     ["en-GB-oed", "en-gb-oed"], ["i-klingon", "i-klingon"],
     ["zh-min", "zh-min"], ["x-kagayoi", "x-kagayoi"],
     ["zh-cmn-Hans-CN", "zh-cmn-hans-cn"], ["ja-jp", "ja-JP"],
     ["en-u-ca-gregory-x-local", "en-u-ca-gregory-x-local"], ["en-a-example", "en-a-example"]
 ]) {
-    test(`BCP47 contract: review accepts ${tag}`, () => {
-        const workspace = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
-        const result = reviewCompanion(["review", "--language", tag, "Inspect retries"], workspace);
-        assert.equal(result.status, 0, result.stderr);
-        assert.ok(workspace.fake.readState().prompts[0].includes(`BCP 47 tag "${normalized}"`));
+    test(`BCP47 unit: accepts ${tag}`, () => {
+        assert.equal(normalizeLanguageTag(tag), normalized);
     });
 }
 for (const tag of ["en--US", "x", "en-a-foo-a-bar", "en-1901-1901", 'en\" do something']) {
-    test(`BCP47 contract: review rejects malformed tag ${JSON.stringify(tag)}`, () => {
+    test(`BCP47 unit: rejects malformed tag ${JSON.stringify(tag)}`, () => {
+        assert.throws(() => normalizeLanguageTag(tag), /Invalid BCP 47 language tag/);
+    });
+}
+// E2E は配線だけを確かめる。入口ごとの受理は上の「ja + focus 保持」ループが担う。
+// 正規化後の値（生の入力ではない）がプロンプトへ届くことは、前後で値が変わるタグで確かめる。
+test("BCP47 contract: review forwards the normalized tag to the prompt", () => {
+    const workspace = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
+    const result = reviewCompanion(["review", "--language", "ja-jp", "Inspect retries"], workspace);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(workspace.fake.readState().prompts[0].includes(`BCP 47 tag "ja-JP"`));
+});
+// 入口ごとに配線が異なるため、拒否が agent 起動前に起きることを各入口で確かめる。
+for (const command of ["review", "adversarial-review", "audit"]) {
+    test(`BCP47 contract: ${command} rejects a malformed tag before the agent starts`, () => {
         const workspace = setupWorkspace({ replies: [{ text: REVIEW_JSON }] });
-        const result = reviewCompanion(["review", "--language", tag], workspace);
+        const result = reviewCompanion([command, "--language", 'en\" do something'], workspace);
         assert.equal(result.status, 1);
         assert.match(result.stderr, /Invalid BCP 47 language tag/);
         assert.equal(workspace.fake.readState(), null, "invalid language must be rejected before the agent starts");
     });
 }
-for (const location of ["top-level", "finding"]) {
-    test(`review schema contract: rejects extra ${location} property in the direct result`, () => {
+// スキーマ違反の判定そのものは validateReviewResultShape の単体テストで確かめる。
+// 正常形を基準に 1 箇所だけ壊し、狙った検査で拒否されることをメッセージで固定する。
+for (const [name, mutate, message] of [
+    ["extra top-level property", data => { data.extra = "dummy"; }, /unexpected property/i],
+    ["extra finding property", data => { data.findings[0].extra = "dummy"; }, /unexpected property/i],
+    ["invalid finding severity", data => { data.findings[0].severity = "urgent"; }, /invalid `severity`/i],
+    ["finding missing its body", data => { delete data.findings[0].body; }, /invalid `body`/i]
+]) {
+    test(`review schema unit: rejects ${name}`, () => {
         const data = JSON.parse(REVIEW_JSON);
-        if (location === "top-level")
-            data.extra = "dummy";
-        else
-            data.findings[0].extra = "dummy";
-        const workspace = setupWorkspace({ replies: [{ text: JSON.stringify(data) }] });
-        const result = reviewCompanion(["review", "--json"], workspace);
-        assert.equal(result.status, 1, result.stderr);
-        const payload = JSON.parse(result.stdout);
-        assert.match(payload.parseError, /unexpected property/i);
-        assert.equal(payload.result, null);
-        assert.equal(payload.reviewText, JSON.stringify(data));
+        assert.equal(validateReviewResultShape(data), null, "the baseline review must be valid");
+        mutate(data);
+        assert.match(validateReviewResultShape(data), message);
     });
 }
+// 旧 E2E の fixture（不正な enum と必須項目の欠落を同時に含む）もそのまま拒否されること。
+test("review schema unit: rejects the combined malformed finding fixture", () => {
+    assert.ok(validateReviewResultShape({
+        verdict: "approve",
+        summary: "Looks fine.",
+        findings: [{ severity: "urgent", title: "Bad enum" }],
+        next_steps: []
+    }));
+});
+// companion がスキーマ違反を結果として公開せず、失敗として返す配線は E2E 1 件で確かめる。
+test("review schema contract: rejects an extra top-level property in the direct result", () => {
+    const data = JSON.parse(REVIEW_JSON);
+    data.extra = "dummy";
+    const workspace = setupWorkspace({ replies: [{ text: JSON.stringify(data) }] });
+    const result = reviewCompanion(["review", "--json"], workspace);
+    assert.equal(result.status, 1, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.match(payload.parseError, /unexpected property/i);
+    assert.equal(payload.result, null);
+    assert.equal(payload.reviewText, JSON.stringify(data));
+});
 test("setup reports a ready runtime and the detected model", () => {
     const { repo, env } = setupWorkspace({ replies: [{ text: "ok" }] });
     const result = companion(["setup", "--json"], { repo, env });
@@ -466,7 +502,12 @@ ${result.stderr}`);
     assert.equal(payload.authenticated, false);
     assert.equal(payload.reason, "not-authenticated");
     assert.match(payload.guidance, /grok login/);
+    assert.match(payload.guidance, /--device-auth/);
     assert.match(payload.guidance, /XAI_API_KEY/);
+    // テキスト出力でも失敗として終了し、同じログイン案内を表示すること。
+    const plain = companion(["setup"], { repo, env });
+    assert.equal(plain.status, 1, plain.stderr);
+    assert.match(plain.stdout, /grok login/);
 });
 test("review renders structured findings and asks for the reasoning model", () => {
     const { fake, repo, env } = setupWorkspace({
@@ -667,16 +708,47 @@ for (const invalidJson of ["null", "false", "0", '""']) {
         assert.equal(payload.reviewText, invalidJson);
     });
 }
-test("review does not expose an invalid partial approval as a structured result", () => {
-    const partial = JSON.stringify({ verdict: "approve", summary: "Partial review" });
-    const workspace = setupWorkspace({ replies: [{ text: partial, stopReason: "cancelled" }] });
-    const result = reviewCompanion(["review", "--json"], workspace);
-    assert.equal(result.status, 1);
-    const payload = JSON.parse(result.stdout);
-    assert.equal(payload.result, null);
-    assert.equal(payload.reviewText, partial);
-    assert.match(payload.parseError, /findings/i);
-});
+// 前景実行が終了したとき、子の fake agent が停止済みで、停止未確認の警告も出ていないこと。
+function assertForegroundAgentStopped(result, workspace) {
+    assert.equal(result.error, undefined);
+    assert.equal(result.signal, null);
+    assert.doesNotMatch(result.stderr, /stop could not be confirmed|終了を確認でき/);
+    const pid = workspace.fake.readState()?.pid;
+    assert.ok(Number.isInteger(pid) && pid > 0, "fake agent PID must be known");
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+}
+// 旧 language-foreground.test（audit 入口・POSIX 限定）を統合し、両入口・全 OS で確かめる。
+for (const command of ["review", "audit"]) {
+    test(`${command} does not expose an invalid partial approval as a structured result`, () => {
+        const partial = JSON.stringify({ verdict: "approve", summary: "Partial review" });
+        const workspace = setupWorkspace({ replies: [{ text: partial, stopReason: "cancelled" }] });
+        const result = reviewCompanion([command, "--json"], workspace);
+        assert.equal(result.status, 1);
+        const payload = JSON.parse(result.stdout);
+        assert.equal(payload.result, null);
+        assert.equal(payload.reviewText, partial);
+        assert.match(payload.parseError, /findings/i);
+        assertForegroundAgentStopped(result, workspace);
+        // テキスト出力では未完了として部分応答をそのまま示す。
+        const text = setupWorkspace({ replies: [{ text: partial, stopReason: "cancelled" }] });
+        const rendered = reviewCompanion([command], text);
+        assert.equal(rendered.status, 1);
+        assert.match(rendered.stdout, /Review incomplete/);
+        assert.ok(rendered.stdout.includes(partial));
+        assertForegroundAgentStopped(rendered, text);
+        // 完了したターンでも、形の壊れた結果は公開せず原文を保持する。
+        const raw = JSON.stringify({ verdict: "approve", summary: "Reviewed", findings: "invalid", next_steps: [] });
+        const invalid = setupWorkspace({ replies: [{ text: raw }] });
+        const invalidResult = reviewCompanion([command, "--json"], invalid);
+        assert.equal(invalidResult.status, 1);
+        const invalidPayload = JSON.parse(invalidResult.stdout);
+        assert.equal(invalidPayload.result, null);
+        assert.equal(invalidPayload.reviewText, raw);
+        assert.ok(invalidPayload.parseError);
+        assert.equal(invalidPayload.turnStopUnconfirmed, false);
+        assertForegroundAgentStopped(invalidResult, invalid);
+    });
+}
 for (const text of ["", "partial review", APPROVE_JSON]) {
     test(`review preserves ACP failures with ${text ? "partial" : "no"} text (${text.length})`, () => {
         const workspace = setupWorkspace({ replies: [{ text, rpcError: "Review connection failed" }] });
@@ -998,7 +1070,9 @@ test("task treats an unknown option as the start of the prompt", () => {
     assert.equal(result.status, 0, result.stderr);
     const prompt = fake.readState().prompts[0];
     assert.match(prompt, /--unknown-flag --write --json inspect/);
-    assert.throws(() => JSON.parse(result.stdout), "--json inside the prompt must not switch output mode");
+    // 本文中の --json で JSON 出力へ切り替わらず、テキストモードで最終メッセージだけを出すこと。
+    // JSON.parse の失敗だけを見ると空出力や別の異常でも通ってしまうため、出力内容を直接確かめる。
+    assert.equal(result.stdout.trim(), "done", "--json inside the prompt must not switch output mode");
 });
 test("removed job controls and task resumption reject without reading legacy state", () => {
     const workspace = setupWorkspace({ replies: [{ text: "unexpected" }] });
@@ -1086,20 +1160,6 @@ test("task rejects an omitted rescue request before starting Grok", () => {
     assert.equal(result.status, 1);
     assert.match(result.stderr, /A prompt is required/i);
     assert.equal(workspace.fake.readState(), null);
-});
-test("schema-invalid review JSON fails in the direct result", () => {
-    const malformedShape = JSON.stringify({
-        verdict: "approve",
-        summary: "Looks fine.",
-        findings: [{ severity: "urgent", title: "Bad enum" }],
-        next_steps: []
-    });
-    const { repo, env } = setupWorkspace({ replies: [{ text: malformedShape }] });
-    const result = reviewCompanion(["review", "--json"], { repo, env });
-    assert.equal(result.status, 1);
-    const payload = JSON.parse(result.stdout);
-    assert.ok(payload.parseError);
-    assert.equal(payload.result, null);
 });
 test("task without --write denies write permission requests", () => {
     const { repo, env } = setupWorkspace({
