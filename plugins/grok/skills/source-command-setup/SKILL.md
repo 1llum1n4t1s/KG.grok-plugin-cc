@@ -1,6 +1,7 @@
 ---
 name: source-command-setup
 description: Check Grok Build installation and authentication.
+disable-model-invocation: true
 ---
 
 # Grok setup

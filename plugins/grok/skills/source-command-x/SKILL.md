@@ -1,6 +1,7 @@
 ---
 name: source-command-x
 description: Explicitly ask Grok Build to search X posts and return sourced findings.
+disable-model-invocation: true
 ---
 
 # Search X with Grok

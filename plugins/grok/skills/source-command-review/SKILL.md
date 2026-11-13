@@ -1,6 +1,7 @@
 ---
 name: source-command-review
 description: Ask Grok to review working-tree changes or a branch diff, read-only.
+disable-model-invocation: true
 ---
 
 # Grok code review

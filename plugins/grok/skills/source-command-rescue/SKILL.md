@@ -1,6 +1,7 @@
 ---
 name: source-command-rescue
 description: Explicitly delegate investigation, fixes, or a second opinion to Grok Build.
+disable-model-invocation: true
 ---
 
 # Grok rescue

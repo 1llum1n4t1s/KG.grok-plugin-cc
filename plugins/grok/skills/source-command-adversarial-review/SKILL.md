@@ -1,6 +1,7 @@
 ---
 name: source-command-adversarial-review
 description: Read-only Grok review challenging the approach, design, and ship-or-no-ship decision.
+disable-model-invocation: true
 ---
 
 # Grok adversarial review

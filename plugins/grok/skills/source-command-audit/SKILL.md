@@ -1,6 +1,7 @@
 ---
 name: source-command-audit
 description: Ask Grok for a read-only audit of the entire repository, independent of the current diff.
+disable-model-invocation: true
 ---
 
 # Grok repository audit
