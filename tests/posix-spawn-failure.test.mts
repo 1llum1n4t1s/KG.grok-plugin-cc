@@ -133,7 +133,7 @@ for (const scenario of ["error-no-close", "no-event", "normal-close"]) {
     `;
     const runtimeArgs = "bun" in process.versions ? ["--no-env-file"] : [];
     const result = childProcess.spawnSync(process.execPath, [...runtimeArgs, "--input-type=module", "--eval", script], {
-      encoding: "utf8", timeout: 17000, env: { TMPDIR: os.tmpdir(), TMP: os.tmpdir(), TEMP: os.tmpdir() }
+      encoding: "utf8", timeout: 17000, env: { TMPDIR: os.tmpdir(), TMP: os.tmpdir(), TEMP: os.tmpdir(), GROK_PLUGIN_LANGUAGE: "en" }
     });
     assert.equal(result.error, undefined, result.stderr);
     assert.equal(result.signal, null, result.stderr);

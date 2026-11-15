@@ -23,7 +23,8 @@ export function grokFixtureEnv(scriptPath, wrapperPath) {
         const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
         writeExecutable(wrapperPath, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(scriptPath)} "$@"\n`);
     }
-    return { ...process.env, GROK_BIN: bin, GROK_TEST_NODE: process.execPath, GROK_TEST_SCRIPT: scriptPath };
+    // 出力文言の検証が実行環境の言語に左右されないよう、表示言語は英語に固定する（言語別の検証は個別に上書きする）。
+    return { ...process.env, GROK_PLUGIN_LANGUAGE: "en", GROK_BIN: bin, GROK_TEST_NODE: process.execPath, GROK_TEST_SCRIPT: scriptPath };
 }
 export function run(command, args, options = {}) {
     const shell = options.shell ?? (process.platform === "win32" && !path.isAbsolute(command));

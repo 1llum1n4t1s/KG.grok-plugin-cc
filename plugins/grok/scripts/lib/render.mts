@@ -1,4 +1,6 @@
 
+import { t } from "./i18n.mjs";
+
 /** 検証済み severity の並び順。 */
 function severityRank(severity) {
   return ["critical", "high", "medium", "low"].indexOf(severity);
@@ -105,7 +107,7 @@ function appendPermissionDenials(lines, permissionDenials) {
   if (permissionDenials.length === 0) {
     return;
   }
-  lines.push("", "Permission denials:");
+  lines.push("", t("render.permission_denials"));
   for (const reason of permissionDenials) {
     lines.push(`- ${reason}`);
   }
@@ -116,7 +118,7 @@ function appendReasoningSection(lines, reasoningSummary) {
     return;
   }
 
-  lines.push("", "Reasoning:");
+  lines.push("", t("render.reasoning"));
   for (const section of reasoningSummary) {
     lines.push(`- ${section}`);
   }
@@ -135,17 +137,17 @@ export function renderReviewResult(parsedResult, meta) {
       "",
       ...(unfinished
         ? [
-            `Target: ${meta.targetLabel}`,
-            "Review incomplete; Grok stopped before returning a final structured result.",
-            `Stop reason: ${parsedResult.stopReason ?? "unknown"}`
+            t("render.target", { value: meta.targetLabel }),
+            t("render.stopped_before_result"),
+            t("render.stop_reason", { value: parsedResult.stopReason ?? t("render.unknown") })
           ]
-        : ["Grok did not return valid structured JSON.", "", `- Parse error: ${parsedResult.parseError}`])
+        : [t("render.invalid_json"), "", `- ${t("render.parse_error", { value: parsedResult.parseError })}`])
     ];
 
-    if (unfinished && parsedResult.error) lines.push(`Error: ${parsedResult.error}`);
+    if (unfinished && parsedResult.error) lines.push(t("render.error", { value: parsedResult.error }));
     appendPermissionDenials(lines, normalizePermissionDenials(parsedResult.permissionDenials));
     if (parsedResult.rawOutput) {
-      lines.push("", unfinished ? "Partial message:" : "Raw final message:", "", "```text", parsedResult.rawOutput, "```");
+      lines.push("", t(unfinished ? "render.partial_message" : "render.raw_message"), "", "```text", parsedResult.rawOutput, "```");
     }
 
     appendReasoningSection(lines, meta.reasoningSummary ?? parsedResult.reasoningSummary);
@@ -157,15 +159,15 @@ export function renderReviewResult(parsedResult, meta) {
     const lines = [
       `# Grok ${meta.reviewLabel}`,
       "",
-      `Target: ${meta.targetLabel}`,
-      "Grok returned JSON with an unexpected review shape.",
+      t("render.target", { value: meta.targetLabel }),
+      t("render.unexpected_shape"),
       "",
-      `- Validation error: ${validationError}`
+      `- ${t("render.validation_error", { value: validationError })}`
     ];
 
     appendPermissionDenials(lines, normalizePermissionDenials(parsedResult.permissionDenials));
     if (parsedResult.rawOutput) {
-      lines.push("", "Raw final message:", "", "```text", parsedResult.rawOutput, "```");
+      lines.push("", t("render.raw_message"), "", "```text", parsedResult.rawOutput, "```");
     }
 
     appendReasoningSection(lines, meta.reasoningSummary ?? parsedResult.reasoningSummary);
@@ -179,31 +181,31 @@ export function renderReviewResult(parsedResult, meta) {
   const lines = [
     `# Grok ${meta.reviewLabel}`,
     "",
-    `Target: ${meta.targetLabel}`,
-    `Verdict: ${data.verdict}`,
+    t("render.target", { value: meta.targetLabel }),
+    t("render.verdict", { value: data.verdict }),
     "",
     data.summary,
     ""
   ];
 
   if (data.verdict === "incomplete") {
-    lines.push("Review incomplete; this result must not be treated as approval.", "");
+    lines.push(t("render.incomplete_notice"), "");
     if (unfinished) {
-      lines.push(`Stop reason: ${parsedResult.stopReason ?? "unknown"}`, "");
-      if (parsedResult.error) lines.push(`Error: ${parsedResult.error}`, "");
+      lines.push(t("render.stop_reason", { value: parsedResult.stopReason ?? t("render.unknown") }), "");
+      if (parsedResult.error) lines.push(t("render.error", { value: parsedResult.error }), "");
     }
   }
 
   if (findings.length === 0) {
-    lines.push(data.verdict === "incomplete" ? "No verified findings; inspection is incomplete." : "No material findings.");
+    lines.push(t(data.verdict === "incomplete" ? "render.no_verified_findings" : "render.no_material_findings"));
   } else {
-    lines.push("Findings:");
+    lines.push(t("render.findings"));
     for (const finding of findings) {
       const lineSuffix = formatLineRange(finding);
       lines.push(`- [${finding.severity}] ${finding.title} (${finding.file}${lineSuffix})`);
       lines.push(`  ${finding.body}`);
       if (finding.recommendation) {
-        lines.push(`  Recommendation: ${finding.recommendation}`);
+        lines.push(`  ${t("render.recommendation", { value: finding.recommendation })}`);
       }
     }
   }
@@ -211,7 +213,7 @@ export function renderReviewResult(parsedResult, meta) {
   appendPermissionDenials(lines, permissionDenials);
 
   if (data.next_steps.length > 0) {
-    lines.push("", "Next steps:");
+    lines.push("", t("render.next_steps"));
     for (const step of data.next_steps) {
       lines.push(`- ${step}`);
     }

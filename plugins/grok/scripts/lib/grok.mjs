@@ -25,6 +25,7 @@ import { READ_ONLY_COMMANDS, classifyShellCommand } from "./shell-allowlist.mjs"
 function looksLikeVerificationCommand(command) {
     return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(command);
 }
+import { t } from "./i18n.mjs";
 import { shortenText } from "./text.mjs";
 /**
  * レビューに使う既定モデル。
@@ -766,7 +767,7 @@ export async function runGrokTurn(cwd, options = {}) {
     const availability = requireGrokAvailability(cwd, env);
     const prompt = options.prompt?.trim() || "";
     if (!prompt) {
-        throw new Error("A prompt is required for this Grok run.");
+        throw new Error(t("cli.prompt_required"));
     }
     const model = resolveRunModel(options, env);
     const { permissionDenials, onDenied } = createPermissionDenialLog();

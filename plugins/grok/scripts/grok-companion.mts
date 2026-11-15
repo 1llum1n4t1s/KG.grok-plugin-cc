@@ -6,18 +6,15 @@ import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, resolveReviewTarget } from "./lib/git.mjs";
 import { getGrokAuthStatus, parseStructuredOutput, readOutputSchema, runGrokReview, runGrokTurn } from "./lib/grok.mjs";
+import { t } from "./lib/i18n.mjs";
 import { normalizeLanguageTag } from "./lib/language.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { renderReviewResult, validateReviewResultShape } from "./lib/render.mjs";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const aliases = { fast: "grok-4.20-0309-non-reasoning", reasoning: "grok-4.20-0309-reasoning", multi: "grok-4.20-multi-agent-0309", build: "grok-build-0.1", latest: "grok-4.7" };
-const usage = `Usage: grok-companion.mjs <setup|review|adversarial-review|audit|task> [options] [prompt]
-Review: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json
-Review scopes auto and working-tree require Windows and fail if a complete safe snapshot cannot be collected.
-On macOS/Linux, use --scope branch or --base <ref> for committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use audit for the whole repository.
-Task: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json
-Each command runs a new foreground Grok session. For resuming, use Grok's own resume command.`;
+// 人が読むヘルプは表示言語の辞書から引く（オプション名・識別子は全言語で同じ）。
+const usage = () => t("cli.usage");
 // 短いオプションの別名。parseArgs の aliasMap と、互換分割で既知とみなす `-C` / `-m` の
 // 両方をこの 1 つの定義から導出し、片方だけ更新される食い違いを防ぐ。
 const shortAliases = { C: "cwd", m: "model" };
@@ -31,17 +28,17 @@ function parse<V extends string, B extends string>(argv: string[], values: V[], 
   const args = argv.length === 1 && known.has(firstWord) ? splitRawArgumentString(argv[0]) : argv;
   return parseArgs(args, { valueOptions: values, booleanOptions: booleans, aliasMap: shortAliases, stopAtFirstPositional: true });
 }
-function disabled(name) { throw new Error(`${name} is no longer supported. Use Grok's own commands to resume or manage sessions.`); }
+function disabled(name) { throw new Error(t("cli.disabled", { name })); }
 function model(value) { return aliases[value] ?? value; }
 function setupGuidance(status) {
   if (status.reason === "grok-missing") {
-    if (status.availability?.reason === "missing-agent-stdio") return "Update Grok Build with `grok update`, then run setup again.";
+    if (status.availability?.reason === "missing-agent-stdio") return t("setup.update_grok");
     if (status.availability?.reason === "not-installed") {
       const install = process.platform === "win32" ? "irm https://x.ai/cli/install.ps1 | iex" : "curl -fsSL https://x.ai/cli/install.sh | bash";
-      return `Install Grok Build with \`${install}\`, then run setup again.`;
+      return t("setup.install_grok", { command: install });
     }
   }
-  if (status.reason === "not-authenticated") return "Authenticate with `grok login` (or `grok login --device-auth`), or configure XAI_API_KEY, then run setup again.";
+  if (status.reason === "not-authenticated") return t("setup.authenticate");
   return null;
 }
 function errorDiagnostic(error) {
@@ -49,7 +46,7 @@ function errorDiagnostic(error) {
   const data = error.data?.data ?? null;
   const usageExhausted = data?.http_status === 402 && typeof data.message === "string" && /usage balance exhausted/i.test(data.message);
   return { message: error.message, rpcCode: error.rpcCode ?? null, data,
-    ...(usageExhausted ? { classification: "usage-balance-exhausted", guidance: "Grokの利用枠が不足しています（HTTP 402）。利用枠の回復後に再実行してください。" } : {}) };
+    ...(usageExhausted ? { classification: "usage-balance-exhausted", guidance: t("diag.usage_exhausted") } : {}) };
 }
 // review / task 共通のターン未完了判定。
 // permissionDenials は意図的に `?.` を付けない（未定義なら例外になる従来の挙動を保つ）。
@@ -60,9 +57,9 @@ function turnIncomplete(result) {
 // 非 JSON 出力時の stderr 診断。順序（RPC コード、利用枠案内、停止未確認）は表示契約なので保つ。
 // stdout の本文を出した後に呼ぶ。main().catch 側の停止未確認表示は別経路なのでここへ統合しない。
 function reportTurnDiagnostics(diagnostic, result) {
-  if (diagnostic?.rpcCode != null) console.error(`Grok session/prompt RPC error code: ${diagnostic.rpcCode}`);
+  if (diagnostic?.rpcCode != null) console.error(t("diag.rpc_error", { code: diagnostic.rpcCode }));
   if (diagnostic?.guidance) console.error(diagnostic.guidance);
-  if (result.turnStopUnconfirmed) console.error("Grok agent stop could not be confirmed.");
+  if (result.turnStopUnconfirmed) console.error(t("diag.stop_unconfirmed"));
 }
 function languageRule(language, focus) {
   const fields = "every human-readable field (summary, finding titles and bodies, recommendations, next steps)";
@@ -73,17 +70,17 @@ function languageRule(language, focus) {
 }
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
-  if (!command || ["help", "--help", "-h"].includes(command)) { console.log(usage); return; }
+  if (!command || ["help", "--help", "-h"].includes(command)) { console.log(usage()); return; }
   if (["status", "result", "cancel", "state-lock", "task-resume-candidate"].includes(command)) disabled(command);
   if (command === "setup") {
     const { options, positionals } = parse(argv, ["cwd"], ["json", "enable-review-gate", "disable-review-gate"]);
     if (options["enable-review-gate"] || options["disable-review-gate"]) disabled("automatic review gate");
-    if (positionals.length) throw new Error(`Unknown setup argument: ${positionals[0]}`);
+    if (positionals.length) throw new Error(t("cli.unknown_setup_argument", { argument: positionals[0] }));
     const status = await getGrokAuthStatus(path.resolve(options.cwd ?? process.cwd()));
     const guidance = setupGuidance(status);
     const report = { ...status, ...(guidance ? { guidance } : {}) };
-    const message = status.authenticated && !status.turnStopUnconfirmed ? `Grok is authenticated (${status.method}).` : status.authenticated ? "Grok setup check incomplete." : `Grok setup check failed: ${status.detail ?? status.reason}.`;
-    console.log(options.json ? JSON.stringify(report, null, 2) : [message, ...(status.turnStopUnconfirmed ? ["Grok agent stop could not be confirmed."] : []), ...(guidance ? [guidance] : [])].join("\n"));
+    const message = status.authenticated && !status.turnStopUnconfirmed ? t("setup.authenticated", { method: status.method }) : status.authenticated ? t("setup.incomplete") : t("setup.failed", { detail: status.detail ?? status.reason });
+    console.log(options.json ? JSON.stringify(report, null, 2) : [message, ...(status.turnStopUnconfirmed ? [t("diag.stop_unconfirmed")] : []), ...(guidance ? [guidance] : [])].join("\n"));
     if (!status.authenticated || status.turnStopUnconfirmed) process.exitCode = 1;
     return;
   }
@@ -94,7 +91,9 @@ async function main() {
     const focus = positionals.join(" ");
     const target = resolveReviewTarget(cwd, { base: options.base, scope: command === "audit" ? "repo" : options.scope });
     const context = collectReviewContext(cwd, target);
+    // reviewName は AI 向けプロンプト（英語固定）、reviewLabel は利用者向けの見出し（表示言語）。
     const reviewName = command === "audit" ? "Audit" : command === "adversarial-review" ? "Adversarial Review" : "Review";
+    const reviewLabel = t(command === "audit" ? "review.kind.audit" : command === "adversarial-review" ? "review.kind.adversarial_review" : "review.kind.review");
     const prompt = interpolateTemplate(loadPromptTemplate(root, command), { REVIEW_KIND: reviewName, TARGET_LABEL: target.label,
       USER_FOCUS: focus.trim() ? focus : (command === "audit" ? "Map the architecture and trace the highest-risk execution paths, trust boundaries, failure paths, concurrency, and tests." : "No extra focus provided."),
       REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance, RESPONSE_LANGUAGE_RULE: languageRule(options.language, focus.trim()), REVIEW_INPUT: context.content });
@@ -106,7 +105,7 @@ async function main() {
     const incomplete = parsed.parseError || turnIncomplete(result) || parsed.parsed?.verdict === "incomplete";
     if (incomplete && parsed.parsed && !parsed.parseError) parsed.parsed.verdict = "incomplete";
     const diagnostic = errorDiagnostic(result.error);
-    console.log(options.json ? JSON.stringify({ ...result, error: diagnostic, result: parsed.parseError ? null : parsed.parsed, parseError: parsed.parseError }, null, 2) : renderReviewResult(parsed, { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }));
+    console.log(options.json ? JSON.stringify({ ...result, error: diagnostic, result: parsed.parseError ? null : parsed.parsed, parseError: parsed.parseError }, null, 2) : renderReviewResult(parsed, { reviewLabel, targetLabel: target.label, reasoningSummary: result.reasoningSummary }));
     if (!options.json) reportTurnDiagnostics(diagnostic, result);
     if (incomplete) process.exitCode = 1;
     return;
@@ -115,20 +114,20 @@ async function main() {
     const { options, positionals } = parse(argv, ["model", "effort", "cwd", "prompt-file"], ["json", "write", "resume", "resume-last", "fresh", "stop-gate", "background", "wait"]);
     for (const flag of ["resume", "resume-last", "stop-gate", "background"]) if (options[flag]) disabled(`--${flag}`);
     const cwd = path.resolve(options.cwd ?? process.cwd());
-    if (options.effort && !["low", "medium", "high"].includes(options.effort)) throw new Error("Unsupported reasoning effort. Use low, medium, or high.");
+    if (options.effort && !["low", "medium", "high"].includes(options.effort)) throw new Error(t("cli.unsupported_effort"));
     const prompt = options["prompt-file"] ? fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8") : positionals.length ? positionals.join(" ") : await readStdinIfPiped();
-    if (!prompt.trim()) throw new Error("A prompt is required for this Grok run.");
+    if (!prompt.trim()) throw new Error(t("cli.prompt_required"));
     const result = await runGrokTurn(cwd, { prompt, model: model(options.model), effort: options.effort, readOnly: !options.write });
     const diagnostic = errorDiagnostic(result.error);
-    console.log(options.json ? JSON.stringify({ ...result, error: diagnostic }, null, 2) : result.finalMessage || result.error?.message || result.stderr || "Grok returned no output.");
+    console.log(options.json ? JSON.stringify({ ...result, error: diagnostic }, null, 2) : result.finalMessage || result.error?.message || result.stderr || t("cli.no_output"));
     if (!options.json) reportTurnDiagnostics(diagnostic, result);
     if (turnIncomplete(result)) process.exitCode = 1;
     return;
   }
-  throw new Error(`Unknown command: ${command}\n${usage}`);
+  throw new Error(`${t("cli.unknown_command", { command })}\n${usage()}`);
 }
 main().catch(error => {
   console.error(error?.message ?? String(error));
-  if (error?.turnStopUnconfirmed) console.error("Grok agent stop could not be confirmed.");
+  if (error?.turnStopUnconfirmed) console.error(t("diag.stop_unconfirmed"));
   process.exitCode = 1;
 });

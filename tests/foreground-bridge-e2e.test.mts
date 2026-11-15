@@ -87,7 +87,9 @@ GrokAcpClient.connectForeground = async (...args) => {
     const failurePreload = path.join(fake.binDir, "rpc-failure-preload.mjs");
     if (process.versions.bun) fs.writeFileSync(failurePreload, failureInjection);
     const failureEnv = { ...env, ...(process.versions.bun ? {} : { NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(failureInjection)}` }),
-      TEST_RPC_DATA: JSON.stringify({ message: "API error (status 402 Payment Required): Grok Build usage balance exhausted", http_status: 402 }) };
+      TEST_RPC_DATA: JSON.stringify({ message: "API error (status 402 Payment Required): Grok Build usage balance exhausted", http_status: 402 }),
+      // 利用枠不足の案内は表示言語で出る。ここでは日本語の辞書を確認する。
+      GROK_PLUGIN_LANGUAGE: "ja" };
     const failureArgs = process.versions.bun ? ["--no-env-file", "--preload", failurePreload, cli] : [cli];
     const invokeFailure = (args, envOverride = failureEnv) => spawnSync(process.execPath, [...failureArgs, ...args], { cwd: workspace, env: envOverride, encoding: "utf8", timeout: 15000 });
     for (const args of [["audit"], ["task", "inspect"]]) {

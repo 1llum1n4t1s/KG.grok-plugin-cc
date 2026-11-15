@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 
 import { renderReviewResult } from "../plugins/grok/scripts/lib/render.mjs";
 
+// 見出しの文言検証が実行環境の言語に左右されないよう、表示言語を英語に固定する。
+process.env.GROK_PLUGIN_LANGUAGE = "en";
+
 test("valid findings display by severity with their evidence and leave the input unchanged", () => {
   const parsed = {
     verdict: "needs-attention", summary: "Four verified issues.", next_steps: ["Fix the critical issue first."],
