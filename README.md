@@ -27,6 +27,12 @@ codex plugin add grok@kagayoi-grok
 
 Start a new Codex task to load its skills. Install separately in each host if using both.
 
+### Updates
+
+Claude Code turns auto-update off by default for third-party marketplaces such as `kagayoi-grok`. To turn it on, run `/plugin` in a Claude Code session, open the **Marketplaces** tab, select `kagayoi-grok`, and choose **Enable auto-update**. Claude Code then refreshes the marketplace after a session starts and updates the installed plugin; run `/reload-plugins` or start a new session to load the new version. To update immediately instead, run `claude plugin update grok@kagayoi-grok` in your shell.
+
+For Codex, run `codex plugin marketplace upgrade kagayoi-grok` to refresh the marketplace, then start a new Codex task.
+
 ## Commands
 
 Claude Code exposes `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:rescue`, `/grok:x`, and `/grok:setup`. In Codex, select the corresponding `grok:source-command-<name>` skill. Review and audit are read-only; rescue can request edits, while X search stays read-only. Setup checks Grok authentication.
@@ -71,6 +77,12 @@ codex plugin add grok@kagayoi-grok
 ```
 
 新しい Codex タスクでスキルを読み込みます。両ホストで使う場合はそれぞれにインストールしてください。
+
+### 更新
+
+Claude Code では、`kagayoi-grok` のようなサードパーティーのマーケットプレイスは自動更新が既定で無効です。有効にするには、Claude Code のセッションで `/plugin` を実行し、**Marketplaces** タブで `kagayoi-grok` を選んで **Enable auto-update** を選択します。以後はセッション開始後にマーケットプレイスを更新し、インストール済みのプラグインも更新します。新しい版は `/reload-plugins` の実行か、次のセッションの開始で読み込まれます。すぐに更新したい場合は、シェルで `claude plugin update grok@kagayoi-grok` を実行します。
+
+Codex では、`codex plugin marketplace upgrade kagayoi-grok` でマーケットプレイスを更新し、新しい Codex タスクを開始します。
 
 ## コマンド
 
