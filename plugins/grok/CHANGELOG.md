@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.1.9
+
+- The README now explains how to turn on marketplace auto-update in Claude Code and how to refresh the marketplace in Codex.
+
 ## 1.1.8
 
 - Codex skills are no longer loaded into every Claude Code session, and the Claude Code model no longer invokes Grok through them automatically. The `/grok:*` commands remain available for explicit use.
