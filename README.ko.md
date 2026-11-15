@@ -1,0 +1,55 @@
+[English](README.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Português (Brasil)](README.pt-BR.md)
+
+# Claude Code 및 Codex용 Grok 플러그인
+
+Claude Code 또는 Codex에서 Grok Build를 실행하여 코드 리뷰, 저장소 감사, X 검색, 위임 작업을 수행합니다. 이 프로젝트는 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)의 포크이며, 자세한 내용은 [NOTICE](NOTICE)를 참조하십시오.
+
+## 요구 사항 및 설치
+
+[Grok Build](https://x.ai/cli)를 설치하고 로그인하거나 API 키를 설정한 다음, Git 2.45 이상(또는 `--no-lazy-fetch`가 백포트된 Git 빌드)을 설치합니다. Windows, macOS, Linux에서는 Bun 1.4.4 이상 또는 Node.js 22 이상을 설치합니다. 둘 다 있는 경우 Bun을 우선 사용합니다. Grok 사용 요금은 사용한 계정 또는 API 키에 청구됩니다. Grok은 `grok agent stdio`를 지원해야 하며, 필요한 경우 `grok update`로 업데이트하십시오.
+
+Windows에서는 플러그인에 ia32, x64, arm64 런타임용 네이티브 헬퍼가 포함되어 있습니다. Rust나 MSVC를 설치할 필요가 없습니다.
+
+Claude Code에서는 다음을 실행합니다.
+
+```text
+/plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc
+/plugin install grok@kagayoi-grok
+```
+
+Codex에서는 다음을 실행합니다.
+
+```bash
+codex plugin marketplace add 1llum1n4t1s/KG.grok-plugin-cc
+codex plugin add grok@kagayoi-grok
+```
+
+스킬을 불러오려면 새 Codex 작업을 시작하십시오. 두 호스트를 모두 사용하는 경우 각각 별도로 설치해야 합니다.
+
+### 업데이트
+
+Claude Code는 `kagayoi-grok`과 같은 서드파티 마켓플레이스에 대해 기본적으로 자동 업데이트를 끕니다. 켜려면 Claude Code 세션에서 `/plugin`을 실행하고 **Marketplaces** 탭을 연 다음 `kagayoi-grok`을 선택하여 **Enable auto-update**를 선택하십시오. 그러면 Claude Code가 세션 시작 후 마켓플레이스를 새로 고치고 설치된 플러그인을 업데이트합니다. 새 버전을 불러오려면 `/reload-plugins`를 실행하거나 새 세션을 시작하십시오. 즉시 업데이트하려면 셸에서 `claude plugin update grok@kagayoi-grok`을 실행하십시오.
+
+Codex에서는 `codex plugin marketplace upgrade kagayoi-grok`을 실행하여 마켓플레이스를 새로 고친 다음 새 Codex 작업을 시작하십시오.
+
+## 명령어
+
+Claude Code에서는 `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:rescue`, `/grok:x`, `/grok:setup`을 사용할 수 있습니다. Codex에서는 대응하는 `grok:source-command-<name>` 스킬을 선택하십시오. 리뷰와 감사는 읽기 전용이고, rescue는 편집을 요청할 수 있으며, X 검색은 읽기 전용입니다. Setup은 Grok 인증을 확인합니다.
+
+Windows에서는 `/grok:review --scope working-tree`로 로컬 변경 사항을 리뷰합니다. `auto` 및 `working-tree` 범위는 안전한 Windows 스냅샷 전체가 필요하며, 수집할 수 없으면 실패합니다. macOS/Linux에서는 커밋된 변경 사항을 리뷰하려면 `/grok:review --scope branch` 또는 `--base <ref>`를 명시적으로 사용하십시오. 커밋되지 않은 변경 사항은 비교 diff에서 제외되지만, 주변 파일은 작업 트리에서 읽을 수 있습니다. 어느 플랫폼에서나 `/grok:audit authentication`으로 저장소 전체 감사의 초점을 지정할 수 있고, `/grok:rescue <task>`로 작업을 위임할 수 있습니다. 리뷰, 적대적 리뷰, 감사는 `--language <BCP 47 tag>`도 지원합니다. 설치나 인증에 실패하면 `/grok:setup`을 실행하고, 보고된 오류와 Grok의 로그인 안내를 따르십시오.
+
+각 호출은 새로운 Grok 세션을 포그라운드에서 실행하고 결과를 직접 반환합니다. 대화를 이어가려면 Grok 자체 인터페이스를 사용하십시오. 자동 리뷰와 이전의 status, result, cancel, state-lock, task-resume 명령은 더 이상 컴패니언에서 지원되지 않습니다.
+
+컴패니언은 로컬에 설치된 Grok CLI를 시작합니다. ACP 파일 요청의 경로를 확인하고 읽기 전용 권한 허용 목록을 적용하지만, 명시적으로 요청된 쓰기 작업은 워크스페이스를 수정할 수 있습니다. 내장 파일 시스템 및 셸 작업, 외부 접근, 인증은 Grok Build가 처리합니다. 컴패니언은 모든 I/O 작업을 중재하거나 OS 샌드박스를 제공하지 않으며, 심볼릭 링크를 통한 경우를 포함하여 접근 격리를 완전하게 보장하지 않습니다. Grok의 출력과 변경 사항은 신뢰하기 전에 검토하십시오.
+
+## 표시 언어
+
+컴패니언 자체의 메시지(설정 결과, 리뷰 제목, 진단, 도움말)는 사용 환경의 언어로 표시됩니다. `GROK_PLUGIN_LANGUAGE`를 먼저 확인하고, 이어서 `LC_ALL`, `LC_MESSAGES`, `LANG`, 그다음 시스템 표시 언어를 확인하며, 해당하는 것이 없으면 영어로 대체합니다. 지원 언어는 `ja`, `en`, `zh-CN`, `zh-TW`, `ko`, `es`, `fr`, `de`, `pt-BR`입니다. 이는 Grok의 리뷰 텍스트 언어를 지정하는 `--language`와는 별개입니다. Grok 자체의 출력과 OS 또는 Grok이 제공하는 오류 상세 내용은 번역되지 않습니다.
+
+## 문제 해결
+
+호출 시 `usage balance exhausted`와 함께 HTTP 402가 보고되면 Grok Build의 사용 잔액이 소진된 것입니다. 잔액이 회복된 후 다시 시도하십시오. 타임아웃, 권한 거부, 불완전한 리뷰, 확인되지 않은 에이전트 중지는 실패한 호출입니다. 부분적인 출력을 완료된 리뷰나 작업으로 간주하지 마십시오.
+
+읽기 전용 리뷰 중에는 파일을 읽기 위한 용도의 스크립트라 하더라도 Python, Node.js, Bun, 셸 래퍼가 거부됩니다. Grok Build는 권한이 거부된 후 `cancelled`로 턴을 종료할 수 있습니다. JSON 및 기타 증거를 확인하려면 내장 파일 도구를 사용하십시오. 확인할 수 없는 증거는 미검증 상태로 남습니다. 리뷰 프롬프트는 검사가 시작되기 전에 이러한 제한 사항을 제공합니다.
+
+소스 빌드, 개발 명령, 검증에 대해서는 [개발](CONTRIBUTING.md#english)을 참조하십시오. 런타임 구조와 경계는 [DESIGN.md](DESIGN.md)에 설명되어 있습니다.
