@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.1.10
+
+- The companion's output, errors, help, and review headings are now shown in nine languages (ja, en, zh-CN, zh-TW, ko, es, fr, de, pt-BR), chosen from `GROK_PLUGIN_LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`, then the system display language, with English as the fallback. `--language` still sets the language of Grok's review text.
+- The README is now English-first with translations in eight other languages (`README.ja.md` and others), linked from a language switcher at the top.
+
 ## 1.1.9
 
 - The README now explains how to turn on marketplace auto-update in Claude Code and how to refresh the marketplace in Codex.
