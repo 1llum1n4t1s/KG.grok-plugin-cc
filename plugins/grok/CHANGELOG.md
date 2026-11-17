@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.12
+
 - Read-only tasks no longer deny `Test-Path` on a path inside the repository when it is written through a symlinked alias of the repository path, such as macOS `/var` for `/private/var`. Paths whose real location is outside the repository are still denied.
 
 ## 1.1.11
