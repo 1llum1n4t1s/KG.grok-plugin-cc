@@ -1,7 +1,39 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { classifyShellCommand } from "../plugins/grok/scripts/lib/grok.mjs";
+import { removeTempFixture } from "./helpers.mjs";
+
+test("Test-Path は別名の経路で書かれたリポジトリ内のパスも許可し、外側は拒否する", () => {
+  // macOS の /var → /private/var と同じ形を、実体と別名のディレクトリで再現する。
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "grok-allowlist-alias-"));
+  const alias = path.join(base, "alias");
+  try {
+    const real = path.join(base, "real");
+    const repo = path.join(real, "repo");
+    const outside = path.join(real, "outside");
+    fs.mkdirSync(repo, { recursive: true });
+    fs.mkdirSync(outside);
+    fs.symlinkSync(real, alias, process.platform === "win32" ? "junction" : "dir");
+    const cwd = fs.realpathSync.native(repo);
+    const check = (target) => classifyShellCommand(`Test-Path -LiteralPath "${target}"`, cwd).allowed;
+
+    assert.equal(check(path.join(alias, "repo", "build", "candidate")), true);
+    assert.equal(check(path.join(cwd, "build", "candidate")), true);
+    assert.equal(check(path.join(alias, "outside", "candidate")), false);
+    assert.equal(check(path.join(alias, "repo", "..", "outside", "candidate")), false);
+  } finally {
+    // 片付けはリンクを辿らないよう、先にリンク自体だけを外す（実体側は残る）。
+    if (fs.lstatSync(alias, { throwIfNoEntry: false })) {
+      if (process.platform === "win32") fs.rmdirSync(alias);
+      else fs.unlinkSync(alias);
+    }
+    removeTempFixture(base, { recursive: true, force: true });
+  }
+});
 
 test("読み取り専用の git サブコマンドを許可する", () => {
   for (const command of [

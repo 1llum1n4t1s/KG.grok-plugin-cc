@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Read-only tasks no longer deny `Test-Path` on a path inside the repository when it is written through a symlinked alias of the repository path, such as macOS `/var` for `/private/var`. Paths whose real location is outside the repository are still denied.
+
 ## 1.1.11
 
 - When no model is given (neither `--model` nor `GROK_PLUGIN_MODEL`), reviews and tasks now use `grok-4.7-build-fast` if the session offers it, and `grok-4.7` otherwise (for example on accounts without the fast variant). An explicit model, including `grok-4.6` or `grok-4.7`, is used exactly as given. The `fast` alias now resolves to `grok-4.7-build-fast` (it previously pointed to `grok-4.20-0309-non-reasoning`, which the Grok CLI no longer offers); `latest` still resolves to `grok-4.7`.

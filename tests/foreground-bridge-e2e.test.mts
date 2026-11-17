@@ -95,7 +95,7 @@ GrokAcpClient.connectForeground = async (...args) => {
     for (const args of [["audit"], ["task", "inspect"]]) {
       const response = invokeFailure(args);
       assert.equal(response.status, 1);
-      assert.match(response.stderr, /Grokの利用枠が不足しています（HTTP 402）/);
+      assert.match(response.stderr, /Grok の利用枠が不足しています（HTTP 402）/);
     }
     const exhausted = invokeFailure(["audit", "--json"]);
     const error = JSON.parse(exhausted.stdout).error;
@@ -105,7 +105,9 @@ GrokAcpClient.connectForeground = async (...args) => {
     for (const data of [{ message: "payment required", http_status: 402 }, { message: "usage balance exhausted", http_status: 429 }]) {
       const response = invokeFailure(["task", "inspect"], { ...failureEnv, TEST_RPC_DATA: JSON.stringify(data) });
       assert.equal(response.status, 1);
-      assert.doesNotMatch(response.stderr, /Grokの利用枠が不足しています/);
+      // 辞書の文言と同じ表記で照合し、誤表示が無いことを実際に確かめる。
+      assert.match(response.stderr, /RPC エラーコード/);
+      assert.doesNotMatch(response.stderr, /Grok の利用枠が不足しています/);
     }
     const resume = invoke(["task", "--resume", "continue"]);
     assert.equal(resume.status, 1);

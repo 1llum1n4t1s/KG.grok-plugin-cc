@@ -190,9 +190,9 @@ function isSafeTestPath(target, cwd) {
     }
     const root = path.resolve(cwd);
     const resolved = path.resolve(root, target);
-    if (!isWithinPath(root, resolved)) {
-        return false;
-    }
+    // 文字列だけでは判定しない。macOS の /var → /private/var のように、作業フォルダーと
+    // 対象が別名の経路で書かれると、リポジトリ内でも外側に見えるため。
+    // 正規化済みの絶対パスで、実在する最も近い祖先の実体が作業領域の実体内にあるかで決める。
     try {
         const realRoot = fs.realpathSync.native(root);
         let existing = resolved;
