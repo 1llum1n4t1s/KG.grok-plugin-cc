@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.11
+
 - When no model is given (neither `--model` nor `GROK_PLUGIN_MODEL`), reviews and tasks now use `grok-4.7-build-fast` if the session offers it, and `grok-4.7` otherwise (for example on accounts without the fast variant). An explicit model, including `grok-4.6` or `grok-4.7`, is used exactly as given. The `fast` alias now resolves to `grok-4.7-build-fast` (it previously pointed to `grok-4.20-0309-non-reasoning`, which the Grok CLI no longer offers); `latest` still resolves to `grok-4.7`.
 - Reasoning effort now defaults to `high` for both reviews and tasks, judged on the options the session reports after the model switch. `--effort` still takes precedence. When the model has no effort selector or no `high`, the default is skipped silently; an explicit `--effort` that cannot be applied is still reported.
 - A task's reported model is now the one actually in use.
