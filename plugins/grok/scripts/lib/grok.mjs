@@ -28,13 +28,16 @@ function looksLikeVerificationCommand(command) {
 import { t } from "./i18n.mjs";
 import { shortenText } from "./text.mjs";
 /**
- * レビューに使う既定モデル。
+ * 明示指定が無いときの既定モデルの候補。先頭から順に、モデル一覧にある最初のものを使う。
+ * fast 版が無い環境（4.6 など）では、バージョン名の決め打ちではなく一覧の有無で次の候補へ落ちる。
  *
  * API キー認証だと `session/new` の既定が `grok-4.20-0309-non-reasoning` になり、
- * 推論なしモデルではレビュー品質が落ちる。明示的に推論可能な最上位を指す。
+ * 推論なしモデルではレビュー品質が落ちるため、推論可能なモデルを明示的に指す。
  * 環境変数 GROK_PLUGIN_MODEL で上書きできる。
  */
-const DEFAULT_REVIEW_MODEL = "grok-4.7";
+const DEFAULT_MODEL_CANDIDATES = ["grok-4.7-build-fast", "grok-4.7"];
+/** 明示指定が無いときの推論深度。選択肢が無いモデルでは黙って流す。 */
+const DEFAULT_REASONING_EFFORT = "high";
 /**
  * ツール名だけで書き込みと判定できるもの。
  *
@@ -322,36 +325,58 @@ async function applySessionConfigOption(client, sessionId, option, wanted) {
         null;
     if (!value) {
         const detail = available.length ? `not offered (available: ${available.join(", ")})` : "no selectable values";
-        return { applied: false, value: null, reason: detail };
+        return { applied: false, value: null, reason: detail, configOptions: null };
     }
+    let configOptions = null;
     if (option.currentValue !== value) {
-        await client.request("session/set_config_option", { sessionId, configId: option.id, value });
+        const result = await client.request("session/set_config_option", { sessionId, configId: option.id, value });
+        // 応答は切替え後の configOptions を返すことがある。
+        configOptions = Array.isArray(result?.configOptions) ? result.configOptions : null;
     }
-    return { applied: true, value, reason: null };
+    return { applied: true, value, reason: null, configOptions };
 }
 /**
- * 要求されたモデルへ差し替え、実効モデルを返す。
+ * 要求されたモデルへ差し替え、実効モデルと切替え後の configOptions を返す。
  *
  * `session/new` の既定モデルは認証方式によって変わる（API キーだと
  * 推論なしモデルになる）ため、現在値と違えば明示的に合わせる。
  * ACP v1 は `session/set_model` を廃止して `session/set_config_option` へ
  * 統合したので、旧 RPC を先に試し method not found のときだけ新経路へ落ちる。
+ *
+ * 明示指定（options.model）はそのまま尊重する。指定が無いときだけ
+ * options.defaultModels を順に見て、一覧にある最初のものを使う。
+ * 推論深度の判定に使えるよう、切替え後の configOptions を併せて返す。
  */
 async function applyRequestedModel(client, response, options) {
-    const requested = options.model ?? null;
+    const explicit = options.model ?? null;
     const current = response.models?.currentModelId ?? null;
-    if (!requested || requested === current) {
-        return current;
-    }
+    const originalConfigOptions = response.configOptions;
+    const unchanged = { model: current, configOptions: originalConfigOptions };
     const available = response.models?.availableModels?.map((model) => model.modelId) ?? [];
+    let requested = explicit;
+    if (!requested) {
+        const candidates = options.defaultModels ?? [];
+        if (!candidates.length) {
+            return unchanged;
+        }
+        // 一覧が空・不明のときは従来どおり最後の候補（最上位の非 fast）を直接要求する。
+        requested = available.length ? candidates.find((id) => available.includes(id)) ?? null : candidates[candidates.length - 1];
+        if (!requested) {
+            emitProgress(options.onProgress, `None of ${candidates.join(", ")} is available; staying on ${current ?? "the session default"}.`, "starting");
+            return unchanged;
+        }
+    }
+    if (requested === current) {
+        return unchanged;
+    }
     if (available.length && !available.includes(requested)) {
         emitProgress(options.onProgress, `Model ${requested} is not available; staying on ${current ?? "the session default"}.`, "starting");
-        return current;
+        return unchanged;
     }
     try {
         await client.request("session/set_model", { sessionId: response.sessionId, modelId: requested });
         emitProgress(options.onProgress, `Model set to ${requested}.`, "starting");
-        return requested;
+        return { model: requested, configOptions: originalConfigOptions };
     }
     catch (error) {
         if (error?.rpcCode !== RPC_METHOD_NOT_FOUND) {
@@ -361,43 +386,50 @@ async function applyRequestedModel(client, response, options) {
     const option = findSessionConfigOption(response, "model");
     if (!option) {
         emitProgress(options.onProgress, `This Grok build exposes no model selector; staying on ${current ?? "the session default"}.`, "starting");
-        return current;
+        return unchanged;
     }
     const result = await applySessionConfigOption(client, response.sessionId, option, requested);
     if (!result.applied) {
         emitProgress(options.onProgress, `Model ${requested} is ${result.reason}; staying on ${current ?? "the session default"}.`, "starting");
-        return current;
+        return unchanged;
     }
     emitProgress(options.onProgress, `Model set to ${result.value}.`, "starting");
-    return result.value;
+    return { model: result.value, configOptions: result.configOptions ?? originalConfigOptions };
 }
 /**
- * 要求された推論レベルを反映する。
+ * 推論レベルを反映する。
  * ACP に専用 RPC は無く、`thought_level` カテゴリの設定項目として扱う。
+ * 明示指定（options.effort）が無ければ既定の high を狙うが、これは暗黙の既定なので、
+ * 選択項目や high が無いモデルでは黙って流す。明示指定のときだけ理由を進捗へ出す。
  * 反映可否は本題（レビューや委任タスク）の成否と無関係なので、
- * 失敗しても turn を止めず理由だけ進捗へ流す。
+ * 失敗しても turn を止めない。判定は切替え後の configOptions（state）で行う。
  */
-async function applyRequestedEffort(client, response, options) {
-    const requested = options.effort ?? null;
-    if (!requested) {
-        return null;
-    }
-    const option = findSessionConfigOption(response, "thought_level");
+async function applyRequestedEffort(client, state, options) {
+    const explicit = options.effort ?? null;
+    const requested = explicit ?? DEFAULT_REASONING_EFFORT;
+    const report = (message) => {
+        if (explicit) {
+            emitProgress(options.onProgress, message, "starting");
+        }
+    };
+    const option = findSessionConfigOption({ configOptions: state.configOptions }, "thought_level");
     if (!option) {
-        emitProgress(options.onProgress, `This Grok build exposes no reasoning effort selector; --effort ${requested} was not applied.`, "starting");
+        report(`This Grok build exposes no reasoning effort selector; --effort ${requested} was not applied.`);
         return null;
     }
     try {
-        const result = await applySessionConfigOption(client, response.sessionId, option, requested);
+        const result = await applySessionConfigOption(client, state.sessionId, option, requested);
         if (!result.applied) {
-            emitProgress(options.onProgress, `Reasoning effort ${requested} is ${result.reason}; leaving it unchanged.`, "starting");
+            report(`Reasoning effort ${requested} is ${result.reason}; leaving it unchanged.`);
             return null;
         }
-        emitProgress(options.onProgress, `Reasoning effort set to ${result.value}.`, "starting");
+        if (explicit || option.currentValue !== result.value) {
+            emitProgress(options.onProgress, `Reasoning effort set to ${result.value}.`, "starting");
+        }
         return result.value;
     }
     catch (error) {
-        emitProgress(options.onProgress, `Could not set reasoning effort ${requested}: ${error?.message ?? error}`, "starting");
+        report(`Could not set reasoning effort ${requested}: ${error?.message ?? error}`);
         return null;
     }
 }
@@ -410,8 +442,9 @@ async function startSession(client, cwd, options = {}) {
         mcpServers: options.mcpServers ?? []
     });
     // session/new が返す currentModelId は差し替え前の値なので、実効モデルを別に持つ。
-    const effectiveModel = await applyRequestedModel(client, response, options);
-    const effectiveEffort = await applyRequestedEffort(client, response, options);
+    const applied = await applyRequestedModel(client, response, options);
+    const effectiveModel = applied.model;
+    const effectiveEffort = await applyRequestedEffort(client, { sessionId: response.sessionId, configOptions: applied.configOptions }, options);
     return { ...response, effectiveModel, effectiveEffort };
 }
 /**
@@ -613,9 +646,16 @@ function requireGrokAvailability(cwd, env) {
     }
     return availability;
 }
-/** 明示指定、環境変数 GROK_PLUGIN_MODEL、既定モデルの順で実行モデルを決める。 */
+/**
+ * 明示指定、環境変数 GROK_PLUGIN_MODEL の順で要求モデルを決める。どちらも無ければ null で、
+ * その場合は startSession が既定の候補（DEFAULT_MODEL_CANDIDATES）から選ぶ。
+ */
 function resolveRunModel(options, env) {
-    return options.model ?? env.GROK_PLUGIN_MODEL ?? DEFAULT_REVIEW_MODEL;
+    return options.model ?? env.GROK_PLUGIN_MODEL ?? null;
+}
+/** 報告用のモデル名。実効値が取れなければ要求値、それも無ければ既定の最後の候補。 */
+function reportedModel(session, requested) {
+    return session.effectiveModel ?? requested ?? DEFAULT_MODEL_CANDIDATES[DEFAULT_MODEL_CANDIDATES.length - 1];
 }
 /**
  * 権限拒否の記録と、それへ追記する通知関数の組を作る。
@@ -649,6 +689,7 @@ export async function runGrokReview(cwd, options = {}) {
         emitProgress(options.onProgress, "Starting Grok review session.", "starting");
         const session = await startSession(client, cwd, {
             model,
+            defaultModels: DEFAULT_MODEL_CANDIDATES,
             onProgress: options.onProgress,
             // レビュー中に外部 MCP を呼ばせない。Grok は既定でユーザーの
             // グローバル MCP 設定を拾ってしまい、余計なトークンを使うため。
@@ -683,7 +724,7 @@ export async function runGrokReview(cwd, options = {}) {
             permissionDenials,
             status: reviewStatus,
             sessionId,
-            model: session.effectiveModel ?? model,
+            model: reportedModel(session, model),
             reviewText: turnState.agentMessage,
             reasoningSummary: turnState.reasoning,
             stopReason: turnState.stopReason,
@@ -773,7 +814,7 @@ export async function runGrokTurn(cwd, options = {}) {
     const { permissionDenials, onDenied } = createPermissionDenialLog();
     return withGrok(cwd, async (client) => {
         emitProgress(options.onProgress, "Starting Grok task session.", "starting");
-        const session = await startSession(client, cwd, { model, effort: options.effort, onProgress: options.onProgress, mcpServers: [] });
+        const session = await startSession(client, cwd, { model, defaultModels: DEFAULT_MODEL_CANDIDATES, effort: options.effort, onProgress: options.onProgress, mcpServers: [] });
         const sessionId = session.sessionId;
         emitProgress(options.onProgress, `Session ready (${sessionId}).`, "starting", { sessionId });
         if (!options.readOnly) {
@@ -789,7 +830,7 @@ export async function runGrokTurn(cwd, options = {}) {
         return {
             status: buildResultStatus(turnState),
             sessionId,
-            model,
+            model: reportedModel(session, model),
             finalMessage: turnState.agentMessage,
             permissionDenials,
             reasoningSummary: turnState.reasoning,

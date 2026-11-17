@@ -12,7 +12,7 @@ import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { renderReviewResult, validateReviewResultShape } from "./lib/render.mjs";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const aliases = { fast: "grok-4.20-0309-non-reasoning", reasoning: "grok-4.20-0309-reasoning", multi: "grok-4.20-multi-agent-0309", build: "grok-build-0.1", latest: "grok-4.7" };
+const aliases = { fast: "grok-4.7-build-fast", reasoning: "grok-4.20-0309-reasoning", multi: "grok-4.20-multi-agent-0309", build: "grok-build-0.1", latest: "grok-4.7" };
 // 人が読むヘルプは表示言語の辞書から引く（オプション名・識別子は全言語で同じ）。
 const usage = () => t("cli.usage");
 // 短いオプションの別名。parseArgs の aliasMap と、互換分割で既知とみなす `-C` / `-m` の

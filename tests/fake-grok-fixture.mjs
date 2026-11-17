@@ -151,7 +151,10 @@ function handle(message) {
     case "session/set_config_option":
       state.configs.push({ configId: params.configId, value: params.value });
       persist();
-      send({ jsonrpc: "2.0", id, result: {} });
+      {
+        const after = scenario.configOptionsAfter?.[params.configId + "=" + params.value];
+        send({ jsonrpc: "2.0", id, result: after ? { configOptions: after } : {} });
+      }
       return;
 
     case "session/cancel":

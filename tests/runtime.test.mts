@@ -1358,7 +1358,7 @@ ${result.stderr}`);
   assert.deepEqual(fake.readState().models, ["grok-4.5"]);
 });
 
-test("task asks for grok-4.7 when the model is omitted", () => {
+test("task asks for grok-4.7 when the model is omitted and there is no fast variant", () => {
   const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
 
   const result = companion(["task", "do a thing"], { repo, env });
@@ -1370,6 +1370,30 @@ ${result.stderr}`);
   assert.deepEqual(fake.readState().models, ["grok-4.7"]);
 });
 
+test("task asks for the fast variant when the model is omitted and it is offered", () => {
+  const { fake, repo, env } = setupWorkspace({
+    replies: [{ text: "done" }],
+    availableModels: ["grok-fake-nonreasoning", "grok-4.7", "grok-4.7-build-fast", "grok-4.6"]
+  });
+
+  const result = companion(["task", "do a thing"], { repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(fake.readState().models, ["grok-4.7-build-fast"]);
+});
+
+test("task applies high reasoning effort by default", () => {
+  const { fake, repo, env } = setupWorkspace({
+    replies: [{ text: "done" }],
+    configOptions: [{ ...THOUGHT_LEVEL_OPTION, currentValue: "medium" }]
+  });
+
+  const result = companion(["task", "do a thing"], { repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(fake.readState().configs, [{ configId: "thought-level", value: "high" }]);
+});
+
 test("task resolves the latest alias to grok-4.7", () => {
   const { fake, repo, env } = setupWorkspace({ replies: [{ text: "done" }] });
 
@@ -1377,6 +1401,18 @@ test("task resolves the latest alias to grok-4.7", () => {
 
   assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
   assert.deepEqual(fake.readState().models, ["grok-4.7"]);
+});
+
+test("task resolves the fast alias to grok-4.7-build-fast", () => {
+  const { fake, repo, env } = setupWorkspace({
+    replies: [{ text: "done" }],
+    availableModels: ["grok-4.7", "grok-4.7-build-fast", "grok-4.6"]
+  });
+
+  const result = companion(["task", "-m", "fast", "do a thing"], { repo, env });
+
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.deepEqual(fake.readState().models, ["grok-4.7-build-fast"]);
 });
 
 const THOUGHT_LEVEL_OPTION = {
@@ -1392,7 +1428,7 @@ const THOUGHT_LEVEL_OPTION = {
   ]
 };
 
-test("task leaves reasoning effort alone when --effort is absent", () => {
+test("task leaves reasoning effort alone when --effort is absent and it is already high", () => {
   const { fake, repo, env } = setupWorkspace({
     replies: [{ text: "done" }],
     configOptions: [THOUGHT_LEVEL_OPTION]
