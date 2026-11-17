@@ -19,6 +19,7 @@
 - ホスト連携を変えるときは `tests/commands.test.mjs` の関連ケースと `hooks/hooks.json` の空の登録を照合する。テストの fake Grok と一時ディレクトリを使って、実アカウントへの実行と分離する。一時領域は `tests/helpers.mjs` と同様にリポジトリ外へ置き、Git 基点の検出がテスト対象へ干渉しないようにする。
 - 標準入力の読取りを変えるときは `scripts/lib/fs.mjs` の非同期 API と全呼出し元の `await` を照合し、`tests/runtime.test.mjs` のパイプ入力・プロンプト優先順位を確認する。
 - 前景実行を変えるときは `tests/foreground-bridge-e2e.test.mjs` で旧状態を読まないこと、読み取り専用権限、agent の終了と終了未確認時の失敗、RPC エラー・利用枠不足の表示、再開オプションの拒否を確認する。この E2E は Windows で skip されるため、未実行と成功を区別する。
+- 既定モデル・推論深度・別名（`grok-companion.mts` の `aliases`、`grok.mts` の `DEFAULT_MODEL_CANDIDATES`）を変えるときは `tests/model-defaults.test.mjs` と `tests/runtime.test.mjs` の関連ケースを確認し、明示指定を既定候補で置き換えない契約を保つ。
 - Grok の起動環境や ACP 接続・権限処理を変えるときは `tests/grok-env.test.mjs`、`tests/acp.test.mjs`、`tests/runtime.test.mjs` の関連ケースを確認する。JSONL 受信を変えるときは `tests/acp-transport-e2e.test.mjs` で巨大・分割応答、受信中のキャンセル、不正 JSON 後の終了も確認する。
 - 文書だけの変更は参照先、実装との整合性、`git diff --check` を確認する。利用者向けの変更を README に反映するときは、英語の `README.md`（正本）と `README.ja.md`・`README.zh-CN.md`・`README.zh-TW.md`・`README.ko.md`・`README.es.md`・`README.fr.md`・`README.de.md`・`README.pt-BR.md` の全言語版を同時に直す。コマンド・パス・設定キー・製品名・URL は訳さない。
 - 利用者へ直接見せる文言（companion の出力・エラー・ヘルプ・レビューの見出し）は `plugins/grok/scripts/locales/<タグ>.json` の 9 言語（ja・en・zh-CN・zh-TW・ko・es・fr・de・pt-BR）の辞書に置き、コードは `scripts/lib/i18n.mts` の `t(キー)` で参照する。文言を足したら 9 言語の辞書を同時に更新し、`tests/i18n.test.mts`（キー集合・プレースホルダーの整合）を通す。言語は `GROK_PLUGIN_LANGUAGE` → `LC_ALL` → `LC_MESSAGES` → `LANG` → OS の表示言語 → 英語の順に判定する。AI が読む文言（プロンプト・skills・コマンド定義・スキーマ）は英語に統一し、訳さない。`--language` は Grok の応答言語の指定で、表示言語とは別である。
