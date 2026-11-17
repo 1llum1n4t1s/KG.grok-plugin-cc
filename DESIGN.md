@@ -18,6 +18,7 @@ Claude Code と Codex から既存の Grok Build CLI を呼び出す薄い橋渡
 | `plugins/grok/scripts/lib/grok.mjs` と ACP 関連 | Grok の新規プロセスへの直接接続、権限と結果 |
 | `plugins/grok/scripts/lib/shell-allowlist.mjs` | 読み取り専用実行で許可するシェルコマンドの判定。セキュリティ境界の判定を実行本体から分け、`grok.mjs` は既存の公開名 `classifyShellCommand` を再 export する |
 | `plugins/grok/scripts/lib/language.mjs` | `--language` の BCP 47 言語タグの検証と正規化。Grok 起動前に拒否できるよう、単体テストの対象として companion から分けている |
+| `plugins/grok/scripts/lib/i18n.mjs` と `plugins/grok/scripts/locales/<タグ>.json` | companion が利用者へ直接見せる固定文言（setup の結果・レビューの見出し・診断・ヘルプ）の 9 言語辞書と表示言語の判定。コードは `t(キー)` で参照し、辞書に無いキーは英語、英語にも無ければキーそのものを返す。`--language`（Grok の応答言語）とは独立で、AI が読むプロンプト・skills・スキーマと、OS や Grok 由来のエラー詳細は訳さない |
 | `plugins/grok/native/` | Windows の `supervisor`、`identity`、`git-snapshot` を実装する Rust helper とテスト用 shim |
 | `plugins/grok/bin/win32-{ia32,x64,arm64}/grok-windows-helper.exe` | Rust 1.97.1 で生成し Git 管理する Windows 配布バイナリ。ビルド用 `native/target/` は配布しない |
 | `plugins/grok/prompts/`、`plugins/grok/schemas/` | レビュープロンプトと構造化結果の契約 |
@@ -46,6 +47,7 @@ Windows の作業ツリースナップショットでは、同梱 helper の `gi
 - レビュー・監査と読み取り専用タスクでは、companion は ACP のファイル要求のパスをワークスペースに照合し、権限要求を読み取り専用の許可リストで判定する。シェルの権限要求はコマンド内容を判定し、不明な操作と書込みを拒否する。編集依頼の task のみ `--write` によって書込みを許可する。Grok 組込みのファイル・シェル操作の実行は CLI が担い、companion は全 I/O を仲介しない。この制御は OS サンドボックスではなく、symlink 経由を含む完全なアクセス隔離は保証しない。
 - レビューと task の正常終了には `completed` と `end_turn`、権限拒否がないこと、agent の終了確認が必要。レビューはさらに schema に沿う結果が必要で、失敗・不完全な出力を承認結果として扱わない。有効な構造化結果でも実行が不完全なら verdict を `incomplete` にする。
 - 結果受信後も agent を閉じ、終了未確認は `turnStopUnconfirmed` と非ゼロ終了コードで伝える。setup も終了未確認を成功扱いしない。
+- 表示言語は `GROK_PLUGIN_LANGUAGE`、`LC_ALL`、`LC_MESSAGES`、`LANG`、OS の表示言語、英語の順に判定する。9 言語の辞書はキー集合とプレースホルダーを一致させ、`tests/i18n.test.mts` で検証する。
 - RPC エラーはコードとデータを JSON 出力へ含める。HTTP 402 と `usage balance exhausted` が一致するときだけ利用枠不足に分類し、回復後の再実行を案内する。他の課金・接続エラーを同じ理由に決め付けない。
 
 利用方法は [README.md](README.md)、Codex 入口の実行契約は [codex-runtime.md](plugins/grok/references/codex-runtime.md)、変更時の検証手順は [AGENTS.md](AGENTS.md) を参照する。
