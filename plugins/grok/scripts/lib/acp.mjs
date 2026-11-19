@@ -163,7 +163,7 @@ export function containWorkspacePath(cwd, target) {
     const root = path.resolve(cwd);
     let realRoot;
     try {
-        realRoot = fs.realpathSync(root);
+        realRoot = fs.realpathSync.native(root);
     }
     catch {
         return null;
@@ -189,7 +189,7 @@ export function containWorkspacePath(cwd, target) {
     }
     let realExisting;
     try {
-        realExisting = fs.realpathSync(existing);
+        realExisting = fs.realpathSync.native(existing);
     }
     catch (error) {
         // dangling link は新規ファイルと区別して拒否する。
@@ -422,7 +422,7 @@ class AcpClientBase {
     }
     /**
      * エージェントから渡されたパスをセッションの作業ディレクトリ内へ閉じ込める。
-     * 外へ出るパスは null を返して呼び出し側で拒否させる。
+     * 判定は containWorkspacePath に一本化する。別名経路も実体で許可し、実体が外なら拒否する。
      */
     resolveWorkspacePath(target) {
         return containWorkspacePath(this.cwd, target);

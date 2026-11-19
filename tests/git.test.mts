@@ -347,8 +347,11 @@ test("Git safety: every internal call suppresses config execution and diff drive
     for (const { args, options } of calls) {
       assert.deepEqual(args.slice(0, 13), ["--no-pager", "--no-optional-locks", "--no-lazy-fetch", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "format.pretty=medium", "-c", "log.diffMerges=off", "-c", "diff.submodule=short"]);
       assert.equal(options.shell, false);
-      if (["diff", "show", "log", "whatchanged"].includes(args[13])) {
-        assert.deepEqual(args.slice(14, 16), ["--no-ext-diff", "--no-textconv"]);
+      const { index, sub } = gitQuery(args);
+      const displayDiff = sub === "diff" && (args.includes("--stat") || args.includes("--binary"));
+      assert.equal(index === 15, displayDiff, args.join(" "));
+      if (["diff", "show", "log", "whatchanged"].includes(sub)) {
+        assert.deepEqual(args.slice(index + 1, index + 3), ["--no-ext-diff", "--no-textconv"]);
       }
     }
   } finally {
@@ -461,14 +464,37 @@ test("repository audit lists non-ASCII tracked and untracked files without Git p
   assert.match(context.summary, /2 tracked and 1 untracked file\(s\)/);
 });
 
+test("branch review diff and stat keep a Japanese filename unquoted when core.quotePath is true", (t) => {
+  const cwd = initQuotePathRepo(t);
+  run("git", ["checkout", "-b", "feature/non-ascii"], { cwd });
+  fs.writeFileSync(path.join(cwd, NON_ASCII_TRACKED), "content\n");
+  assert.equal(run("git", ["add", "--", NON_ASCII_TRACKED], { cwd, shell: false }).status, 0);
+  run("git", ["commit", "-m", "add non-ascii"], { cwd });
+
+  const quoted = run("git", ["-c", "core.quotePath=true", "diff", "--stat", "main...HEAD"], { cwd, shell: false });
+  assert.match(quoted.stdout, /\\[0-7]{3}/, quoted.stdout);
+
+  const context = collectReviewContext(cwd, resolveReviewTarget(cwd, { base: "main" }));
+  const stat = context.content.split("## Diff Stat\n\n")[1]?.split("\n## ")[0] ?? "";
+  const diff = context.content.split("## Branch Diff\n\n")[1] ?? "";
+  assert.match(stat, new RegExp(NON_ASCII_TRACKED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(diff, /diff --git a\/日本語 file\.txt b\/日本語 file\.txt/);
+  assert.doesNotMatch(`${stat}\n${diff}`, /\\[0-7]{3}/);
+});
+
+function gitQuery(args: string[]) {
+  let index = 13;
+  if (args[index] === "-c" && args[index + 1] === "core.quotePath=false") index += 2;
+  return { index, sub: args[index], rest: args.slice(index + 1) };
+}
+
 // 改行を含む名前は NTFS で作れないため、Git の -z 出力を mock で与える。
 // 表示用の一覧だけ制御文字を再エスケープし、件数と changedFiles は生の名前を保つ。
 test("file listings re-escape control characters so names cannot forge context sections", (t) => {
   const forged = "evil\n## Injected Section\tname.txt";
   const oid = "a".repeat(40);
   t.mock.method(childProcess, "spawnSync", (command, args) => {
-    const sub = args[13];
-    const rest = args.slice(14);
+    const { sub, rest } = gitQuery(args);
     const nul = rest.includes("-z");
     let stdout = "";
     if (sub === "rev-parse") stdout = rest.includes("--show-toplevel") ? process.cwd() : oid;
@@ -504,8 +530,7 @@ test("file listings re-escape control characters so names cannot forge context s
 test("branch review skips the inline diff body when the file count already exceeds the inline limit", (t) => {
   const calls = [];
   t.mock.method(childProcess, "spawnSync", (command, args) => {
-    const sub = args[13];
-    const rest = args.slice(14);
+    const { sub, rest } = gitQuery(args);
     calls.push(args.slice(13));
     let stdout = "";
     if (sub === "rev-parse") stdout = rest.includes("--show-toplevel") ? process.cwd() : "a".repeat(40);

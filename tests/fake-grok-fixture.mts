@@ -28,6 +28,8 @@ export interface FakeGrokScenario {
   configOptions?: Record<string, unknown>[];
   /** set_config_option の応答に載せる切替え後の configOptions。キーは "<configId>=<value>"。 */
   configOptionsAfter?: Record<string, Record<string, unknown>[]>;
+  /** session/set_model 成功後の session/load が返す configOptions。未指定なら session/new と同じ。 */
+  configOptionsAfterModel?: Record<string, unknown>[];
   sessions?: Record<string, unknown>[];
   setModelUnsupported?: boolean;
   holdPrompt?: boolean;
@@ -153,7 +155,12 @@ function handle(message) {
     case "session/load":
       state.loads.push(params.sessionId);
       persist();
-      send({ jsonrpc: "2.0", id, result: { configOptions: scenario.configOptions ?? [] } });
+      {
+        const afterModel = state.models.length > 0 && Array.isArray(scenario.configOptionsAfterModel)
+          ? scenario.configOptionsAfterModel
+          : (scenario.configOptions ?? []);
+        send({ jsonrpc: "2.0", id, result: { configOptions: afterModel } });
+      }
       return;
 
     case "session/set_model":

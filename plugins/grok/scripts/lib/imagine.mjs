@@ -238,8 +238,8 @@ export function copySessionImages(accepted, destination, cwd) {
     catch (error) {
         throw new Error(t("imagine.output_unusable", { path: directory }), { cause: error });
     }
-    const created = fs.realpathSync(directory);
-    const root = fs.realpathSync(path.resolve(cwd));
+    const created = fs.realpathSync.native(directory);
+    const root = fs.realpathSync.native(path.resolve(cwd));
     const relative = path.relative(root, created);
     if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
         throw new Error(t("imagine.output_escapes", { path: destination.directory }));

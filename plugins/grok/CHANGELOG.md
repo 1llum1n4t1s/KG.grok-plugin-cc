@@ -6,10 +6,14 @@
 - Imagine copies an image only from the current ACP session's `images` directory. An image from another session is left in place.
 - Imagine grants permission only for `image_gen` and `image_edit` (variants `ImageGen` and `ImageEdit`). A tool titled `imagine:` is denied unless it is one of those tools.
 - A tool result that also names an image outside the session directory still saves the session image. Paths outside that directory are not copied.
-- Imagine saves generated images when the working directory is a symlink, such as macOS `/tmp` or `/var`. Containment compares the real workspace and the real output path, and still rejects paths whose real location is outside the workspace.
-- Added `/grok:imagine` and the Codex skill `grok:source-command-imagine`. The command starts one foreground Grok session, allows only the image tool, and copies the generated file from Grok's session images directory into `grok-imagine/` or `--output`. It does not edit the rest of the repository.
+- Imagine saves generated images when the working directory is a symlink, such as macOS `/tmp` or `/var`. Containment uses the same real-path check as file reads, and still rejects paths whose real location is outside the workspace.
+- Added `/grok:imagine` and the Codex skill `grok:source-command-imagine` under `codex-skills/`. The command starts one foreground Grok session, allows only the image tool, and copies the generated file from Grok's session images directory into `grok-imagine/` or `--output`. It does not edit the rest of the repository.
 - Subscription sign-in draws image generation from the shared weekly usage pool. When `XAI_API_KEY` is set, imagine stops until `--allow-api-billing` is passed and states that API images are billed at xAI rates (`grok-imagine-image-2.0` is listed from $0.04/img).
 - HTTP 402 with `usage balance exhausted` and a report that image tools need a SuperGrok subscription now include localized guidance.
+- After `session/set_model` succeeds, the default reasoning effort is chosen from the switched model's options. `high` is sent only when that model offers it, including when an API-key session starts on a no-reasoning model and then moves to fast. It is not sent when the new model has no `high`.
+- Read-only file reads now allow a path inside the workspace when it is written through a symlink alias of the workspace, using the same real-path check as `Test-Path`. Paths whose real location is outside the workspace are still denied.
+- Review diff bodies and `--stat` now pass non-ASCII file names, such as Japanese names, as UTF-8 instead of Git's octal quotes when `core.quotePath=true`.
+- Codex skills now live in `codex-skills/`, named only by the Codex manifest. Claude Code ignores `disable-model-invocation` on plugin skills and also scans the default `skills/` directory, so keeping the Codex entry points out of that directory stops them from being injected into Claude Code sessions. In Codex, the same skills remain available for explicit selection.
 
 ## 1.1.12
 

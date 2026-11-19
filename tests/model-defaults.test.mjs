@@ -127,6 +127,29 @@ test("an explicit effort still reports when it cannot be applied", async (t) => 
     assert.deepEqual(missing.state.configs, []);
     assert.match(effortMessages(missing.progress).join("\n"), /Reasoning effort low is not offered \(available: high, medium\); leaving it unchanged\./);
 });
+test("effort follows the options of the model session/set_model switched to", async (t) => {
+    // set_model は成功して空の応答を返す。API キーの推論なしセッションには thought_level が無く、
+    // fast へ切り替えたあとの一覧にだけ high がある。
+    const gained = await runTurn(t, {
+        availableModels: WITH_FAST,
+        configOptions: [],
+        configOptionsAfterModel: [effortOption(["xhigh", "high", "medium", "low"])]
+    });
+    assert.deepEqual(gained.state.models, [FAST]);
+    assert.deepEqual(gained.state.loads, ["fake-session-1"]);
+    assert.deepEqual(gained.state.configs, [{ configId: "reasoning_effort", value: "high" }]);
+    assert.ok(gained.progress.some((message) => /Reasoning effort set to high/.test(message)));
+    // 切替前には high があり、切替後のモデルには無い。high は送らない。
+    const lost = await runTurn(t, {
+        availableModels: WITH_FAST,
+        configOptions: [effortOption(["high", "medium", "low"])],
+        configOptionsAfterModel: [effortOption(["medium", "low"])]
+    });
+    assert.deepEqual(lost.state.models, [FAST]);
+    assert.deepEqual(lost.state.loads, ["fake-session-1"]);
+    assert.deepEqual(lost.state.configs, []);
+    assert.deepEqual(effortMessages(lost.progress), []);
+});
 test("effort is judged on the configOptions returned after switching the model", async (t) => {
     // set_config_option 経路: 切替え前の項目には high が無く、切替え後の応答にだけ high がある。
     const before = [modelOption(["grok-fake-nonreasoning", FAST]), effortOption(["medium", "low"])];

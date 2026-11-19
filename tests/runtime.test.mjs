@@ -459,12 +459,13 @@ for (const [name, mutate, message] of [
 }
 // 旧 E2E の fixture（不正な enum と必須項目の欠落を同時に含む）もそのまま拒否されること。
 test("review schema unit: rejects the combined malformed finding fixture", () => {
-    assert.ok(validateReviewResultShape({
+    // body は severity より先に検査される。種類まで見て、空でない文字列だけでは通さない。
+    assert.match(validateReviewResultShape({
         verdict: "approve",
         summary: "Looks fine.",
         findings: [{ severity: "urgent", title: "Bad enum" }],
         next_steps: []
-    }));
+    }), /Finding 1 has invalid `body`/);
 });
 // companion がスキーマ違反を結果として公開せず、失敗として返す配線は E2E 1 件で確かめる。
 test("review schema contract: rejects an extra top-level property in the direct result", () => {

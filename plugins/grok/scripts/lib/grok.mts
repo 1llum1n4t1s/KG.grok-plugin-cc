@@ -429,6 +429,33 @@ async function applySessionConfigOption(client, sessionId, option, wanted) {
   return { applied: true, value, reason: null, configOptions };
 }
 
+/** 応答に配列の configOptions があるときだけそれを返す。無い応答は null。 */
+function readConfigOptions(response) {
+  return Array.isArray(response?.configOptions) ? response.configOptions : null;
+}
+
+/**
+ * `session/set_model` は成功しても configOptions を返さない（応答型は空）。
+ * 切替前の一覧で推論深度を決めると、API キーの推論なし既定から fast へ移したあとも
+ * high を送らず、切替前に high があると切替後に無いモデルへも high を送る。
+ * `session/load` が返す切替後の一覧を使う。load が無い実装では切替前へ戻さない。
+ */
+async function loadConfigOptionsAfterModelSwitch(client, response, options, cwd) {
+  try {
+    const loaded = await client.request("session/load", {
+      sessionId: response.sessionId,
+      cwd,
+      mcpServers: options.mcpServers ?? []
+    });
+    return readConfigOptions(loaded) ?? [];
+  } catch (error) {
+    if (error?.rpcCode !== RPC_METHOD_NOT_FOUND) {
+      throw error;
+    }
+    return [];
+  }
+}
+
 /**
  * 要求されたモデルへ差し替え、実効モデルと切替え後の configOptions を返す。
  *
@@ -441,7 +468,7 @@ async function applySessionConfigOption(client, sessionId, option, wanted) {
  * options.defaultModels を順に見て、一覧にある最初のものを使う。
  * 推論深度の判定に使えるよう、切替え後の configOptions を併せて返す。
  */
-async function applyRequestedModel(client, response, options) {
+async function applyRequestedModel(client, response, options, cwd) {
   const explicit = options.model ?? null;
   const current = response.models?.currentModelId ?? null;
   const originalConfigOptions = response.configOptions;
@@ -480,9 +507,10 @@ async function applyRequestedModel(client, response, options) {
   }
 
   try {
-    await client.request("session/set_model", { sessionId: response.sessionId, modelId: requested });
+    const result = await client.request("session/set_model", { sessionId: response.sessionId, modelId: requested });
     emitProgress(options.onProgress, `Model set to ${requested}.`, "starting");
-    return { model: requested, configOptions: originalConfigOptions };
+    const configOptions = readConfigOptions(result) ?? await loadConfigOptionsAfterModelSwitch(client, response, options, cwd);
+    return { model: requested, configOptions };
   } catch (error) {
     if (error?.rpcCode !== RPC_METHOD_NOT_FOUND) {
       throw error;
@@ -562,7 +590,7 @@ async function startSession(client, cwd, options: GrokOptions = {}) {
   });
 
   // session/new が返す currentModelId は差し替え前の値なので、実効モデルを別に持つ。
-  const applied = await applyRequestedModel(client, response, options);
+  const applied = await applyRequestedModel(client, response, options, cwd);
   const effectiveModel = applied.model;
   const effectiveEffort = await applyRequestedEffort(
     client,
