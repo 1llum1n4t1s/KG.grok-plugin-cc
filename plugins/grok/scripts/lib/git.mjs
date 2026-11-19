@@ -73,7 +73,7 @@ export const READ_ONLY_GIT_GLOBAL_ARGS = Object.freeze([
     "-c", "core.fsmonitor=false", "-c", "log.showSignature=false",
     "-c", "format.pretty=medium", "-c", "log.diffMerges=off", "-c", "diff.submodule=short"
 ]);
-function readOnlyGitArgs(args) {
+function readOnlyGitArgs(args, options = {}) {
     const [command, ...rest] = args;
     // status と作業ツリー比較は --no-textconv でも clean/process filter を実行する。
     // 設定の事前検査は TOCTOU を防げないため、危険な呼出し自体を開始しない。
@@ -89,12 +89,16 @@ function readOnlyGitArgs(args) {
     // want_file=1 側へ進ませないため、外部 diff と textconv は常に無効にする。
     const diffFlags = ["diff", "show", "log", "whatchanged"].includes(command)
         ? ["--no-ext-diff", "--no-textconv"] : [];
-    return [...READ_ONLY_GIT_GLOBAL_ARGS, command, ...diffFlags, ...rest];
+    // 表示用の diff / --stat だけ引用を外す。-z の機械処理は生のバイト列のままにする。
+    // core.quotePath=false でも制御文字は Git が引用したまま残る。
+    const quoting = options.quotePaths === false ? ["-c", "core.quotePath=false"] : [];
+    return [...READ_ONLY_GIT_GLOBAL_ARGS, ...quoting, command, ...diffFlags, ...rest];
 }
 // Git is directly executable on Windows. Repository-derived arguments must never pass through a shell.
 function git(cwd, args, options = {}) {
-    const result = runCommand("git", readOnlyGitArgs(args), {
-        cwd, ...options, timeout: gitLookupTimeout(options), env: { ...process.env, ...options.env, LC_ALL: "C" }, shell: false
+    const { quotePaths, ...commandOptions } = options;
+    const result = runCommand("git", readOnlyGitArgs(args, { quotePaths }), {
+        cwd, ...commandOptions, timeout: gitLookupTimeout(options), env: { ...process.env, ...commandOptions.env, LC_ALL: "C" }, shell: false
     });
     assertGitStarted(result, cwd);
     if (result.status !== 0 && /unknown option[^\r\n]*--no-lazy-fetch/.test(result.stderr)) {
@@ -191,8 +195,8 @@ function normalizeMaxInlineDiffBytes(value) {
     }
     return Math.floor(parsed);
 }
-function collectBoundedGitOutput(cwd, args, maxBytes) {
-    const result = git(cwd, args, { maxBuffer: maxBytes + 1 });
+function collectBoundedGitOutput(cwd, args, maxBytes, options = {}) {
+    const result = git(cwd, args, { ...options, maxBuffer: maxBytes + 1 });
     if (result.error && result.error.code === "ENOBUFS") {
         // 途中で切れた出力は再利用せず、強制インライン時だけ従来の取得へ戻す。
         return { bytes: maxBytes + 1, stdout: null };
@@ -603,7 +607,7 @@ function collectBranchContext(cwd, baseRef, currentBranch, options) {
     const includeDiff = options.includeDiff !== false;
     const { comparison, changedFiles } = options;
     const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", comparison.commitRange]).stdout.trim();
-    const diffStat = gitChecked(cwd, ["diff", "--stat", comparison.commitRange]).stdout.trim();
+    const diffStat = gitChecked(cwd, ["diff", "--stat", comparison.commitRange], { quotePaths: false }).stdout.trim();
     return {
         mode: "branch",
         summary: `Reviewing branch ${currentBranch} against ${baseRef} from merge-base ${comparison.mergeBase}.`,
@@ -611,7 +615,7 @@ function collectBranchContext(cwd, baseRef, currentBranch, options) {
             ? [
                 formatSection("Commit Log", logOutput),
                 formatSection("Diff Stat", diffStat),
-                formatSection("Branch Diff", options.diffOutput ?? gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=short", comparison.commitRange]).stdout)
+                formatSection("Branch Diff", options.diffOutput ?? gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=short", comparison.commitRange], { quotePaths: false }).stdout)
             ].join("\n")
             : [
                 formatSection("Commit Log", logOutput),
@@ -705,7 +709,7 @@ export function collectReviewContext(cwd, target, options = {}) {
         const tooManyFiles = options.includeDiff == null && changedFiles.length > maxInlineFiles;
         const diffOutput = tooManyFiles
             ? { bytes: null, stdout: undefined }
-            : collectBoundedGitOutput(repoRoot, ["diff", "--binary", "--no-ext-diff", "--submodule=short", comparison.commitRange], maxInlineDiffBytes);
+            : collectBoundedGitOutput(repoRoot, ["diff", "--binary", "--no-ext-diff", "--submodule=short", comparison.commitRange], maxInlineDiffBytes, { quotePaths: false });
         diffBytes = diffOutput.bytes;
         includeDiff = options.includeDiff ?? (!tooManyFiles && diffBytes <= maxInlineDiffBytes);
         details = collectBranchContext(repoRoot, target.baseRef, currentBranch, { includeDiff, comparison, changedFiles, diffOutput: diffOutput.stdout });
