@@ -246,6 +246,9 @@ function emitReply(id, sessionId, reply) {
   for (const tool of reply.tools ?? []) {
     send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call", toolCallId: "t1", title: tool } } });
   }
+  for (const update of reply.updates ?? []) {
+    send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update } });
+  }
   // 本物と同じくトークン単位の断片で流す。
   for (const chunk of String(reply.text ?? "").match(/.{1,8}/gs) ?? []) {
     send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: chunk } } } });
