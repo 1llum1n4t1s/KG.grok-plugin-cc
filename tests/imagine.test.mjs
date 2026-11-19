@@ -246,6 +246,36 @@ test("missing image entitlement and non-image tools fail without writing the wor
         removeTempFixture(fake.binDir, { recursive: true, force: true });
     }
 });
+test("imagine copies the image when the working directory is a symlink to the workspace", () => {
+    const home = makeTempDir("grok-imagine-home-");
+    const source = sessionImage(home);
+    const fake = installFakeGrok({ replies: [{
+                requestPermissionFor: { title: "image_gen", kind: "other", rawInput: { prompt: "cube" } },
+                updates: imageUpdates(source),
+                text: "saved"
+            }] });
+    const real = makeTempDir("grok-imagine-real-");
+    const linkParent = makeTempDir("grok-imagine-link-");
+    const cwd = path.join(linkParent, "cwd");
+    fs.symlinkSync(real, cwd, "dir");
+    const env = { ...fake.env, HOME: home, USERPROFILE: home };
+    delete env.XAI_API_KEY;
+    try {
+        const result = imagine(["imagine", "--json", "a red cube"], env, cwd);
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+        const saved = JSON.parse(result.stdout).images[0].saved;
+        assert.equal(fs.readFileSync(saved).toString("hex"), jpeg.toString("hex"));
+        assert.equal(path.relative(fs.realpathSync(real), fs.realpathSync(saved)).startsWith(".."), false);
+        assert.equal(fs.existsSync(path.join(real, "grok-imagine", "1.jpg")), true);
+    }
+    finally {
+        fs.unlinkSync(cwd);
+        removeTempFixture(real, { recursive: true, force: true });
+        removeTempFixture(linkParent, { recursive: true, force: true });
+        removeTempFixture(home, { recursive: true, force: true });
+        removeTempFixture(fake.binDir, { recursive: true, force: true });
+    }
+});
 test("an output directory that is a symlink out of the workspace is refused", () => {
     const fake = installFakeGrok({ replies: [{ text: "should not run" }] });
     const cwd = makeTempDir("grok-imagine-cwd-");

@@ -151,18 +151,24 @@ export function createAllowAllPermissionResponder() {
 }
 /**
  * ワークスペース配下に解決できるパスだけを返す。
+ * cwd と対象の両方を実パスで比べる。シンボリックリンクの作業ディレクトリ
+ * （macOS の /tmp や /var の別名を含む）と、既に解決済みの出力先が同じ実体なら許可する。
+ * 語彙上の相対が外に見えても、実体がワークスペース内なら同じ境界である。
+ * 実体が外のパス、ワークスペース外へのシンボリックリンク、切れたリンクは null。
  * 未作成の末尾要素も、存在する祖先の実体がワークスペース内なら許可する。
- * 外へ出るパスと、切れたシンボリックリンクは null。
  */
 export function containWorkspacePath(cwd, target) {
     if (typeof target !== "string" || !target || typeof cwd !== "string" || !cwd)
         return null;
     const root = path.resolve(cwd);
-    const resolved = path.resolve(root, target);
-    const relative = path.relative(root, resolved);
-    if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative))
+    let realRoot;
+    try {
+        realRoot = fs.realpathSync(root);
+    }
+    catch {
         return null;
-    const realRoot = fs.realpathSync(root);
+    }
+    const resolved = path.resolve(root, target);
     let existing = resolved;
     const missing = [];
     // 未作成の write 先も、存在する最深の祖先までリンク先を確認する。

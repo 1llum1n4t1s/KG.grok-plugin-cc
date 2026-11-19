@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Imagine saves generated images when the working directory is a symlink, such as macOS `/tmp` or `/var`. Containment compares the real workspace and the real output path, and still rejects paths whose real location is outside the workspace.
 - Added `/grok:imagine` and the Codex skill `grok:source-command-imagine`. The command starts one foreground Grok session, allows only the image tool, and copies the generated file from Grok's session images directory into `grok-imagine/` or `--output`. It does not edit the rest of the repository.
 - Subscription sign-in draws image generation from the shared weekly usage pool. When `XAI_API_KEY` is set, imagine stops until `--allow-api-billing` is passed and states that API images are billed at xAI rates (`grok-imagine-image-2.0` is listed from $0.04/img).
 - HTTP 402 with `usage balance exhausted` and a report that image tools need a SuperGrok subscription now include localized guidance.
