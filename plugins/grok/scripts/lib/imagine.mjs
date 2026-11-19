@@ -55,6 +55,18 @@ export function isMissingImageEntitlement(text) {
     return /(?:image tools|image generation|\/imagine)\b[\s\S]{0,180}\bsuper\s*grok\b/i.test(text)
         || /\bsuper\s*grok\b[\s\S]{0,180}\b(?:image tools|image generation|\/imagine)\b/i.test(text);
 }
+/** 失敗したツール結果の本文。成功した応答や最終メッセージは資格不足の判定に使わない。 */
+export function failedToolText(update) {
+    if (!update || typeof update !== "object")
+        return "";
+    const record = update;
+    if (record.status !== "failed")
+        return "";
+    const texts = [];
+    collectTexts(record.content, texts, 0);
+    collectTexts(record.rawOutput, texts, 0);
+    return texts.join("\n");
+}
 function collectTexts(value, out, depth) {
     if (value == null || depth > 6)
         return;

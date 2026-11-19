@@ -49,7 +49,7 @@ Windows の作業ツリースナップショットでは、同梱 helper の `gi
 - 結果受信後も agent を閉じ、終了未確認は `turnStopUnconfirmed` と非ゼロ終了コードで伝える。setup も終了未確認を成功扱いしない。
 - 表示言語は `GROK_PLUGIN_LANGUAGE`、`LC_ALL`、`LC_MESSAGES`、`LANG`、OS の表示言語、英語の順に判定する。9 言語の辞書はキー集合とプレースホルダーを一致させ、`tests/i18n.test.mts` で検証する。
 - 実行モデルは `--model`（別名を含む）、環境変数 `GROK_PLUGIN_MODEL` の順で明示指定を決める。明示指定が一覧に無いときは既定候補へ置き換えず現在のモデルに留まる。指定が無いときだけ、セッションのモデル一覧にある最初の `grok-4.7-build-fast`、`grok-4.7` を使い、一覧が空なら最後の候補を直接要求する。API キー認証の `session/new` 既定は推論なしモデルでレビュー品質が落ちること、fast 版が無いアカウントでも失敗させないことから、バージョン名の決め打ちではなく一覧の有無で選ぶ。推論深度は `--effort` を優先し、無ければ `high` を狙う。適用可否は切替え後の `configOptions` で判定し、暗黙の `high` を適用できないモデルでは黙って省く。明示した `--effort` が適用できないときだけ進捗へ理由を出す。結果の model には実際に使われたモデルを載せる。
-- RPC エラーはコードとデータを JSON 出力へ含める。HTTP 402 と `usage balance exhausted` が一致するときだけ利用枠不足に分類し、回復後の再実行を案内する。他の課金・接続エラーを同じ理由に決め付けない。画像ツールと SuperGrok の両方に触れる失敗だけを画像権限の不足（`image-entitlement-missing`）に分類する。
+- RPC エラーはコードとデータを JSON 出力へ含める。HTTP 402 と `usage balance exhausted` が一致するときだけ利用枠不足に分類し、回復後の再実行を案内する。他の課金・接続エラーを同じ理由に決め付けない。画像ツールと SuperGrok の両方に触れる RPC エラー、または失敗したツール結果だけを画像権限の不足（`image-entitlement-missing`）に分類する。成功した最終応答の本文では分類せず、生成画像のコピーも止めない。
 - `XAI_API_KEY` がある imagine は、API の従量課金（案内に出す起点は `grok-imagine-image-2.0` の $0.04/img）であることを伝え、`--allow-api-billing` が無いときは Grok を起動しない。キーが無いときは `grok login` のサブスクリプションとして共有の週間利用枠から消費する旨を結果に載せる。同意の既定を警告だけにしないのは、ホストがコマンドを代行したときに画像ごとの請求へ進まないためである。
 
 利用方法は [README.md](README.md)、Codex 入口の実行契約は [codex-runtime.md](plugins/grok/references/codex-runtime.md)、変更時の検証手順は [AGENTS.md](AGENTS.md) を参照する。

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Missing image entitlement is classified from an RPC error or a failed tool result. A successful reply that mentions SuperGrok and image tools no longer discards the saved image.
 - Imagine copies an image only from the current ACP session's `images` directory. An image from another session is left in place.
 - Imagine grants permission only for `image_gen` and `image_edit` (variants `ImageGen` and `ImageEdit`). A tool titled `imagine:` is denied unless it is one of those tools.
 - A tool result that also names an image outside the session directory still saves the session image. Paths outside that directory are not copied.

@@ -178,7 +178,7 @@ async function main() {
             : "Set aspect_ratio only when the user request names one.";
         const prompt = interpolateTemplate(loadPromptTemplate(root, "imagine"), { USER_REQUEST: request, ASPECT_INSTRUCTION: aspectInstruction });
         const result = await runGrokImagine(cwd, { prompt, model: model(options.model), effort: options.effort });
-        const entitlementText = `${result.error?.message ?? ""}\n${result.finalMessage ?? ""}`;
+        const entitlementText = [result.error?.message, result.toolFailureText].filter(Boolean).join("\n");
         const entitlement = isMissingImageEntitlement(entitlementText);
         let diagnostic = errorDiagnostic(result.error);
         if (!diagnostic?.classification && entitlement) {
@@ -200,6 +200,7 @@ async function main() {
         const status = succeeded ? "completed" : "failed";
         const turn = { ...result };
         delete turn.imagePaths;
+        delete turn.toolFailureText;
         if (options.json)
             console.log(JSON.stringify({ ...turn, status, error: diagnostic, billing, images, ...(partitioned.rejected.length ? { ignoredPaths: partitioned.rejected } : {}) }, null, 2));
         else {

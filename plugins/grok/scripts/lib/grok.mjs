@@ -26,7 +26,7 @@ function looksLikeVerificationCommand(command) {
     return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(command);
 }
 import { t } from "./i18n.mjs";
-import { extractGeneratedImagePaths, isImageGenerationTool } from "./imagine.mjs";
+import { extractGeneratedImagePaths, failedToolText, isImageGenerationTool } from "./imagine.mjs";
 import { shortenText } from "./text.mjs";
 /**
  * 明示指定が無いときの既定モデルの候補。先頭から順に、モデル一覧にある最初のものを使う。
@@ -886,6 +886,7 @@ export async function runGrokImagine(cwd, options = {}) {
     const imageToolIds = new Set();
     const imagePaths = [];
     const seen = new Set();
+    const failureTexts = [];
     return withGrok(cwd, async (client) => {
         emitProgress(options.onProgress, "Starting Grok imagine session.", "starting");
         const session = await startSession(client, cwd, { model, defaultModels: DEFAULT_MODEL_CANDIDATES, effort: options.effort, onProgress: options.onProgress, mcpServers: [] });
@@ -894,6 +895,9 @@ export async function runGrokImagine(cwd, options = {}) {
         const turnState = await runPrompt(client, sessionId, prompt, {
             onProgress: options.onProgress,
             onUpdate: (update) => {
+                const failed = failedToolText(update);
+                if (failed)
+                    failureTexts.push(failed);
                 if (!("toolCallId" in update) || typeof update.toolCallId !== "string")
                     return;
                 if (isImageGenerationTool({ title: update.title, rawInput: update.rawInput }))
@@ -924,7 +928,8 @@ export async function runGrokImagine(cwd, options = {}) {
             stderr: cleanGrokStderr(client.stderr),
             touchedFiles: [...turnState.touchedFiles],
             commandExecutions: turnState.commandExecutions,
-            imagePaths: [...imagePaths]
+            imagePaths: [...imagePaths],
+            toolFailureText: failureTexts.join("\n")
         };
     }, { grokBin: availability.bin, env, readOnly: true,
         permissionHandler: createImaginePermissionHandler(options.onProgress, onDenied), onWriteDenied: onDenied });

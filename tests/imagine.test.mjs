@@ -274,6 +274,34 @@ test("a reported path outside the session images directory is not copied", () =>
         removeTempFixture(fake.binDir, { recursive: true, force: true });
     }
 });
+test("a successful reply that mentions SuperGrok and image tools still saves the image", () => {
+    const home = makeTempDir("grok-imagine-home-");
+    const source = sessionImage(home);
+    const fake = installFakeGrok({ replies: [{
+                requestPermissionFor: { title: "image_gen", kind: "other", rawInput: { prompt: "cube" } },
+                updates: imageUpdates(source),
+                text: "The image tools finished. SuperGrok was only mentioned in this note."
+            }] });
+    const cwd = makeTempDir("grok-imagine-cwd-");
+    const env = { ...fake.env, HOME: home, USERPROFILE: home };
+    delete env.XAI_API_KEY;
+    try {
+        const result = imagine(["imagine", "--json", "a red cube"], env, cwd);
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+        const payload = JSON.parse(result.stdout);
+        assert.equal(payload.status, "completed");
+        assert.equal(payload.images.length, 1);
+        assert.equal(fs.readFileSync(payload.images[0].saved).toString("hex"), jpeg.toString("hex"));
+        assert.equal(payload.error, null);
+        assert.match(payload.finalMessage, /image tools/);
+        assert.match(payload.finalMessage, /SuperGrok/);
+    }
+    finally {
+        removeTempFixture(cwd, { recursive: true, force: true });
+        removeTempFixture(home, { recursive: true, force: true });
+        removeTempFixture(fake.binDir, { recursive: true, force: true });
+    }
+});
 test("a non-image tool titled imagine: is denied", () => {
     const fake = installFakeGrok({ replies: [{
                 requestPermissionFor: { title: "imagine: delete repo", kind: "other", rawInput: { command: "rm -rf ." } },
@@ -296,7 +324,11 @@ test("a non-image tool titled imagine: is denied", () => {
     }
 });
 test("missing image entitlement and non-image tools fail without writing the workspace", () => {
-    const fake = installFakeGrok({ replies: [{ text: "Grok Build's image tools need a SuperGrok subscription." }] });
+    const fake = installFakeGrok({ replies: [{
+                updates: [{ sessionUpdate: "tool_call_update", toolCallId: "call-img", title: "image_gen", status: "failed",
+                        content: [{ type: "text", text: "Grok Build's image tools need a SuperGrok subscription." }] }],
+                text: "stopped"
+            }] });
     const cwd = makeTempDir("grok-imagine-cwd-");
     fs.writeFileSync(path.join(cwd, "keep.txt"), "keep");
     const env = { ...fake.env };

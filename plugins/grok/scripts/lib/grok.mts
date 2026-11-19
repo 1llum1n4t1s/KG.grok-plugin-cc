@@ -73,7 +73,7 @@ function looksLikeVerificationCommand(command) {
   return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(command);
 }
 import { t } from "./i18n.mjs";
-import { extractGeneratedImagePaths, isImageGenerationTool } from "./imagine.mjs";
+import { extractGeneratedImagePaths, failedToolText, isImageGenerationTool } from "./imagine.mjs";
 import { shortenText } from "./text.mjs";
 
 
@@ -1040,6 +1040,7 @@ export async function runGrokImagine(cwd, options: GrokOptions = {}) {
   const imageToolIds = new Set<string>();
   const imagePaths: string[] = [];
   const seen = new Set<string>();
+  const failureTexts: string[] = [];
   return withGrok(
     cwd,
     async (client) => {
@@ -1050,6 +1051,8 @@ export async function runGrokImagine(cwd, options: GrokOptions = {}) {
       const turnState = await runPrompt(client, sessionId, prompt, {
         onProgress: options.onProgress,
         onUpdate: (update) => {
+          const failed = failedToolText(update);
+          if (failed) failureTexts.push(failed);
           if (!("toolCallId" in update) || typeof update.toolCallId !== "string") return;
           if (isImageGenerationTool({ title: update.title, rawInput: update.rawInput })) imageToolIds.add(update.toolCallId);
           if (!imageToolIds.has(update.toolCallId)) return;
@@ -1076,7 +1079,8 @@ export async function runGrokImagine(cwd, options: GrokOptions = {}) {
         stderr: cleanGrokStderr(client.stderr),
         touchedFiles: [...turnState.touchedFiles],
         commandExecutions: turnState.commandExecutions,
-        imagePaths: [...imagePaths]
+        imagePaths: [...imagePaths],
+        toolFailureText: failureTexts.join("\n")
       };
     },
     { grokBin: availability.bin, env, readOnly: true,
