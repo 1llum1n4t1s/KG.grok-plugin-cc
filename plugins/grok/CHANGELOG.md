@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.1.13
+
+- Read-only tasks (without `--write`) append inspection rules after the request that match the read-only shell allowlist, so a denied command cancels the turn less often. Review, imagine, and `--write` task prompts are unchanged.
+- Plain-text `task` and imagine report the status, stop reason, error, and denied permission count on stderr when the turn does not complete.
+- Imagine returns the images already saved when a later copy fails, reports the failure in the diagnostic, and no longer leaves a partial output file.
+- The missing-Grok guidance and fixed argument, language tag, and Git errors follow the display language. English text is unchanged.
 - Imagine does not write through a dangling symlink at the output file name. Windows native realpath prefixes are stripped before a missing output directory is resolved, including the check after that directory is created.
 - An explicit `--output` file whose extension differs from the generated image is rejected instead of renaming the bytes.
 - Review diff and `--stat` text escape Unicode bidi and zero-width format characters while leaving ordinary non-ASCII names readable.
