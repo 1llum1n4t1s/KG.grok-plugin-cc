@@ -178,6 +178,35 @@ test("an existing output name is not overwritten", () => {
         removeTempFixture(fake.binDir, { recursive: true, force: true });
     }
 });
+test("a mixed tool result copies the session image and ignores the outside path", () => {
+    const home = makeTempDir("grok-imagine-home-");
+    const source = sessionImage(home);
+    const cwd = makeTempDir("grok-imagine-cwd-");
+    const input = path.join(cwd, "input.jpg");
+    fs.writeFileSync(input, "input-bytes");
+    const fake = installFakeGrok({ replies: [{
+                requestPermissionFor: { title: "image_edit", kind: "other", rawInput: { prompt: "edit", image: input } },
+                updates: imageUpdates(source, JSON.stringify({ input: { path: input }, output: { path: source, filename: "1.jpg", session_folder: "images" } })),
+                text: "edited"
+            }] });
+    const env = { ...fake.env, HOME: home, USERPROFILE: home };
+    delete env.XAI_API_KEY;
+    try {
+        const result = imagine(["imagine", "--json", "edit the photo"], env, cwd);
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+        const payload = JSON.parse(result.stdout);
+        assert.equal(payload.images.length, 1);
+        assert.equal(fs.readFileSync(payload.images[0].saved).toString("hex"), jpeg.toString("hex"));
+        assert.equal(fs.readFileSync(input, "utf8"), "input-bytes");
+        assert.deepEqual(payload.ignoredPaths, [input]);
+        assert.equal(payload.error?.classification, undefined);
+    }
+    finally {
+        removeTempFixture(cwd, { recursive: true, force: true });
+        removeTempFixture(home, { recursive: true, force: true });
+        removeTempFixture(fake.binDir, { recursive: true, force: true });
+    }
+});
 test("a reported path outside the session images directory is not copied", () => {
     const home = makeTempDir("grok-imagine-home-");
     const fake = installFakeGrok({});

@@ -157,19 +157,20 @@ async function main() {
     }
     const turnFailed = turnIncomplete(result);
     const partitioned = turnFailed || entitlement ? { accepted: [], rejected: [] } : partitionSessionImages(result.imagePaths ?? [], process.env);
-    if (partitioned.rejected.length && !diagnostic?.classification) {
+    // セッション外のパスはコピーしないが、同じ結果にあるセッション画像までは捨てない。
+    const images = !turnFailed && !entitlement && partitioned.accepted.length
+      ? copySessionImages(partitioned.accepted, destination, cwd) : [];
+    if (!images.length && partitioned.rejected.length && !diagnostic?.classification) {
       diagnostic = { ...(diagnostic ?? { message: t("imagine.untrusted_path"), rpcCode: null, data: null }), classification: "untrusted-image-path", guidance: t("imagine.untrusted_path") };
     }
-    const images = !turnFailed && !entitlement && !partitioned.rejected.length && partitioned.accepted.length
-      ? copySessionImages(partitioned.accepted, destination, cwd) : [];
-    const succeeded = !turnFailed && !entitlement && !partitioned.rejected.length && images.length > 0;
+    const succeeded = !turnFailed && !entitlement && images.length > 0;
     if (!succeeded && !diagnostic?.guidance && !result.error) {
       diagnostic = { ...(diagnostic ?? { message: t("imagine.no_image"), rpcCode: null, data: null }), guidance: images.length ? undefined : t("imagine.no_image") };
     }
     const status = succeeded ? "completed" : "failed";
     const turn = { ...result };
     delete turn.imagePaths;
-    if (options.json) console.log(JSON.stringify({ ...turn, status, error: diagnostic, billing, images }, null, 2));
+    if (options.json) console.log(JSON.stringify({ ...turn, status, error: diagnostic, billing, images, ...(partitioned.rejected.length ? { ignoredPaths: partitioned.rejected } : {}) }, null, 2));
     else {
       const lines = [billing.notice];
       if (images.length) lines.push(...images.map((image) => t("imagine.saved", { path: image.saved })));
