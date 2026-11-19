@@ -135,7 +135,12 @@ function handle(message) {
     case "session/load":
       state.loads.push(params.sessionId);
       persist();
-      send({ jsonrpc: "2.0", id, result: { configOptions: scenario.configOptions ?? [] } });
+      {
+        const afterModel = state.models.length > 0 && Array.isArray(scenario.configOptionsAfterModel)
+          ? scenario.configOptionsAfterModel
+          : (scenario.configOptions ?? []);
+        send({ jsonrpc: "2.0", id, result: { configOptions: afterModel } });
+      }
       return;
 
     case "session/set_model":

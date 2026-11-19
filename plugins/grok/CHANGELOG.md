@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- After `session/set_model` succeeds, the default reasoning effort is chosen from the switched model's options. `high` is sent only when that model offers it, including when an API-key session starts on a no-reasoning model and then moves to fast. It is not sent when the new model has no `high`.
+
 ## 1.1.12
 
 - Read-only tasks no longer deny `Test-Path` on a path inside the repository when it is written through a symlinked alias of the repository path, such as macOS `/var` for `/private/var`. Paths whose real location is outside the repository are still denied.
