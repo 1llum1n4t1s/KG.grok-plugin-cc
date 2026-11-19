@@ -149,6 +149,14 @@ export function createAllowAllPermissionResponder() {
         allowKinds: ["allow_always", "allow_once"]
     });
 }
+/** Windows の `\\?\` を外す。native realpath の戻りを path.resolve へ渡す前に必要。 */
+function withoutExtendedPrefix(value) {
+    if (value.startsWith("\\\\?\\UNC\\"))
+        return `\\\\${value.slice(8)}`;
+    if (value.startsWith("\\\\?\\"))
+        return value.slice(4);
+    return value;
+}
 /**
  * ワークスペース配下に解決できるパスだけを返す。
  * cwd と対象の両方を実パスで比べる。シンボリックリンクの作業ディレクトリ
@@ -156,6 +164,7 @@ export function createAllowAllPermissionResponder() {
  * 語彙上の相対が外に見えても、実体がワークスペース内なら同じ境界である。
  * 実体が外のパス、ワークスペース外へのシンボリックリンク、切れたリンクは null。
  * 未作成の末尾要素も、存在する祖先の実体がワークスペース内なら許可する。
+ * native realpath の `\\?\` は比較の前に外す。付けたまま未作成の子を足すと Windows で外に見える。
  */
 export function containWorkspacePath(cwd, target) {
     if (typeof target !== "string" || !target || typeof cwd !== "string" || !cwd)
@@ -163,7 +172,7 @@ export function containWorkspacePath(cwd, target) {
     const root = path.resolve(cwd);
     let realRoot;
     try {
-        realRoot = fs.realpathSync.native(root);
+        realRoot = withoutExtendedPrefix(fs.realpathSync.native(root));
     }
     catch {
         return null;
@@ -189,7 +198,7 @@ export function containWorkspacePath(cwd, target) {
     }
     let realExisting;
     try {
-        realExisting = fs.realpathSync.native(existing);
+        realExisting = withoutExtendedPrefix(fs.realpathSync.native(existing));
     }
     catch (error) {
         // dangling link は新規ファイルと区別して拒否する。

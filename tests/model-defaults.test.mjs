@@ -127,6 +127,16 @@ test("an explicit effort still reports when it cannot be applied", async (t) => 
     assert.deepEqual(missing.state.configs, []);
     assert.match(effortMessages(missing.progress).join("\n"), /Reasoning effort low is not offered \(available: high, medium\); leaving it unchanged\./);
 });
+test("a session/load failure after set_model does not abort the turn", async (t) => {
+    const { result, state } = await runTurn(t, {
+        availableModels: WITH_FAST,
+        configOptions: [effortOption(["high", "medium", "low"])],
+        loadError: "session is already active"
+    });
+    assert.equal(result.status, "completed");
+    assert.deepEqual(state.models, [FAST]);
+    assert.deepEqual(state.configs, []);
+});
 test("effort follows the options of the model session/set_model switched to", async (t) => {
     // set_model は成功して空の応答を返す。API キーの推論なしセッションには thought_level が無く、
     // fast へ切り替えたあとの一覧にだけ high がある。

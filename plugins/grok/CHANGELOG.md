@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Imagine does not write through a dangling symlink at the output file name. Windows native realpath prefixes are stripped before a missing output directory is resolved.
+- A failure from `session/load` after a successful model switch no longer aborts the turn. Reasoning effort is skipped instead of using the previous model's options.
 - Missing image entitlement is classified from an RPC error or a failed tool result. A successful reply that mentions SuperGrok and image tools no longer discards the saved image.
 - Imagine copies an image only from the current ACP session's `images` directory. An image from another session is left in place.
 - Imagine grants permission only for `image_gen` and `image_edit` (variants `ImageGen` and `ImageEdit`). A tool titled `imagine:` is denied unless it is one of those tools.

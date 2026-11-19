@@ -133,6 +133,10 @@ function handle(message) {
     // LoadSessionResponse はモデル一覧を返さない。ACP v1 に合わせて
     // modes と configOptions だけを返す。
     case "session/load":
+      if (scenario.loadError) {
+        send({ jsonrpc: "2.0", id, error: { code: -32602, message: scenario.loadError } });
+        return;
+      }
       state.loads.push(params.sessionId);
       persist();
       {

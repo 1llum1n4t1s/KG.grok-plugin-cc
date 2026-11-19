@@ -403,12 +403,47 @@ test("imagine copies the image when the working directory is a symlink to the wo
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const saved = JSON.parse(result.stdout).images[0].saved;
     assert.equal(fs.readFileSync(saved).toString("hex"), jpeg.toString("hex"));
-    assert.equal(path.relative(fs.realpathSync(real), fs.realpathSync(saved)).startsWith(".."), false);
+    const strip = (value: string) => value.startsWith("\\\\?\\") ? value.slice(4) : value;
+    const relative = path.relative(strip(fs.realpathSync.native(real)), strip(fs.realpathSync.native(saved)));
+    assert.equal(relative.startsWith("..") || path.isAbsolute(relative), false);
     assert.equal(fs.existsSync(path.join(real, "grok-imagine", "1.jpg")), true);
   } finally {
     fs.unlinkSync(cwd);
     removeTempFixture(real, { recursive: true, force: true });
     removeTempFixture(linkParent, { recursive: true, force: true });
+    removeTempFixture(home, { recursive: true, force: true });
+    removeTempFixture(fake.binDir, { recursive: true, force: true });
+  }
+});
+
+test("a dangling output symlink is not followed", () => {
+  const home = makeTempDir("grok-imagine-home-");
+  const source = sessionImage(home);
+  const fake = installFakeGrok({ replies: [{
+    requestPermissionFor: { title: "image_gen", kind: "other", rawInput: { prompt: "cube" } },
+    updates: imageUpdates(source),
+    text: "saved"
+  }] });
+  const cwd = makeTempDir("grok-imagine-cwd-");
+  const outside = makeTempDir("grok-imagine-outside-");
+  const output = path.join(cwd, "grok-imagine");
+  fs.mkdirSync(output);
+  const dangling = path.join(output, "1.jpg");
+  fs.symlinkSync(path.join(outside, "planted.jpg"), dangling);
+  const env = { ...fake.env, HOME: home, USERPROFILE: home };
+  delete env.XAI_API_KEY;
+  try {
+    const result = imagine(["imagine", "--json", "cube"], env, cwd);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const saved = JSON.parse(result.stdout).images[0].saved;
+    assert.notEqual(path.resolve(saved), path.resolve(dangling));
+    assert.equal(fs.existsSync(path.join(outside, "planted.jpg")), false);
+    assert.equal(fs.lstatSync(dangling).isSymbolicLink(), true);
+    assert.equal(fs.readFileSync(saved).toString("hex"), jpeg.toString("hex"));
+  } finally {
+    fs.unlinkSync(dangling);
+    removeTempFixture(cwd, { recursive: true, force: true });
+    removeTempFixture(outside, { recursive: true, force: true });
     removeTempFixture(home, { recursive: true, force: true });
     removeTempFixture(fake.binDir, { recursive: true, force: true });
   }

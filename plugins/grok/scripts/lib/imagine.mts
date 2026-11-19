@@ -217,12 +217,38 @@ export function resolveImagineOutput(cwd: string, requested?: string): ImagineOu
   return { directory, fileName };
 }
 
+/** 存在する通常ファイルとシンボリックリンクを占有とみなす。切れたリンクは existsSync では見えない。 */
+function pathOccupancy(target: string): "missing" | "symlink" | "present" {
+  try {
+    return fs.lstatSync(target).isSymbolicLink() ? "symlink" : "present";
+  } catch (error) {
+    if (error?.code === "ENOENT") return "missing";
+    throw error;
+  }
+}
+
 function uniquePath(directory: string, fileName: string): string {
   const ext = path.extname(fileName);
   const stem = path.basename(fileName, ext);
   let candidate = path.join(directory, fileName);
-  for (let suffix = 2; fs.existsSync(candidate); suffix += 1) candidate = path.join(directory, `${stem}-${suffix}${ext}`);
+  for (let suffix = 2; pathOccupancy(candidate) !== "missing"; suffix += 1) candidate = path.join(directory, `${stem}-${suffix}${ext}`);
   return candidate;
+}
+
+/** 出力先がシンボリックリンクなら、リンク先へ書き込まずに拒否する。 */
+function writeNewFile(source: string, target: string) {
+  const occupancy = pathOccupancy(target);
+  if (occupancy === "symlink") throw new Error(t("imagine.output_escapes", { path: target }));
+  if (occupancy === "present") throw new Error(t("imagine.output_exists", { path: target }));
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0);
+  let fd: number;
+  try { fd = fs.openSync(target, flags); }
+  catch (error) {
+    if (error?.code === "ELOOP" || error?.code === "EEXIST") throw new Error(t("imagine.output_escapes", { path: target }), { cause: error });
+    throw new Error(t("imagine.copy_failed", { detail: error?.message ?? String(error) }), { cause: error });
+  }
+  try { fs.writeSync(fd, fs.readFileSync(source)); }
+  finally { fs.closeSync(fd); }
 }
 
 /**
@@ -246,12 +272,12 @@ export function copySessionImages(accepted: string[], destination: ImagineOutput
   for (let index = 0; index < accepted.length; index += 1) {
     const source = fs.realpathSync(accepted[index]);
     const base = destination.fileName ?? path.basename(source);
-    const target = destination.fileName && index === 0 ? path.join(directory, destination.fileName) : uniquePath(directory, base);
-    if (destination.fileName && index === 0 && fs.existsSync(target)) throw new Error(t("imagine.output_exists", { path: target }));
+    const explicit = Boolean(destination.fileName) && index === 0;
+    const target = explicit ? path.join(directory, destination.fileName) : uniquePath(directory, base);
+    if (explicit && pathOccupancy(target) === "present") throw new Error(t("imagine.output_exists", { path: target }));
     const size = fs.statSync(source).size;
     if (size <= 0 || size > MAX_IMAGE_BYTES) throw new Error(t("imagine.copy_failed", { detail: `${source} (${size} bytes)` }));
-    try { fs.copyFileSync(source, target); }
-    catch (error) { throw new Error(t("imagine.copy_failed", { detail: error?.message ?? String(error) }), { cause: error }); }
+    writeNewFile(source, target);
     saved.push({ source, saved: target });
   }
   return saved;

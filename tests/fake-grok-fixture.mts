@@ -28,6 +28,8 @@ export interface FakeGrokScenario {
   configOptions?: Record<string, unknown>[];
   /** set_config_option の応答に載せる切替え後の configOptions。キーは "<configId>=<value>"。 */
   configOptionsAfter?: Record<string, Record<string, unknown>[]>;
+  /** session/load をこのメッセージで失敗させる。推論深度の取得失敗がターンを止めないことの確認用。 */
+  loadError?: string;
   /** session/set_model 成功後の session/load が返す configOptions。未指定なら session/new と同じ。 */
   configOptionsAfterModel?: Record<string, unknown>[];
   sessions?: Record<string, unknown>[];
@@ -153,6 +155,10 @@ function handle(message) {
     // LoadSessionResponse はモデル一覧を返さない。ACP v1 に合わせて
     // modes と configOptions だけを返す。
     case "session/load":
+      if (scenario.loadError) {
+        send({ jsonrpc: "2.0", id, error: { code: -32602, message: scenario.loadError } });
+        return;
+      }
       state.loads.push(params.sessionId);
       persist();
       {

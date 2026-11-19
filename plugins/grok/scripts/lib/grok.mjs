@@ -379,10 +379,9 @@ async function loadConfigOptionsAfterModelSwitch(client, response, options, cwd)
         });
         return readConfigOptions(loaded) ?? [];
     }
-    catch (error) {
-        if (error?.rpcCode !== RPC_METHOD_NOT_FOUND) {
-            throw error;
-        }
+    catch {
+        // session/load は復元用で、進行中のセッションでは失敗し得る。
+        // 切替前の一覧へ戻さず、推論深度だけを省く。ターン自体は止めない。
         return [];
     }
 }
