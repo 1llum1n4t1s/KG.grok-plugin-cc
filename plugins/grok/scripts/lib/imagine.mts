@@ -260,12 +260,8 @@ export function copySessionImages(accepted: string[], destination: ImagineOutput
   if (!directory) throw new Error(t("imagine.output_escapes", { path: destination.directory }));
   try { fs.mkdirSync(directory, { recursive: true }); }
   catch (error) { throw new Error(t("imagine.output_unusable", { path: directory }), { cause: error }); }
-  const created = fs.realpathSync.native(directory);
-  const root = fs.realpathSync.native(path.resolve(cwd));
-  const relative = path.relative(root, created);
-  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error(t("imagine.output_escapes", { path: destination.directory }));
-  }
+  // 作成後も containWorkspacePath で確かめる。native realpath の \\?\ をここで直接比べない。
+  if (!containWorkspacePath(cwd, directory)) throw new Error(t("imagine.output_escapes", { path: destination.directory }));
   const listed = fs.lstatSync(directory);
   if (!listed.isDirectory() || listed.isSymbolicLink()) throw new Error(t("imagine.output_unusable", { path: directory }));
   const saved: SavedImage[] = [];

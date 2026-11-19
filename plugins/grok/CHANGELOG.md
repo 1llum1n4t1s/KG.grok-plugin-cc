@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Imagine does not write through a dangling symlink at the output file name. Windows native realpath prefixes are stripped before a missing output directory is resolved.
+- Imagine does not write through a dangling symlink at the output file name. Windows native realpath prefixes are stripped before a missing output directory is resolved, including the check after that directory is created.
 - An explicit `--output` file whose extension differs from the generated image is rejected instead of renaming the bytes.
 - Review diff and `--stat` text escape Unicode bidi and zero-width format characters while leaving ordinary non-ASCII names readable.
 - A failure from `session/load` after a successful model switch no longer aborts the turn. Reasoning effort is skipped instead of using the previous model's options.
