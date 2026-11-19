@@ -1,5 +1,5 @@
 {
-  "cli.usage": "Verwendung: grok-companion.mjs <setup|review|adversarial-review|audit|task> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nDie Review-Bereiche auto und working-tree erfordern Windows und schlagen fehl, wenn kein vollständiger sicherer Snapshot erfasst werden kann.\nVerwenden Sie unter macOS/Linux --scope branch oder --base <ref> für committete Änderungen; nicht committete Änderungen sind vom Vergleichs-Diff ausgeschlossen, umgebende Dateien können aber weiterhin aus dem Arbeitsbaum gelesen werden. Verwenden Sie audit für das gesamte Repository.\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nJeder Befehl startet eine neue Grok-Sitzung im Vordergrund. Zum Fortsetzen verwenden Sie den resume-Befehl von Grok.",
+  "cli.usage": "Verwendung: grok-companion.mjs <setup|review|adversarial-review|audit|task|imagine> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nDie Review-Bereiche auto und working-tree erfordern Windows und schlagen fehl, wenn kein vollständiger sicherer Snapshot erfasst werden kann.\nVerwenden Sie unter macOS/Linux --scope branch oder --base <ref> für committete Änderungen; nicht committete Änderungen sind vom Vergleichs-Diff ausgeschlossen, umgebende Dateien können aber weiterhin aus dem Arbeitsbaum gelesen werden. Verwenden Sie audit für das gesamte Repository.\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nImagine: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --output <path> --aspect <ratio> --allow-api-billing --json\nJeder Befehl startet eine neue Grok-Sitzung im Vordergrund. Zum Fortsetzen verwenden Sie den resume-Befehl von Grok.",
   "cli.disabled": "{name} wird nicht mehr unterstützt. Verwenden Sie die eigenen Befehle von Grok, um Sitzungen fortzusetzen oder zu verwalten.",
   "cli.unknown_command": "Unbekannter Befehl: {command}",
   "cli.unknown_setup_argument": "Unbekanntes setup-Argument: {argument}",
@@ -37,5 +37,18 @@
   "render.recommendation": "Empfehlung: {value}",
   "render.permission_denials": "Verweigerte Berechtigungen:",
   "render.next_steps": "Nächste Schritte:",
-  "render.reasoning": "Begründung:"
+  "render.reasoning": "Begründung:",
+  "diag.image_entitlement": "Die Bildwerkzeuge von Grok Build sind für diese Anmeldung nicht verfügbar. Das Konto hat gemeldet, dass diese Werkzeuge ein SuperGrok-Abonnement benötigen. Bei The X Subscription nutzt Imagine das gemeinsame wöchentliche Nutzungsguthaben; mit einem xAI-API-Schlüssel führen Sie den Befehl mit --allow-api-billing nur erneut aus, wenn Sie die Abrechnung pro Bild akzeptieren.",
+  "imagine.api_billing_required": "Die Bildgenerierung mit XAI_API_KEY wird zu den xAI-API-Preisen abgerechnet ({model} ist ab {price} gelistet), nicht aus dem Abonnement-Guthaben. Führen Sie den Befehl mit --allow-api-billing erneut aus, um fortzufahren.",
+  "imagine.api_billing_notice": "API-Schlüssel-Anmeldung: Die Bildgenerierung wird zu den xAI-API-Preisen abgerechnet ({model} ist ab {price} gelistet), nicht aus dem Abonnement-Guthaben.",
+  "imagine.subscription_pool": "Abonnement-Anmeldung: Die Bildgenerierung wird aus dem gemeinsamen wöchentlichen Nutzungsguthaben des Kontos gezogen, nicht pro Bild über die API abgerechnet.",
+  "imagine.saved": "Gespeichert: {path}",
+  "imagine.no_image": "Grok hat kein generiertes Bild aus dem Bildverzeichnis der Sitzung zurückgegeben.",
+  "imagine.untrusted_path": "Das Kopieren eines gemeldeten Bildpfads außerhalb des Bildverzeichnisses der Grok-Sitzung wurde verweigert.",
+  "imagine.copy_failed": "Das generierte Bild konnte nicht kopiert werden: {detail}.",
+  "imagine.output_escapes": "Der Ausgabepfad muss im Workspace bleiben: {path}.",
+  "imagine.output_exists": "Die Ausgabedatei existiert bereits: {path}.",
+  "imagine.output_unusable": "Der Ausgabepfad ist kein nutzbares Verzeichnis: {path}.",
+  "imagine.bad_aspect": "Nicht unterstütztes Seitenverhältnis: {ratio}. Verwenden Sie eines von {ratios}.",
+  "imagine.no_repo_write": "imagine bearbeitet das Repository nicht. Es kopiert generierte Bilder nur in das Ausgabeverzeichnis."
 }

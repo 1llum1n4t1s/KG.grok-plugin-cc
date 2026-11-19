@@ -33,8 +33,8 @@ test("all dictionaries share the English key set and the same placeholders", () 
 });
 
 test("keys referenced by the code exist in the dictionary and no dictionary key is unused", () => {
-  const sources = ["grok-companion.mts", "lib/render.mts", "lib/grok.mts"].map(file => fs.readFileSync(path.join(scriptsDirectory, file), "utf8")).join("\n");
-  const used = new Set([...sources.matchAll(/"((?:cli|setup|diag|review|render)\.[a-z_.]+)"/g)].map(match => match[1]));
+  const sources = ["grok-companion.mts", "lib/render.mts", "lib/grok.mts", "lib/imagine.mts"].map(file => fs.readFileSync(path.join(scriptsDirectory, file), "utf8")).join("\n");
+  const used = new Set([...sources.matchAll(/"((?:cli|setup|diag|review|render|imagine)\.[a-z_.]+)"/g)].map(match => match[1]));
   const keys = new Set(Object.keys(dictionary("en")));
   for (const key of used) assert.ok(keys.has(key), `code references missing key ${key}`);
   for (const key of keys) assert.ok(used.has(key), `dictionary key ${key} is not referenced by the code`);
@@ -99,7 +99,7 @@ test("the companion help follows the environment language and falls back to Engl
   });
   const japanese = help({ GROK_PLUGIN_LANGUAGE: "ja" });
   assert.equal(japanese.status, 0, japanese.stderr);
-  assert.match(japanese.stdout, /^使い方: grok-companion\.mjs <setup\|review\|adversarial-review\|audit\|task>/);
+  assert.match(japanese.stdout, /^使い方: grok-companion\.mjs <setup\|review\|adversarial-review\|audit\|task\|imagine>/);
   assert.match(help({ LC_ALL: "fr_FR.UTF-8" }).stdout, /^Utilisation: grok-companion\.mjs/);
   assert.match(help({ GROK_PLUGIN_LANGUAGE: "it" }).stdout, /^Usage: grok-companion\.mjs/);
 });

@@ -1,4 +1,4 @@
-import type { AcpClientOptions, AcpNotification, SessionUpdateNotification, StopReason } from "./acp-protocol.js";
+import type { AcpClientOptions, AcpNotification, SessionUpdate, SessionUpdateNotification, StopReason } from "./acp-protocol.js";
 type ProgressUpdate = { message: string; phase: string | null; sessionId?: string | null; grokSessionId?: string | null; logTitle?: string | null; logBody?: string | null };
 type ProgressReporter = (update: string | ProgressUpdate) => void;
 interface GrokOptions {
@@ -15,6 +15,7 @@ interface GrokOptions {
   model?: string;
   defaultModels?: string[];
   onProgress?: ProgressReporter;
+  onUpdate?: (update: SessionUpdate) => void;
   permissionHandler?: AcpClientOptions["permissionHandler"];
   onWriteDenied?: (reason: string) => void;
   outputSchema?: unknown;
@@ -72,6 +73,7 @@ function looksLikeVerificationCommand(command) {
   return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(command);
 }
 import { t } from "./i18n.mjs";
+import { extractGeneratedImagePaths, isImageGenerationTool } from "./imagine.mjs";
 import { shortenText } from "./text.mjs";
 
 
@@ -197,6 +199,29 @@ function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => 
 }
 
 /**
+ * Imagine 用の権限応答器。画像生成・編集の 1 回許可だけを通し、
+ * リポジトリの編集、シェル、動画生成は拒否する。
+ */
+function createImaginePermissionHandler(onProgress, onDenied = (_reason: string) => {}): NonNullable<AcpClientOptions["permissionHandler"]> {
+  const allow = createReadOnlyPermissionResponder();
+  return (params) => {
+    const tool = params?.toolCall;
+    const permissionOptions = Array.isArray(params?.options) ? params.options : [];
+    if (isImageGenerationTool(tool) && permissionOptions.some((option) => option?.kind === "allow_once")) return allow(params);
+    const reason = isImageGenerationTool(tool)
+      ? "no one-time permission option is available for image generation"
+      : "imagine only allows the image generation tool";
+    const title = tool?.title ?? "unknown tool";
+    onDenied(`${reason}: ${shortenText(title, 60)}`);
+    emitProgress(onProgress, `Denied during imagine (${reason}): ${shortenText(title, 60)}`, "running");
+    const reject = permissionOptions.find((option) => ["reject_once", "reject_always"].includes(option?.kind));
+    return reject
+      ? { outcome: { outcome: "selected", optionId: reject.optionId } }
+      : { outcome: { outcome: "cancelled" } };
+  };
+}
+
+/**
  * ターン中に流れてくる session/update を集約する。
  *
  * Grok 版の TurnCaptureState に相当するが、完了判定を stopReason に委ねられる
@@ -247,6 +272,7 @@ function createTurnCollector(sessionId: string, options: GrokOptions = {}) {
     if (!update) {
       return;
     }
+    options.onUpdate?.(update);
 
     switch (update.sessionUpdate) {
       case "agent_message_chunk": {
@@ -551,7 +577,7 @@ async function startSession(client, cwd, options: GrokOptions = {}) {
  * プロンプトを 1 ターン実行し、流れてきた更新を集約して返す。
  */
 async function runPrompt(client, sessionId, promptText, options: GrokOptions = {}) {
-  const collector = createTurnCollector(sessionId, { onProgress: options.onProgress });
+  const collector = createTurnCollector(sessionId, { onProgress: options.onProgress, onUpdate: options.onUpdate });
   client.setNotificationHandler(collector.handle);
 
   let stopReason = null;
@@ -997,6 +1023,64 @@ export async function runGrokTurn(cwd, options: GrokOptions = {}) {
     },
     { grokBin: availability.bin, env, readOnly: Boolean(options.readOnly),
       ...(options.readOnly ? { permissionHandler: createReviewPermissionHandler(cwd, options.onProgress, onDenied), onWriteDenied: onDenied } : {}) }
+  );
+}
+
+/**
+ * 画像生成を 1 ターン実行する。task と同じ前景セッションで、書き込み許可は画像ツールだけに限る。
+ * 保存先への複製は呼び出し側が imagePaths を見て行う。
+ */
+export async function runGrokImagine(cwd, options: GrokOptions = {}) {
+  const env = options.env ?? process.env;
+  const availability = requireGrokAvailability(cwd, env);
+  const prompt = options.prompt?.trim() || "";
+  if (!prompt) throw new Error(t("cli.prompt_required"));
+  const model = resolveRunModel(options, env);
+  const { permissionDenials, onDenied } = createPermissionDenialLog();
+  const imageToolIds = new Set<string>();
+  const imagePaths: string[] = [];
+  const seen = new Set<string>();
+  return withGrok(
+    cwd,
+    async (client) => {
+      emitProgress(options.onProgress, "Starting Grok imagine session.", "starting");
+      const session = await startSession(client, cwd, { model, defaultModels: DEFAULT_MODEL_CANDIDATES, effort: options.effort, onProgress: options.onProgress, mcpServers: [] });
+      const sessionId = session.sessionId;
+      emitProgress(options.onProgress, `Session ready (${sessionId}).`, "starting", { sessionId });
+      const turnState = await runPrompt(client, sessionId, prompt, {
+        onProgress: options.onProgress,
+        onUpdate: (update) => {
+          if (!("toolCallId" in update) || typeof update.toolCallId !== "string") return;
+          if (isImageGenerationTool({ title: update.title, rawInput: update.rawInput })) imageToolIds.add(update.toolCallId);
+          if (!imageToolIds.has(update.toolCallId)) return;
+          for (const found of extractGeneratedImagePaths(update)) {
+            if (seen.has(found)) continue;
+            seen.add(found);
+            imagePaths.push(found);
+          }
+        }
+      });
+      emitLogEvent(options.onProgress, { phase: "completed", logTitle: turnState.title ?? null, logBody: null });
+      return {
+        status: buildResultStatus(turnState),
+        sessionId,
+        model: reportedModel(session, model),
+        finalMessage: turnState.agentMessage,
+        permissionDenials,
+        reasoningSummary: turnState.reasoning,
+        stopReason: turnState.stopReason,
+        usage: turnState.usage,
+        error: turnState.error,
+        turnStopUnconfirmed: turnState.turnStopUnconfirmed,
+        promptNotSent: turnState.promptNotSent,
+        stderr: cleanGrokStderr(client.stderr),
+        touchedFiles: [...turnState.touchedFiles],
+        commandExecutions: turnState.commandExecutions,
+        imagePaths: [...imagePaths]
+      };
+    },
+    { grokBin: availability.bin, env, readOnly: true,
+      permissionHandler: createImaginePermissionHandler(options.onProgress, onDenied), onWriteDenied: onDenied }
   );
 }
 

@@ -232,6 +232,8 @@ export type SessionUpdate =
       status?: string;
       rawInput?: unknown;
       locations?: Array<{ path: string; line?: number }>;
+      /** 完了済みツール結果の本文。画像生成は path を text で返す。 */
+      content?: unknown;
     }
   | {
       sessionUpdate: "tool_call_update";
@@ -242,6 +244,8 @@ export type SessionUpdate =
       rawInput?: unknown;
       rawOutput?: unknown;
       locations?: Array<{ path: string; line?: number }>;
+      /** 完了済みツール結果の本文。画像生成は path を text で返す。 */
+      content?: unknown;
     }
   | { sessionUpdate: "plan"; entries: Array<{ content: string; priority?: string; status?: string }> }
   | { sessionUpdate: "available_commands_update"; availableCommands: AvailableCommand[] }

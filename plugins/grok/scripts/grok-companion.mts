@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, resolveReviewTarget } from "./lib/git.mjs";
-import { getGrokAuthStatus, parseStructuredOutput, readOutputSchema, runGrokReview, runGrokTurn } from "./lib/grok.mjs";
+import { getGrokAuthStatus, parseStructuredOutput, readOutputSchema, runGrokImagine, runGrokReview, runGrokTurn } from "./lib/grok.mjs";
+import { assertImagineAspect, copySessionImages, imagineBilling, isMissingImageEntitlement, partitionSessionImages, resolveImagineOutput } from "./lib/imagine.mjs";
 import { t } from "./lib/i18n.mjs";
 import { normalizeLanguageTag } from "./lib/language.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
@@ -122,6 +123,61 @@ async function main() {
     console.log(options.json ? JSON.stringify({ ...result, error: diagnostic }, null, 2) : result.finalMessage || result.error?.message || result.stderr || t("cli.no_output"));
     if (!options.json) reportTurnDiagnostics(diagnostic, result);
     if (turnIncomplete(result)) process.exitCode = 1;
+    return;
+  }
+  if (command === "imagine") {
+    const { options, positionals } = parse(argv, ["model", "effort", "cwd", "prompt-file", "output", "aspect"], ["json", "write", "allow-api-billing", "resume", "resume-last", "fresh", "stop-gate", "background", "wait"]);
+    for (const flag of ["resume", "resume-last", "stop-gate", "background"]) if (options[flag]) disabled(`--${flag}`);
+    if (options.write) throw new Error(t("imagine.no_repo_write"));
+    const cwd = path.resolve(options.cwd ?? process.cwd());
+    if (options.effort && !["low", "medium", "high"].includes(options.effort)) throw new Error(t("cli.unsupported_effort"));
+    if (options.aspect) assertImagineAspect(options.aspect);
+    const request = options["prompt-file"] ? fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8") : positionals.length ? positionals.join(" ") : await readStdinIfPiped();
+    if (!request.trim()) throw new Error(t("cli.prompt_required"));
+    const destination = resolveImagineOutput(cwd, options.output);
+    const billing = imagineBilling(process.env, Boolean(options["allow-api-billing"]));
+    if (!billing.allowed) {
+      const refusal = { status: "failed", billing, images: [], error: { message: billing.notice, rpcCode: null, data: null, classification: "api-billing-required", guidance: billing.notice } };
+      if (options.json) console.log(JSON.stringify(refusal, null, 2));
+      else console.error(billing.notice);
+      process.exitCode = 1;
+      return;
+    }
+    const aspectInstruction = options.aspect
+      ? `Set aspect_ratio to "${options.aspect}" on the image tool.`
+      : "Set aspect_ratio only when the user request names one.";
+    const prompt = interpolateTemplate(loadPromptTemplate(root, "imagine"), { USER_REQUEST: request, ASPECT_INSTRUCTION: aspectInstruction });
+    const result = await runGrokImagine(cwd, { prompt, model: model(options.model), effort: options.effort });
+    const entitlementText = `${result.error?.message ?? ""}\n${result.finalMessage ?? ""}`;
+    const entitlement = isMissingImageEntitlement(entitlementText);
+    let diagnostic = errorDiagnostic(result.error);
+    if (!diagnostic?.classification && entitlement) {
+      diagnostic = { message: result.error?.message ?? result.finalMessage ?? t("diag.image_entitlement"), rpcCode: result.error?.rpcCode ?? null, data: diagnostic?.data ?? null,
+        classification: "image-entitlement-missing", guidance: t("diag.image_entitlement") };
+    }
+    const turnFailed = turnIncomplete(result);
+    const partitioned = turnFailed || entitlement ? { accepted: [], rejected: [] } : partitionSessionImages(result.imagePaths ?? [], process.env);
+    if (partitioned.rejected.length && !diagnostic?.classification) {
+      diagnostic = { ...(diagnostic ?? { message: t("imagine.untrusted_path"), rpcCode: null, data: null }), classification: "untrusted-image-path", guidance: t("imagine.untrusted_path") };
+    }
+    const images = !turnFailed && !entitlement && !partitioned.rejected.length && partitioned.accepted.length
+      ? copySessionImages(partitioned.accepted, destination, cwd) : [];
+    const succeeded = !turnFailed && !entitlement && !partitioned.rejected.length && images.length > 0;
+    if (!succeeded && !diagnostic?.guidance && !result.error) {
+      diagnostic = { ...(diagnostic ?? { message: t("imagine.no_image"), rpcCode: null, data: null }), guidance: images.length ? undefined : t("imagine.no_image") };
+    }
+    const status = succeeded ? "completed" : "failed";
+    const turn = { ...result };
+    delete turn.imagePaths;
+    if (options.json) console.log(JSON.stringify({ ...turn, status, error: diagnostic, billing, images }, null, 2));
+    else {
+      const lines = [billing.notice];
+      if (images.length) lines.push(...images.map((image) => t("imagine.saved", { path: image.saved })));
+      else lines.push(result.finalMessage || result.error?.message || t("imagine.no_image"));
+      console.log(lines.join("\n"));
+      reportTurnDiagnostics(diagnostic, result);
+    }
+    if (!succeeded) process.exitCode = 1;
     return;
   }
   throw new Error(`${t("cli.unknown_command", { command })}\n${usage()}`);

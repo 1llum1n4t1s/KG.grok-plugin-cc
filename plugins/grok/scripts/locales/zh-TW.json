@@ -1,5 +1,5 @@
 {
-  "cli.usage": "用法: grok-companion.mjs <setup|review|adversarial-review|audit|task> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\n審查範圍 auto 與 working-tree 需要 Windows；若無法完整收集安全的快照，將會失敗。\n在 macOS/Linux 上，針對已提交的變更請使用 --scope branch 或 --base <ref>；未提交的變更不包含在比較差異中，但周邊檔案仍可能從工作樹讀取。審查整個儲存庫請使用 audit。\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\n每個指令都會在前景執行一個新的 Grok 工作階段。如需繼續，請使用 Grok 本身的 resume 指令。",
+  "cli.usage": "用法: grok-companion.mjs <setup|review|adversarial-review|audit|task|imagine> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\n審查範圍 auto 與 working-tree 需要 Windows；若無法完整收集安全的快照，將會失敗。\n在 macOS/Linux 上，針對已提交的變更請使用 --scope branch 或 --base <ref>；未提交的變更不包含在比較差異中，但周邊檔案仍可能從工作樹讀取。審查整個儲存庫請使用 audit。\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nImagine: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --output <path> --aspect <ratio> --allow-api-billing --json\n每個指令都會在前景執行一個新的 Grok 工作階段。如需繼續，請使用 Grok 本身的 resume 指令。",
   "cli.disabled": "{name} 已不再支援。請使用 Grok 本身的指令來繼續或管理工作階段。",
   "cli.unknown_command": "未知的指令：{command}",
   "cli.unknown_setup_argument": "未知的 setup 引數：{argument}",
@@ -37,5 +37,18 @@
   "render.recommendation": "建議：{value}",
   "render.permission_denials": "權限拒絕：",
   "render.next_steps": "後續步驟：",
-  "render.reasoning": "推理："
+  "render.reasoning": "推理：",
+  "diag.image_entitlement": "此登入無法使用 Grok Build 的影像工具。帳戶回報這些工具需要 SuperGrok 訂閱。在 The X Subscription 中，Imagine 使用共享的每週用量額度；若要使用 xAI API 金鑰並接受按張計費，請加上 --allow-api-billing 後再執行。",
+  "imagine.api_billing_required": "使用 XAI_API_KEY 產生影像會依 xAI API 費率計費（{model} 標價自 {price} 起），而不是使用訂閱用量額度。若要繼續，請加上 --allow-api-billing 後重新執行。",
+  "imagine.api_billing_notice": "API 金鑰登入：影像產生依 xAI API 費率計費（{model} 標價自 {price} 起），而不是使用訂閱用量額度。",
+  "imagine.subscription_pool": "訂閱登入：影像產生會使用帳戶的共享每週用量額度，而不是按張收取 API 費用。",
+  "imagine.saved": "已儲存：{path}",
+  "imagine.no_image": "Grok 沒有從工作階段的影像目錄回傳產生的影像。",
+  "imagine.untrusted_path": "已拒絕複製 Grok 工作階段影像目錄之外的回報路徑。",
+  "imagine.copy_failed": "無法複製產生的影像：{detail}。",
+  "imagine.output_escapes": "輸出路徑必須位於工作區內：{path}。",
+  "imagine.output_exists": "輸出檔案已存在：{path}。",
+  "imagine.output_unusable": "輸出路徑不是可用的目錄：{path}。",
+  "imagine.bad_aspect": "不支援的長寬比：{ratio}。請使用下列其中之一：{ratios}。",
+  "imagine.no_repo_write": "imagine 不會編輯儲存庫。它只會把產生的影像複製到輸出目錄。"
 }
