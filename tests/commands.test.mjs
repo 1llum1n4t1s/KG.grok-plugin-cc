@@ -14,7 +14,7 @@ test("conversation language precedes focus in both host entrypoints", () => {
         assert.match(claude, /prepend `--language <BCP 47 tag>`/);
         assert.match(claude, /before.*focus/i);
         assert.doesNotMatch(claude, /append `--language/);
-        assert.match(read(`skills/source-command-${name}/SKILL.md`), /before the focus text/);
+        assert.match(read(`codex-skills/source-command-${name}/SKILL.md`), /before the focus text/);
         assert.match(claude, /In Bash[\s\S]*In PowerShell/);
         assert.match(claude, /do not use `eval`/);
         assert.doesNotMatch(claude, /grok-companion\.mjs[^\r\n]*"\$ARGUMENTS"/);
@@ -58,7 +58,7 @@ test("both hosts permit Bun and Node on Windows macOS and Linux", () => {
         assert.match(command, /`bun --no-env-file`/i);
         assert.match(command, /Windows, macOS, and Linux/i);
         assert.match(command, /Node\.js 22 or later/i);
-        assert.match(read(`skills/source-command-${name}/SKILL.md`), /shared runtime contract/i);
+        assert.match(read(`codex-skills/source-command-${name}/SKILL.md`), /shared runtime contract/i);
     }
     for (const name of ["references/codex-runtime.md", "claude-skills/grok-cli-runtime/SKILL.md"]) {
         const runtime = read(name);
@@ -68,7 +68,8 @@ test("both hosts permit Bun and Node on Windows macOS and Linux", () => {
 });
 test("Codex exposes the same workflows as native skills", () => {
     const nativeSkillNames = PUBLIC_WORKFLOWS.map((name) => `source-command-${name}`);
-    assert.deepEqual(listSkills("skills"), nativeSkillNames);
+    assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, "skills")), false);
+    assert.deepEqual(listSkills("codex-skills"), nativeSkillNames);
     const runtime = read("references/codex-runtime.md");
     assert.match(runtime, /once in the foreground with a new direct ACP connection/i);
     assert.match(runtime, /Do not detach or poll a separate job/i);
@@ -76,15 +77,15 @@ test("Codex exposes the same workflows as native skills", () => {
     assert.match(runtime, /reviews return reviewText and tasks return finalMessage/i);
     assert.match(runtime, /does not resume tasks or retrieve stored jobs/i);
     for (const name of nativeSkillNames) {
-        const source = read(`skills/${name}/SKILL.md`);
+        const source = read(`codex-skills/${name}/SKILL.md`);
         assert.match(source, /^---\r?\n/, `${name} is missing skill frontmatter`);
         assert.match(source, new RegExp(`^name: ${name}$`, "m"), `${name} has the wrong skill name`);
         assert.match(source, /^description: .+$/m, `${name} is missing a skill description`);
-        // Claude Code always scans the default skills/ directory in addition to the manifest's
-        // ./claude-skills/, so these Codex entry points also reach Claude Code. Keeping them out of
-        // model invocation stops their descriptions from being injected into every Claude session
-        // and keeps Grok explicit-only there, matching the commands/ entry points.
-        assert.match(source, /^disable-model-invocation: true$/m, `${name} must opt out of model invocation so Claude Code does not preload it`);
+        // Claude Code scans a plugin's default skills/ directory in addition to the manifest
+        // path, and ignores disable-model-invocation on plugin skills
+        // (anthropics/claude-code#22345). These files stay out of that scan. Codex still
+        // honors the flag, so automatic invocation stays off there while user selection works.
+        assert.match(source, /^disable-model-invocation: true$/m, `${name} must stay user-invoked in Codex`);
         assert.match(source, /references\/codex-runtime\.md/, `${name} does not load the shared runtime contract`);
         if (name === "source-command-x")
             assert.match(source, /one foreground task --json without --write/i);
@@ -92,7 +93,7 @@ test("Codex exposes the same workflows as native skills", () => {
             assert.match(source, /grok-companion\.mjs/, `${name} does not call the companion script`);
         assert.doesNotMatch(source, /AskUserQuestion|run_in_background|CLAUDE_PLUGIN_ROOT|source-command-(?:status|result)/);
     }
-    const audit = read("skills/source-command-audit/SKILL.md");
+    const audit = read("codex-skills/source-command-audit/SKILL.md");
     assert.match(audit, /subcommand.*`audit`|`audit`\s*subcommand/i);
     assert.match(audit, /review-only/i);
 });
@@ -101,7 +102,7 @@ test("Claude-only helpers stay outside Codex skill discovery", () => {
     const claudeManifest = JSON.parse(read(".claude-plugin/plugin.json"));
     assert.equal(claudeManifest.skills, "./claude-skills/");
     assert.deepEqual(listSkills("claude-skills"), helperNames);
-    assert.ok(helperNames.every((name) => !listSkills("skills").includes(name)));
+    assert.ok(helperNames.every((name) => !listSkills("codex-skills").includes(name)));
     for (const name of helperNames) {
         const source = read(`claude-skills/${name}/SKILL.md`);
         assert.match(source, new RegExp(`^name: ${name}$`, "m"), `${name} has the wrong skill name`);
@@ -179,7 +180,7 @@ test("responses follow the sender's language dynamically", () => {
     }
     // rescue 経路: 依頼文を英訳せず元の言語のまま転送する指示があること。
     assert.match(read("agents/grok-rescue.md"), /preserving its language/i);
-    assert.match(read("skills/source-command-rescue/SKILL.md"), /preserve the task language/i);
+    assert.match(read("codex-skills/source-command-rescue/SKILL.md"), /preserve the task language/i);
 });
 test("rescue forwards one concrete task and grants write access only on request", () => {
     const rescue = read("commands/rescue.md");
@@ -194,7 +195,7 @@ test("rescue forwards one concrete task and grants write access only on request"
 });
 test("setup entries run the helper and follow its guidance without installing automatically", () => {
     const claude = read("commands/setup.md");
-    const codex = read("skills/source-command-setup/SKILL.md");
+    const codex = read("codex-skills/source-command-setup/SKILL.md");
     assert.match(claude, /node .*scripts\/grok-companion\.mjs" setup/);
     assert.match(claude, /follow the helper.s install and login guidance/i);
     assert.match(claude, /do not install or authenticate automatically/i);
@@ -215,7 +216,7 @@ test("plugin and marketplace manifests agree on name and version", () => {
     assert.equal(plugin.name, "grok");
     assert.equal(codexPlugin.name, plugin.name);
     assert.equal(codexPlugin.version, plugin.version);
-    assert.equal(codexPlugin.skills, "./skills/");
+    assert.equal(codexPlugin.skills, "./codex-skills/");
     assert.equal(marketplace.plugins[0].name, "grok");
     assert.equal(marketplace.plugins[0].source, "./plugins/grok");
     assert.equal(marketplace.plugins[0].version, plugin.version);

@@ -5,6 +5,7 @@
 - After `session/set_model` succeeds, the default reasoning effort is chosen from the switched model's options. `high` is sent only when that model offers it, including when an API-key session starts on a no-reasoning model and then moves to fast. It is not sent when the new model has no `high`.
 - Read-only file reads now allow a path inside the workspace when it is written through a symlink alias of the workspace, using the same real-path check as `Test-Path`. Paths whose real location is outside the workspace are still denied.
 - Review diff bodies and `--stat` now pass non-ASCII file names, such as Japanese names, as UTF-8 instead of Git's octal quotes when `core.quotePath=true`.
+- Codex skills now live in `codex-skills/`, named only by the Codex manifest. Claude Code ignores `disable-model-invocation` on plugin skills and also scans the default `skills/` directory, so keeping the Codex entry points out of that directory stops them from being injected into Claude Code sessions. In Codex, the same skills remain available for explicit selection.
 
 ## 1.1.12
 

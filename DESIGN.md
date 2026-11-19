@@ -13,7 +13,7 @@ Claude Code と Codex から既存の Grok Build CLI を呼び出す薄い橋渡
 | 構成 | 責務 |
 | --- | --- |
 | `plugins/grok/commands/`、`agents/`、`claude-skills/` | Claude Code の入口と専用 helper |
-| `plugins/grok/skills/` | Codex の公開入口。Claude Code も既定の `skills/` を追加で読み込むため、各 `SKILL.md` に `disable-model-invocation: true` を付けて Claude Code の常時一覧と自動呼出しから外す |
+| `plugins/grok/codex-skills/` | Codex の公開入口。Codex の manifest だけがこのディレクトリを指す。Claude Code は既定の `skills/` も読むうえ、プラグイン skill の `disable-model-invocation` を無視するため、Codex 用入口は既定の `skills/` に置かない。`disable-model-invocation: true` は Codex が自動呼出ししないための指定として残す |
 | `plugins/grok/scripts/grok-companion.mjs` | CLI 引数、対象とプロンプト、前景実行と結果表示 |
 | `plugins/grok/scripts/lib/grok.mjs` と ACP 関連 | Grok の新規プロセスへの直接接続、権限と結果 |
 | `plugins/grok/scripts/lib/shell-allowlist.mjs` | 読み取り専用実行で許可するシェルコマンドの判定。セキュリティ境界の判定を実行本体から分け、`grok.mjs` は既存の公開名 `classifyShellCommand` を再 export する |

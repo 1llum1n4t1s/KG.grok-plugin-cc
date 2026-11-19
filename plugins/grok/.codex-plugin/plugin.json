@@ -17,7 +17,7 @@
     "delegation",
     "second-opinion"
   ],
-  "skills": "./skills/",
+  "skills": "./codex-skills/",
   "interface": {
     "displayName": "Grok Build Companion",
     "shortDescription": "Run Grok reviews, audits, searches, and delegated tasks",
