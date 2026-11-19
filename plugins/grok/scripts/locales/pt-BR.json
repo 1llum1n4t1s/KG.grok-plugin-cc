@@ -50,5 +50,6 @@
   "imagine.output_exists": "O arquivo de saída já existe: {path}.",
   "imagine.output_unusable": "O caminho de saída não é um diretório utilizável: {path}.",
   "imagine.bad_aspect": "Proporção não compatível: {ratio}. Use uma de {ratios}.",
-  "imagine.no_repo_write": "imagine não edita o repositório. Ele apenas copia as imagens geradas para o diretório de saída."
+  "imagine.no_repo_write": "imagine não edita o repositório. Ele apenas copia as imagens geradas para o diretório de saída.",
+  "imagine.extension_mismatch": "A extensão de saída {output} não corresponde à extensão da imagem gerada {source}. Os bytes não são convertidos, então a extensão não é reescrita."
 }

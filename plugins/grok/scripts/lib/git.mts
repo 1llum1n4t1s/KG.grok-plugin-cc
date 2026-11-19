@@ -94,7 +94,8 @@ function readOnlyGitArgs(args, options: GitOptions = {}) {
   const diffFlags = ["diff", "show", "log", "whatchanged"].includes(command)
     ? ["--no-ext-diff", "--no-textconv"] : [];
   // 表示用の diff / --stat だけ引用を外す。-z の機械処理は生のバイト列のままにする。
-  // core.quotePath=false でも制御文字は Git が引用したまま残る。
+  // core.quotePath=false でも C0 制御文字は Git が引用したまま残る。
+  // 双方向制御などの書式文字は引用されないため、受け取ったあとで逃がす。
   const quoting = options.quotePaths === false ? ["-c", "core.quotePath=false"] : [];
   return [...READ_ONLY_GIT_GLOBAL_ARGS, ...quoting, command, ...diffFlags, ...rest];
 }
@@ -109,7 +110,18 @@ function git(cwd, args, options: GitOptions = {}) {
   if (result.status !== 0 && /unknown option[^\r\n]*--no-lazy-fetch/.test(result.stderr)) {
     assertReadOnlyGitSupport(cwd, options);
   }
+  if (options.quotePaths === false && typeof result.stdout === "string") {
+    result.stdout = escapeFormatControls(result.stdout);
+  }
   return result;
+}
+
+/** 双方向制御やゼロ幅の書式文字を見える形にする。通常の非 ASCII 文字はそのまま残す。 */
+function escapeFormatControls(text: string): string {
+  return text.replace(/[\u061C\u200B-\u200F\u202A-\u202E\u2066-\u2069\u2028\u2029\uFEFF]/g, (char) => {
+    const code = char.codePointAt(0) ?? 0;
+    return `\\u${code.toString(16).padStart(4, "0")}`;
+  });
 }
 
 function gitChecked(cwd, args, options: GitOptions = {}) {

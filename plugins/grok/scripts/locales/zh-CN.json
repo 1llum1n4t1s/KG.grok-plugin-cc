@@ -50,5 +50,6 @@
   "imagine.output_exists": "输出文件已存在：{path}。",
   "imagine.output_unusable": "输出路径不是可用的目录：{path}。",
   "imagine.bad_aspect": "不支持的宽高比：{ratio}。请使用以下之一：{ratios}。",
-  "imagine.no_repo_write": "imagine 不会编辑仓库。它只会把生成的图像复制到输出目录。"
+  "imagine.no_repo_write": "imagine 不会编辑仓库。它只会把生成的图像复制到输出目录。",
+  "imagine.extension_mismatch": "输出扩展名 {output} 与生成图像的扩展名 {source} 不一致。内容不会被转换，因此不会改写扩展名。"
 }

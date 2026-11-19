@@ -50,5 +50,6 @@
   "imagine.output_exists": "The output file already exists: {path}.",
   "imagine.output_unusable": "The output path is not a usable directory: {path}.",
   "imagine.bad_aspect": "Unsupported aspect ratio: {ratio}. Use one of {ratios}.",
-  "imagine.no_repo_write": "imagine does not edit the repository. It only copies generated images into the output directory."
+  "imagine.no_repo_write": "imagine does not edit the repository. It only copies generated images into the output directory.",
+  "imagine.extension_mismatch": "The output extension {output} does not match the generated image extension {source}. The bytes are not converted, so the extension is left unchanged."
 }

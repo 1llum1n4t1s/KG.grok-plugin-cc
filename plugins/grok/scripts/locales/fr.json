@@ -50,5 +50,6 @@
   "imagine.output_exists": "Le fichier de sortie existe déjà : {path}.",
   "imagine.output_unusable": "Le chemin de sortie n'est pas un répertoire utilisable : {path}.",
   "imagine.bad_aspect": "Rapport d'aspect non pris en charge : {ratio}. Utilisez l'un de {ratios}.",
-  "imagine.no_repo_write": "imagine ne modifie pas le dépôt. Il copie seulement les images générées dans le répertoire de sortie."
+  "imagine.no_repo_write": "imagine ne modifie pas le dépôt. Il copie seulement les images générées dans le répertoire de sortie.",
+  "imagine.extension_mismatch": "L'extension de sortie {output} ne correspond pas à l'extension de l'image générée {source}. Les octets ne sont pas convertis, donc l'extension n'est pas réécrite."
 }

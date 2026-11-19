@@ -50,5 +50,6 @@
   "imagine.output_exists": "출력 파일이 이미 있습니다: {path}.",
   "imagine.output_unusable": "출력 경로가 사용할 수 있는 디렉터리가 아닙니다: {path}.",
   "imagine.bad_aspect": "지원되지 않는 화면 비율입니다: {ratio}. 다음 중 하나를 사용하세요: {ratios}.",
-  "imagine.no_repo_write": "imagine은 저장소를 편집하지 않습니다. 생성된 이미지를 출력 디렉터리로 복사할 뿐입니다."
+  "imagine.no_repo_write": "imagine은 저장소를 편집하지 않습니다. 생성된 이미지를 출력 디렉터리로 복사할 뿐입니다.",
+  "imagine.extension_mismatch": "출력 확장자 {output}은(는) 생성된 이미지 확장자 {source}와 일치하지 않습니다. 내용은 변환하지 않으므로 확장자를 바꾸지 않습니다."
 }

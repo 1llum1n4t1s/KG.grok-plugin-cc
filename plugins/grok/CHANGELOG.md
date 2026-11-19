@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Imagine does not write through a dangling symlink at the output file name. Windows native realpath prefixes are stripped before a missing output directory is resolved.
+- An explicit `--output` file whose extension differs from the generated image is rejected instead of renaming the bytes.
+- Review diff and `--stat` text escape Unicode bidi and zero-width format characters while leaving ordinary non-ASCII names readable.
 - A failure from `session/load` after a successful model switch no longer aborts the turn. Reasoning effort is skipped instead of using the previous model's options.
 - Missing image entitlement is classified from an RPC error or a failed tool result. A successful reply that mentions SuperGrok and image tools no longer discards the saved image.
 - Imagine copies an image only from the current ACP session's `images` directory. An image from another session is left in place.

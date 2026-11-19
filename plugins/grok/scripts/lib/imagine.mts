@@ -274,6 +274,9 @@ export function copySessionImages(accepted: string[], destination: ImagineOutput
     const base = destination.fileName ?? path.basename(source);
     const explicit = Boolean(destination.fileName) && index === 0;
     const target = explicit ? path.join(directory, destination.fileName) : uniquePath(directory, base);
+    if (explicit && path.extname(destination.fileName).toLowerCase() !== path.extname(source).toLowerCase()) {
+      throw new Error(t("imagine.extension_mismatch", { source: path.extname(source) || "(none)", output: path.extname(destination.fileName) || "(none)" }));
+    }
     if (explicit && pathOccupancy(target) === "present") throw new Error(t("imagine.output_exists", { path: target }));
     const size = fs.statSync(source).size;
     if (size <= 0 || size > MAX_IMAGE_BYTES) throw new Error(t("imagine.copy_failed", { detail: `${source} (${size} bytes)` }));

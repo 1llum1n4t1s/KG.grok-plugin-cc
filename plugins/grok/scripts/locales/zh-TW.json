@@ -50,5 +50,6 @@
   "imagine.output_exists": "輸出檔案已存在：{path}。",
   "imagine.output_unusable": "輸出路徑不是可用的目錄：{path}。",
   "imagine.bad_aspect": "不支援的長寬比：{ratio}。請使用下列其中之一：{ratios}。",
-  "imagine.no_repo_write": "imagine 不會編輯儲存庫。它只會把產生的影像複製到輸出目錄。"
+  "imagine.no_repo_write": "imagine 不會編輯儲存庫。它只會把產生的影像複製到輸出目錄。",
+  "imagine.extension_mismatch": "輸出副檔名 {output} 與產生影像的副檔名 {source} 不一致。內容不會被轉換，因此不會改寫副檔名。"
 }

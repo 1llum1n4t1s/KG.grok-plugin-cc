@@ -482,6 +482,21 @@ test("branch review diff and stat keep a Japanese filename unquoted when core.qu
   assert.doesNotMatch(`${stat}\n${diff}`, /\\[0-7]{3}/);
 });
 
+test("branch review diff escapes a bidi control in a filename without quoting Japanese", (t) => {
+  const cwd = initQuotePathRepo(t);
+  run("git", ["checkout", "-b", "feature/bidi"], { cwd });
+  const sneaky = `report${"\u202E"}txt.js`;
+  fs.writeFileSync(path.join(cwd, sneaky), "content\n");
+  fs.writeFileSync(path.join(cwd, "日本語 file.txt"), "内容\n");
+  assert.equal(run("git", ["add", "--", sneaky, "日本語 file.txt"], { cwd, shell: false }).status, 0);
+  run("git", ["commit", "-m", "add bidi name"], { cwd });
+  const context = collectReviewContext(cwd, resolveReviewTarget(cwd, { base: "main" }));
+  const diff = context.content.split("## Branch Diff\n\n")[1] ?? "";
+  assert.match(diff, /\\u202e/);
+  assert.doesNotMatch(diff, /\u202E/);
+  assert.match(diff, /日本語 file\.txt/);
+});
+
 function gitQuery(args: string[]) {
   let index = 13;
   if (args[index] === "-c" && args[index + 1] === "core.quotePath=false") index += 2;

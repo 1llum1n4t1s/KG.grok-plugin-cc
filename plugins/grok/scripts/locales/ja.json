@@ -50,5 +50,6 @@
   "imagine.output_exists": "出力ファイルは既に存在します: {path}。",
   "imagine.output_unusable": "出力先は使えるディレクトリではありません: {path}。",
   "imagine.bad_aspect": "未対応のアスペクト比です: {ratio}。次のいずれかを指定してください: {ratios}。",
-  "imagine.no_repo_write": "imagine はリポジトリを編集しません。生成画像を出力ディレクトリへコピーするだけです。"
+  "imagine.no_repo_write": "imagine はリポジトリを編集しません。生成画像を出力ディレクトリへコピーするだけです。",
+  "imagine.extension_mismatch": "出力の拡張子 {output} は生成画像の拡張子 {source} と一致しません。中身は変換しないため、拡張子は変えません。"
 }

@@ -416,6 +416,30 @@ test("imagine copies the image when the working directory is a symlink to the wo
   }
 });
 
+test("an explicit output extension that differs from the generated image is rejected", () => {
+  const home = makeTempDir("grok-imagine-home-");
+  const source = sessionImage(home);
+  const fake = installFakeGrok({ replies: [{
+    requestPermissionFor: { title: "image_gen", kind: "other", rawInput: { prompt: "cube" } },
+    updates: imageUpdates(source),
+    text: "saved"
+  }] });
+  const cwd = makeTempDir("grok-imagine-cwd-");
+  const env = { ...fake.env, HOME: home, USERPROFILE: home };
+  delete env.XAI_API_KEY;
+  try {
+    const result = imagine(["imagine", "--output", "out/image.png", "cube"], env, cwd);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /\.png/);
+    assert.match(result.stderr, /\.jpg/);
+    assert.equal(fs.existsSync(path.join(cwd, "out", "image.png")), false);
+  } finally {
+    removeTempFixture(cwd, { recursive: true, force: true });
+    removeTempFixture(home, { recursive: true, force: true });
+    removeTempFixture(fake.binDir, { recursive: true, force: true });
+  }
+});
+
 test("a dangling output symlink is not followed", () => {
   const home = makeTempDir("grok-imagine-home-");
   const source = sessionImage(home);
