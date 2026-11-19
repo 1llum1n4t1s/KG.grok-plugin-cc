@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Imagine copies an image only from the current ACP session's `images` directory. An image from another session is left in place.
 - Imagine grants permission only for `image_gen` and `image_edit` (variants `ImageGen` and `ImageEdit`). A tool titled `imagine:` is denied unless it is one of those tools.
 - A tool result that also names an image outside the session directory still saves the session image. Paths outside that directory are not copied.
 - Imagine saves generated images when the working directory is a symlink, such as macOS `/tmp` or `/var`. Containment compares the real workspace and the real output path, and still rejects paths whose real location is outside the workspace.

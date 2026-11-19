@@ -156,7 +156,7 @@ async function main() {
         classification: "image-entitlement-missing", guidance: t("diag.image_entitlement") };
     }
     const turnFailed = turnIncomplete(result);
-    const partitioned = turnFailed || entitlement ? { accepted: [], rejected: [] } : partitionSessionImages(result.imagePaths ?? [], process.env);
+    const partitioned = turnFailed || entitlement ? { accepted: [], rejected: [] } : partitionSessionImages(result.imagePaths ?? [], process.env, result.sessionId);
     // セッション外のパスはコピーしないが、同じ結果にあるセッション画像までは捨てない。
     const images = !turnFailed && !entitlement && partitioned.accepted.length
       ? copySessionImages(partitioned.accepted, destination, cwd) : [];

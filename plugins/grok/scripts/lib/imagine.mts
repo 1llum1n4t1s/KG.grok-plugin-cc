@@ -146,10 +146,12 @@ export function grokSessionsRoot(env: NodeJS.ProcessEnv): string {
 }
 
 /**
- * 報告されたパスが、Grok のセッション images ディレクトリにある通常ファイルか。
- * シンボリックリンクと、セッション外のパスはコピーしない。
+ * 報告されたパスが、今回の ACP セッションの images ディレクトリにある通常ファイルか。
+ * セッション ID の直下の images だけを対象にする。過去セッションやシンボリックリンクはコピーしない。
+ * 公開されている配置は ~/.grok/sessions/<cwd>/<sessionId>/images/<file> である。
  */
-export function isGrokSessionImage(filePath: string, env: NodeJS.ProcessEnv): boolean {
+export function isGrokSessionImage(filePath: string, env: NodeJS.ProcessEnv, sessionId: string): boolean {
+  if (!sessionId) return false;
   const cleaned = cleanExtendedPath(filePath);
   if (!path.isAbsolute(cleaned) || !IMAGE_EXT.test(cleaned)) return false;
   let listed;
@@ -164,11 +166,13 @@ export function isGrokSessionImage(filePath: string, env: NodeJS.ProcessEnv): bo
   } catch { return false; }
   const relative = path.relative(realRoot, realFile);
   if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
-  return relative.split(path.sep).includes("images");
+  const parts = relative.split(path.sep);
+  const sid = parts.indexOf(sessionId);
+  return sid >= 0 && parts[sid + 1] === "images" && parts.length > sid + 2;
 }
 
-/** セッション内の画像と、コピーを拒否する報告を分ける。同じパスは一度だけ扱う。 */
-export function partitionSessionImages(reported: string[], env: NodeJS.ProcessEnv): { accepted: string[]; rejected: string[] } {
+/** 今回のセッション画像と、コピーを拒否する報告を分ける。同じパスは一度だけ扱う。 */
+export function partitionSessionImages(reported: string[], env: NodeJS.ProcessEnv, sessionId: string): { accepted: string[]; rejected: string[] } {
   const accepted: string[] = [];
   const rejected: string[] = [];
   const seen = new Set<string>();
@@ -176,7 +180,7 @@ export function partitionSessionImages(reported: string[], env: NodeJS.ProcessEn
     const cleaned = cleanExtendedPath(item);
     if (!cleaned || seen.has(cleaned)) continue;
     seen.add(cleaned);
-    if (isGrokSessionImage(cleaned, env)) accepted.push(cleaned);
+    if (isGrokSessionImage(cleaned, env, sessionId)) accepted.push(cleaned);
     else rejected.push(item);
   }
   return { accepted, rejected };

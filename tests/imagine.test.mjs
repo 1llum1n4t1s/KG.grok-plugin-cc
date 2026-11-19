@@ -10,10 +10,10 @@ import { assertImagineAspect, extractGeneratedImagePaths, imagineBilling, isImag
 process.env.GROK_PLUGIN_LANGUAGE = "en";
 const cli = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
 const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
-function sessionImage(home, name = "1.jpg") {
-    const file = path.join(home, ".grok", "sessions", "sid", "images", name);
+function sessionImage(home, sessionId = "fake-session-1", name = "1.jpg", bytes = jpeg) {
+    const file = path.join(home, ".grok", "sessions", "cwd", sessionId, "images", name);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, jpeg);
+    fs.writeFileSync(file, bytes);
     return file;
 }
 function imageUpdates(file, text) {
@@ -201,6 +201,45 @@ test("a mixed tool result copies the session image and ignores the outside path"
         assert.equal(fs.readFileSync(input, "utf8"), "input-bytes");
         assert.deepEqual(payload.ignoredPaths, [input]);
         assert.equal(payload.error?.classification, undefined);
+    }
+    finally {
+        removeTempFixture(cwd, { recursive: true, force: true });
+        removeTempFixture(home, { recursive: true, force: true });
+        removeTempFixture(fake.binDir, { recursive: true, force: true });
+    }
+});
+test("an image from a past session is not copied", () => {
+    const home = makeTempDir("grok-imagine-home-");
+    const current = sessionImage(home, "fake-session-1", "1.jpg", jpeg);
+    const past = sessionImage(home, "fake-session-old", "old.jpg", Buffer.from("old-session"));
+    const cwd = makeTempDir("grok-imagine-cwd-");
+    const fake = installFakeGrok({ replies: [{
+                requestPermissionFor: { title: "image_gen", kind: "other", rawInput: { prompt: "cube" } },
+                updates: imageUpdates(current, JSON.stringify({ current: { path: current }, previous: { path: past } })),
+                text: "saved"
+            }] });
+    const env = { ...fake.env, HOME: home, USERPROFILE: home };
+    delete env.XAI_API_KEY;
+    try {
+        const result = imagine(["imagine", "--json", "cube"], env, cwd);
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+        const payload = JSON.parse(result.stdout);
+        assert.equal(payload.images.length, 1);
+        assert.equal(fs.readFileSync(payload.images[0].saved).toString("hex"), jpeg.toString("hex"));
+        assert.equal(fs.readFileSync(past, "utf8"), "old-session");
+        assert.deepEqual(payload.ignoredPaths, [past]);
+        const onlyPast = installFakeGrok({ replies: [{
+                    requestPermissionFor: { title: "image_gen", kind: "other", rawInput: { prompt: "cube" } },
+                    updates: imageUpdates(past),
+                    text: "old"
+                }] });
+        const pastEnv = { ...onlyPast.env, HOME: home, USERPROFILE: home };
+        delete pastEnv.XAI_API_KEY;
+        const rejected = imagine(["imagine", "--json", "cube"], pastEnv, cwd);
+        assert.equal(rejected.status, 1, rejected.stdout);
+        assert.equal(JSON.parse(rejected.stdout).images.length, 0);
+        assert.equal(fs.readdirSync(path.join(cwd, "grok-imagine")).length, 1);
+        removeTempFixture(onlyPast.binDir, { recursive: true, force: true });
     }
     finally {
         removeTempFixture(cwd, { recursive: true, force: true });
