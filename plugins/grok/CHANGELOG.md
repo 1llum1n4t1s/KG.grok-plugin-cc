@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Imagine grants permission only for `image_gen` and `image_edit` (variants `ImageGen` and `ImageEdit`). A tool titled `imagine:` is denied unless it is one of those tools.
 - A tool result that also names an image outside the session directory still saves the session image. Paths outside that directory are not copied.
 - Imagine saves generated images when the working directory is a symlink, such as macOS `/tmp` or `/var`. Containment compares the real workspace and the real output path, and still rejects paths whose real location is outside the workspace.
 - Added `/grok:imagine` and the Codex skill `grok:source-command-imagine`. The command starts one foreground Grok session, allows only the image tool, and copies the generated file from Grok's session images directory into `grok-imagine/` or `--output`. It does not edit the rest of the repository.

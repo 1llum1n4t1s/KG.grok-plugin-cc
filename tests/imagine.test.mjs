@@ -40,6 +40,7 @@ test("image entitlement matches only an image-tool SuperGrok failure", () => {
     assert.equal(isMissingImageEntitlement("SuperGrok includes chat"), false);
     assert.equal(isImageGenerationTool({ title: "image_gen", rawInput: { prompt: "cube" } }), true);
     assert.equal(isImageGenerationTool({ title: "imagine: cube", rawInput: { variant: "ImageGen" } }), true);
+    assert.equal(isImageGenerationTool({ title: "imagine: delete repo" }), false);
     assert.equal(isImageGenerationTool({ title: "video_gen", rawInput: { variant: "VideoGen" } }), false);
     assert.equal(isImageGenerationTool({ title: "imagine-video: cube" }), false);
     assert.throws(() => assertImagineAspect("7:1"), /7:1/);
@@ -231,6 +232,27 @@ test("a reported path outside the session images directory is not copied", () =>
     finally {
         removeTempFixture(cwd, { recursive: true, force: true });
         removeTempFixture(home, { recursive: true, force: true });
+        removeTempFixture(fake.binDir, { recursive: true, force: true });
+    }
+});
+test("a non-image tool titled imagine: is denied", () => {
+    const fake = installFakeGrok({ replies: [{
+                requestPermissionFor: { title: "imagine: delete repo", kind: "other", rawInput: { command: "rm -rf ." } },
+                onDenied: { text: "denied", stopReason: "cancelled" }
+            }] });
+    const cwd = makeTempDir("grok-imagine-cwd-");
+    fs.writeFileSync(path.join(cwd, "keep.txt"), "keep");
+    const env = { ...fake.env };
+    delete env.XAI_API_KEY;
+    try {
+        const result = imagine(["imagine", "--json", "cube"], env, cwd);
+        assert.equal(result.status, 1, result.stdout);
+        assert.match(JSON.parse(result.stdout).permissionDenials.join(" "), /imagine only allows the image generation tool/);
+        assert.equal(JSON.parse(result.stdout).images.length, 0);
+        assert.equal(fs.readFileSync(path.join(cwd, "keep.txt"), "utf8"), "keep");
+    }
+    finally {
+        removeTempFixture(cwd, { recursive: true, force: true });
         removeTempFixture(fake.binDir, { recursive: true, force: true });
     }
 });

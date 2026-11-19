@@ -52,8 +52,9 @@ function rawVariant(raw: unknown): string {
 }
 
 /**
- * 画像生成・編集のツール要求か。動画ツールはタイトルが imagine を含んでも拒否する。
- * 完了通知は title が空になるため、呼び出し側は toolCallId を覚えておく。
+ * 画像生成・編集のツール要求か。許可は image_gen / image_edit と
+ * variant ImageGen / ImageEdit だけ。表示名が imagine: で始まるだけでは許可しない。
+ * 動画ツールは先に拒否する。完了通知は title が空になるため、呼び出し側は toolCallId を覚えておく。
  */
 export function isImageGenerationTool(tool: { title?: string | null; rawInput?: unknown } | null | undefined): boolean {
   const title = typeof tool?.title === "string" ? tool.title.trim() : "";
@@ -61,7 +62,6 @@ export function isImageGenerationTool(tool: { title?: string | null; rawInput?: 
   if (VIDEO_VARIANT.test(variant) || VIDEO_TITLE.test(title)) return false;
   if (variant === "ImageGen" || variant === "ImageEdit") return true;
   if (/^(?:image_gen|image_edit)$/i.test(title)) return true;
-  if (/^imagine:/i.test(title)) return true;
   return false;
 }
 
