@@ -308,6 +308,8 @@ export function installFakeGrok(scenario = {}) {
     writeExecutable(scriptPath, FAKE_GROK_SOURCE);
     fs.writeFileSync(scenarioPath, JSON.stringify(scenario, null, 2), "utf8");
     const env = grokFixtureEnv(scriptPath, path.join(binDir, "grok"));
+    // 開発者の環境に GROK_PLUGIN_MODEL があっても既定モデルの期待が崩れないよう外す。必要なテストは明示的に足す。
+    delete env.GROK_PLUGIN_MODEL;
     return {
         binDir,
         statePath,

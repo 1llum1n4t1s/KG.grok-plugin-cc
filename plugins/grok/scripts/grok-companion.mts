@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, resolveReviewTarget } from "./lib/git.mjs";
-import { getGrokAuthStatus, parseStructuredOutput, readOutputSchema, runGrokImagine, runGrokReview, runGrokTurn } from "./lib/grok.mjs";
+import { GROK_INSTALL_COMMANDS, getGrokAuthStatus, parseStructuredOutput, readOutputSchema, runGrokImagine, runGrokReview, runGrokTurn } from "./lib/grok.mjs";
 import { assertImagineAspect, copySessionImages, imagineBilling, isMissingImageEntitlement, partitionSessionImages, resolveImagineOutput } from "./lib/imagine.mjs";
 import { t } from "./lib/i18n.mjs";
 import { normalizeLanguageTag } from "./lib/language.mjs";
@@ -29,13 +29,23 @@ function parse<V extends string, B extends string>(argv: string[], values: V[], 
   const args = argv.length === 1 && known.has(firstWord) ? splitRawArgumentString(argv[0]) : argv;
   return parseArgs(args, { valueOptions: values, booleanOptions: booleans, aliasMap: shortAliases, stopAtFirstPositional: true });
 }
+// task / imagine 共通の入力検査。呼ぶ順序（無効フラグ → cwd → effort → プロンプト）は挙動なので保つ。
+function assertEffort(options) {
+  if (options.effort && !["low", "medium", "high"].includes(options.effort)) throw new Error(t("cli.unsupported_effort"));
+}
+// --prompt-file（cwd 基準）→ 位置引数 → パイプ標準入力の順で選び、空なら失敗にする。
+async function readRunPrompt(options, positionals, cwd) {
+  const text = options["prompt-file"] ? fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8") : positionals.length ? positionals.join(" ") : await readStdinIfPiped();
+  if (!text.trim()) throw new Error(t("cli.prompt_required"));
+  return text;
+}
 function disabled(name) { throw new Error(t("cli.disabled", { name })); }
 function model(value) { return aliases[value] ?? value; }
 function setupGuidance(status) {
   if (status.reason === "grok-missing") {
     if (status.availability?.reason === "missing-agent-stdio") return t("setup.update_grok");
     if (status.availability?.reason === "not-installed") {
-      const install = process.platform === "win32" ? "irm https://x.ai/cli/install.ps1 | iex" : "curl -fsSL https://x.ai/cli/install.sh | bash";
+      const install = process.platform === "win32" ? GROK_INSTALL_COMMANDS.windows : GROK_INSTALL_COMMANDS.unix;
       return t("setup.install_grok", { command: install });
     }
   }
@@ -57,10 +67,17 @@ function turnIncomplete(result) {
 }
 // 非 JSON 出力時の stderr 診断。順序（RPC コード、利用枠案内、停止未確認）は表示契約なので保つ。
 // stdout の本文を出した後に呼ぶ。main().catch 側の停止未確認表示は別経路なのでここへ統合しない。
-function reportTurnDiagnostics(diagnostic, result) {
+// explainIncomplete は review 以外で使う（review は render 側で状態と停止理由を表示する）。
+// 未完了の理由は既存行の後ろに足し、--json なしでも終了コード 1 の原因を追えるようにする。
+function reportTurnDiagnostics(diagnostic, result, { explainIncomplete = false, errorShown = false } = {}) {
   if (diagnostic?.rpcCode != null) console.error(t("diag.rpc_error", { code: diagnostic.rpcCode }));
   if (diagnostic?.guidance) console.error(diagnostic.guidance);
   if (result.turnStopUnconfirmed) console.error(t("diag.stop_unconfirmed"));
+  if (!explainIncomplete || !turnIncomplete(result)) return;
+  // 拒否のみ・停止未確認のみで状態が completed/end_turn のときは、矛盾する「完了しなかった」行を出さない。
+  if (result.status !== "completed" || result.stopReason !== "end_turn") console.error(t("diag.turn_incomplete", { status: result.status ?? t("render.unknown"), stopReason: result.stopReason ?? t("render.unknown") }));
+  if (result.error?.message && !errorShown) console.error(t("diag.turn_error", { message: result.error.message }));
+  if (result.permissionDenials.length) console.error(t("diag.permission_denied", { count: result.permissionDenials.length }));
 }
 function languageRule(language, focus) {
   const fields = "every human-readable field (summary, finding titles and bodies, recommendations, next steps)";
@@ -115,13 +132,12 @@ async function main() {
     const { options, positionals } = parse(argv, ["model", "effort", "cwd", "prompt-file"], ["json", "write", "resume", "resume-last", "fresh", "stop-gate", "background", "wait"]);
     for (const flag of ["resume", "resume-last", "stop-gate", "background"]) if (options[flag]) disabled(`--${flag}`);
     const cwd = path.resolve(options.cwd ?? process.cwd());
-    if (options.effort && !["low", "medium", "high"].includes(options.effort)) throw new Error(t("cli.unsupported_effort"));
-    const prompt = options["prompt-file"] ? fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8") : positionals.length ? positionals.join(" ") : await readStdinIfPiped();
-    if (!prompt.trim()) throw new Error(t("cli.prompt_required"));
+    assertEffort(options);
+    const prompt = await readRunPrompt(options, positionals, cwd);
     const result = await runGrokTurn(cwd, { prompt, model: model(options.model), effort: options.effort, readOnly: !options.write });
     const diagnostic = errorDiagnostic(result.error);
     console.log(options.json ? JSON.stringify({ ...result, error: diagnostic }, null, 2) : result.finalMessage || result.error?.message || result.stderr || t("cli.no_output"));
-    if (!options.json) reportTurnDiagnostics(diagnostic, result);
+    if (!options.json) reportTurnDiagnostics(diagnostic, result, { explainIncomplete: true, errorShown: !result.finalMessage });
     if (turnIncomplete(result)) process.exitCode = 1;
     return;
   }
@@ -130,10 +146,9 @@ async function main() {
     for (const flag of ["resume", "resume-last", "stop-gate", "background"]) if (options[flag]) disabled(`--${flag}`);
     if (options.write) throw new Error(t("imagine.no_repo_write"));
     const cwd = path.resolve(options.cwd ?? process.cwd());
-    if (options.effort && !["low", "medium", "high"].includes(options.effort)) throw new Error(t("cli.unsupported_effort"));
+    assertEffort(options);
     if (options.aspect) assertImagineAspect(options.aspect);
-    const request = options["prompt-file"] ? fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8") : positionals.length ? positionals.join(" ") : await readStdinIfPiped();
-    if (!request.trim()) throw new Error(t("cli.prompt_required"));
+    const request = await readRunPrompt(options, positionals, cwd);
     const destination = resolveImagineOutput(cwd, options.output);
     const billing = imagineBilling(process.env, Boolean(options["allow-api-billing"]));
     if (!billing.allowed) {
@@ -158,14 +173,20 @@ async function main() {
     const turnFailed = turnIncomplete(result);
     const partitioned = turnFailed || entitlement ? { accepted: [], rejected: [] } : partitionSessionImages(result.imagePaths ?? [], process.env, result.sessionId);
     // セッション外のパスはコピーしないが、同じ結果にあるセッション画像までは捨てない。
-    const images = !turnFailed && !entitlement && partitioned.accepted.length
-      ? copySessionImages(partitioned.accepted, destination, cwd) : [];
+    const copied = !turnFailed && !entitlement && partitioned.accepted.length
+      ? copySessionImages(partitioned.accepted, destination, cwd) : { saved: [], failure: null };
+    const images = copied.saved;
     if (!images.length && partitioned.rejected.length && !diagnostic?.classification) {
       diagnostic = { ...(diagnostic ?? { message: t("imagine.untrusted_path"), rpcCode: null, data: null }), classification: "untrusted-image-path", guidance: t("imagine.untrusted_path") };
     }
     const succeeded = !turnFailed && !entitlement && images.length > 0;
     if (!succeeded && !diagnostic?.guidance && !result.error) {
       diagnostic = { ...(diagnostic ?? { message: t("imagine.no_image"), rpcCode: null, data: null }), guidance: images.length ? undefined : t("imagine.no_image") };
+    }
+    // 1 枚以上保存できていれば成功のまま、途中で打ち切った理由を診断に残す。
+    if (succeeded && copied.failure && !diagnostic) {
+      diagnostic = { message: copied.failure, rpcCode: null, data: null, classification: "image-copy-incomplete",
+        guidance: t("imagine.partial_copy", { saved: images.length, detail: copied.failure }) };
     }
     const status = succeeded ? "completed" : "failed";
     const turn = { ...result };
@@ -177,7 +198,7 @@ async function main() {
       if (images.length) lines.push(...images.map((image) => t("imagine.saved", { path: image.saved })));
       else lines.push(result.finalMessage || result.error?.message || t("imagine.no_image"));
       console.log(lines.join("\n"));
-      reportTurnDiagnostics(diagnostic, result);
+      reportTurnDiagnostics(diagnostic, result, { explainIncomplete: true, errorShown: !images.length && !result.finalMessage });
     }
     if (!succeeded) process.exitCode = 1;
     return;

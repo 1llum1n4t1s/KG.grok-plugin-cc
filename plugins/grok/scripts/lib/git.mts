@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { t } from "./i18n.mjs";
 import { formatCommandFailure, runCommand } from "./process.mjs";
 import { windowsHelperPath } from "./windows-helper.mjs";
 
@@ -140,9 +141,9 @@ function assertGitStarted(result, cwd) {
       try {
         if (!fs.statSync(cwd).isDirectory()) throw new Error("not a directory");
       } catch {
-        throw new Error("Unable to start Git: the working directory is unavailable.");
+        throw new Error(t("err.git_cwd_unavailable"));
       }
-      throw new Error("git is not installed. Install Git and retry.");
+      throw new Error(t("err.git_not_installed"));
     }
     throw new Error(`Unable to start Git${code ? ` (${code})` : ""}: ${result.error.message}`);
   }
@@ -165,7 +166,7 @@ function assertReadOnlyGitSupport(cwd, options: GitOptions = {}) {
   });
   assertGitStarted(probe, cwd);
   if (probe.status !== 0 && /unknown option[^\r\n]*--no-lazy-fetch/.test(probe.stderr)) {
-    throw new Error("Git 2.45 or newer with --no-lazy-fetch support is required for read-only operations. Update Git and retry; automatic fetching remains disabled.");
+    throw new Error(t("err.git_too_old"));
   }
   if (probe.error || probe.status !== 0 || !/^git version \S+/m.test(probe.stdout)) {
     throw new Error(`Git capability check failed: ${formatCommandFailure(probe)}`);
@@ -268,15 +269,11 @@ export function ensureGitRepository(cwd, options: GitOptions = {}) {
     assertReadOnlyGitSupport(cwd, options);
     if (options.deadline !== undefined && performance.now() >= options.deadline) throw new Error("Git lookup deadline expired");
     if (/^fatal: not a git repository(?:[ (:]|$)/m.test(result.stderr)) {
-      throw Object.assign(new Error("This command must run inside a Git repository."), { code: "GROK_NOT_GIT_REPOSITORY" });
+      throw Object.assign(new Error(t("err.git_not_a_repository")), { code: "GROK_NOT_GIT_REPOSITORY" });
     }
     throw new Error(`Git repository lookup failed: ${formatCommandFailure(result)}`);
   }
   return result.stdout.trim();
-}
-
-export function getRepoRoot(cwd) {
-  return ensureGitRepository(cwd);
 }
 
 export function detectDefaultBranch(cwd) {
@@ -300,10 +297,7 @@ export function detectDefaultBranch(cwd) {
     }
   }
 
-  const guidance = process.platform === "win32"
-    ? "Pass --base <ref> or use --scope working-tree (requires a complete safe snapshot)."
-    : "Pass --base <ref> to review committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use a repository audit to review the whole source.";
-  throw new Error(`Unable to detect the repository default branch. ${guidance}`);
+  throw new Error(t(process.platform === "win32" ? "err.git_default_branch_undetected_win" : "err.git_default_branch_undetected"));
 }
 
 export function getCurrentBranch(cwd) {
@@ -542,7 +536,7 @@ export function resolveReviewTarget(cwd, options: GitOptions = {}) {
 
   if (requestedScope === "repo") {
     if (baseRef) {
-      throw new Error("--base does not apply to --scope repo. A repository audit reviews the whole source, not a diff.");
+      throw new Error(t("err.git_base_with_repo_scope"));
     }
     return {
       mode: "repo",
@@ -569,9 +563,7 @@ export function resolveReviewTarget(cwd, options: GitOptions = {}) {
   }
 
   if (!supportedScopes.has(requestedScope)) {
-    throw new Error(
-      `Unsupported review scope "${requestedScope}". Use one of: auto, working-tree, branch, repo, or pass --base <ref>.`
-    );
+    throw new Error(t("err.git_unsupported_scope", { scope: requestedScope }));
   }
 
   if (requestedScope === "branch") {

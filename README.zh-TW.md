@@ -50,6 +50,6 @@ Companion 自身的訊息（setup 結果、審查標題、診斷資訊與說明�
 
 若呼叫回報 HTTP 402 與 `usage balance exhausted`，代表 Grok Build 的使用額度已用盡。請待額度恢復後再重試。訂閱登入下的影像產生也使用同一個共享額度。若影像產生回報 Grok Build 的影像工具需要 SuperGrok 訂閱，則此登入不包含 Imagine；請使用包含 Imagine 的方案，或使用帶 `--allow-api-billing` 的 API 金鑰。逾時、權限遭拒、審查未完成，或未能確認 agent 已停止，皆視為呼叫失敗；請勿將部分輸出視為已完成的審查或任務。
 
-在唯讀審查期間，即使 Python、Node.js、Bun 與 shell 包裝程式僅用於讀取檔案，也會被拒絕。Grok Build 可能在權限遭拒後以 `cancelled` 結束該回合。請使用內建的檔案工具檢視 JSON 與其他佐證資料；無法取得的佐證仍視為未經驗證。審查提示詞會在檢視開始前說明這些限制。
+在唯讀審查與唯讀任務（不帶 `--write` 的 `task`）期間，即使 Python、Node.js、Bun 與 shell 包裝程式僅用於讀取檔案，也會被拒絕。Grok Build 可能在權限遭拒後以 `cancelled` 結束該回合。請使用內建的檔案工具檢視 JSON 與其他佐證資料；無法取得的佐證仍視為未經驗證。審查提示詞，以及唯讀任務中附加在你的請求之後的說明，會在檢視開始前說明這些限制。
 
 關於從原始碼建置、開發指令與驗證，請參閱 [開發指南](CONTRIBUTING.md#english)。執行階段的結構與邊界說明於 [DESIGN.md](DESIGN.md)。

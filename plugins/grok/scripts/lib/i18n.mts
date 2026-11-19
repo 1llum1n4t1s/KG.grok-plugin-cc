@@ -1,5 +1,5 @@
 // companion が利用者へ直接見せる固定文言（setup の結果・レビューの見出し・診断・ヘルプ）を
-// 9 言語で出すための辞書と言語判定。共通仕様 APP-DISTRIBUTION.md「8. ローカライズ」に従う。
+// 9 言語で出すための辞書と言語判定。追加・変更の手順は AGENTS.md の i18n の節に従う。
 //
 // 判定順: GROK_PLUGIN_LANGUAGE → LC_ALL → LC_MESSAGES → LANG（空・C・POSIX は次へ）
 //        → Intl の表示言語 → 英語。

@@ -1,9 +1,11 @@
 // BCP 47 言語タグの検証と正規化。review / adversarial-review / audit の
 // --language を agent 起動前に検証するため companion から呼ぶ。
 // 単体テストから直接検査できるよう、companion から純粋に移したもの（実装は不変）。
+import { t } from "./i18n.mjs";
 export function normalizeLanguageTag(language) {
+    const invalid = () => new Error(t("err.language_invalid", { language }));
     if (/[^A-Za-z0-9-]/.test(String(language)))
-        throw new Error(`Invalid BCP 47 language tag "${language}".`);
+        throw invalid();
     const tag = String(language).toLowerCase();
     // RFC 5646 の祖父タグと、Intl が扱わない extlang・private-use を許容する。
     const grandfathered = new Set([
@@ -16,11 +18,11 @@ export function normalizeLanguageTag(language) {
     const match = langtag.exec(tag);
     if (!grandfathered.has(tag) && !/^x(?:-[a-z0-9]{1,8})+$/.test(tag)) {
         if (!match)
-            throw new Error(`Invalid BCP 47 language tag "${language}".`);
+            throw invalid();
         const variants = match.groups.variants.split("-").filter(Boolean);
         const singletons = Array.from(match.groups.extensions.matchAll(/-([0-9a-wy-z])(?:-[a-z0-9]{2,8})+/g), (item) => item[1]);
         if (new Set(variants).size !== variants.length || new Set(singletons).size !== singletons.length) {
-            throw new Error(`Invalid BCP 47 language tag "${language}".`);
+            throw invalid();
         }
     }
     try {

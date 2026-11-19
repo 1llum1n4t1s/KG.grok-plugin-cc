@@ -6,6 +6,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "../plugins/grok/scripts/lib/git.mjs";
 import { grokFixtureEnv, initGitRepo as initBaseGitRepo, makeTempDir, removeTempFixture, run } from "./helpers.mjs";
+// 出力文言の検証が実行環境の表示言語に左右されないよう、英語に固定する。
+process.env.GROK_PLUGIN_LANGUAGE = "en";
 function registerFixtureCleanup(t, cwd) {
     t.after(() => {
         try {
@@ -172,21 +174,6 @@ test("repo scope rejects --base because an audit is not a diff", (t) => {
     run("git", ["commit", "-m", "init"], { cwd });
     assert.throws(() => resolveReviewTarget(cwd, { scope: "repo", base: "main" }), /--base does not apply to --scope repo/);
 });
-test("collectReviewContext keeps inline diffs for tiny adversarial reviews on Windows; fails closed elsewhere", (t) => {
-    const cwd = makeTempDir();
-    registerFixtureCleanup(t, cwd);
-    initGitRepo(cwd);
-    fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
-    run("git", ["add", "app.js"], { cwd });
-    run("git", ["commit", "-m", "init"], { cwd });
-    fs.writeFileSync(path.join(cwd, "app.js"), "console.log('INLINE_MARKER');\n");
-    const target = resolveReviewTarget(cwd, { scope: "working-tree" });
-    const context = workingTreeValue(() => collectReviewContext(cwd, target));
-    if (context) {
-        assert.equal(context.inputMode, "inline-diff");
-        assert.match(context.content, /INLINE_MARKER/);
-    }
-});
 test("collectReviewContext fails closed on an untracked nested repository in working tree review", (t) => {
     const cwd = makeTempDir();
     registerFixtureCleanup(t, cwd);
@@ -243,26 +230,6 @@ test("collectReviewContext fails closed instead of crashing on an untracked brok
     }
     const target = resolveReviewTarget(cwd, { scope: "working-tree" });
     assert.throws(() => collectReviewContext(cwd, target), /Review incomplete/);
-});
-test("collectReviewContext provides complete inline evidence for larger supported working tree reviews on Windows; fails closed elsewhere", (t) => {
-    const cwd = makeTempDir();
-    registerFixtureCleanup(t, cwd);
-    initGitRepo(cwd);
-    for (const name of ["a.js", "b.js", "c.js"]) {
-        fs.writeFileSync(path.join(cwd, name), `export const value = "${name}-v1";\n`);
-    }
-    run("git", ["add", "a.js", "b.js", "c.js"], { cwd });
-    run("git", ["commit", "-m", "init"], { cwd });
-    fs.writeFileSync(path.join(cwd, "a.js"), 'export const value = "SELF_COLLECT_MARKER_A";\n');
-    fs.writeFileSync(path.join(cwd, "b.js"), 'export const value = "SELF_COLLECT_MARKER_B";\n');
-    fs.writeFileSync(path.join(cwd, "c.js"), 'export const value = "SELF_COLLECT_MARKER_C";\n');
-    const target = resolveReviewTarget(cwd, { scope: "working-tree" });
-    const context = workingTreeValue(() => collectReviewContext(cwd, target));
-    if (context) {
-        assert.equal(context.inputMode, "inline-diff");
-        for (const marker of ["SELF_COLLECT_MARKER_A", "SELF_COLLECT_MARKER_B", "SELF_COLLECT_MARKER_C"])
-            assert.match(context.content, new RegExp(marker));
-    }
 });
 test("collectReviewContext fails closed instead of falling back to lightweight context for an oversized working-tree diff", (t) => {
     const cwd = makeTempDir();

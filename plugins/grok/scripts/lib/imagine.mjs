@@ -235,13 +235,23 @@ function uniquePath(directory, fileName) {
         candidate = path.join(directory, `${stem}-${suffix}${ext}`);
     return candidate;
 }
-/** 出力先がシンボリックリンクなら、リンク先へ書き込まずに拒否する。 */
+/**
+ * 出力先がシンボリックリンクなら、リンク先へ書き込まずに拒否する。
+ * 元を先に読み、出力は読込みに成功してから作る。書込みに失敗したときは自分が作った出力を残さない。
+ */
 function writeNewFile(source, target) {
     const occupancy = pathOccupancy(target);
     if (occupancy === "symlink")
         throw new Error(t("imagine.output_escapes", { path: target }));
     if (occupancy === "present")
         throw new Error(t("imagine.output_exists", { path: target }));
+    let bytes;
+    try {
+        bytes = fs.readFileSync(source);
+    }
+    catch (error) {
+        throw new Error(t("imagine.copy_failed", { detail: error?.message ?? String(error) }), { cause: error });
+    }
     const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0);
     let fd;
     try {
@@ -253,15 +263,26 @@ function writeNewFile(source, target) {
         throw new Error(t("imagine.copy_failed", { detail: error?.message ?? String(error) }), { cause: error });
     }
     try {
-        fs.writeSync(fd, fs.readFileSync(source));
+        fs.writeSync(fd, bytes);
     }
-    finally {
-        fs.closeSync(fd);
+    catch (error) {
+        try {
+            fs.closeSync(fd);
+        }
+        catch { /* 閉じ直しの失敗より元の書込みエラーを優先する。 */ }
+        try {
+            fs.unlinkSync(target);
+        }
+        catch { /* 自分が作った不完全な出力の片付けに失敗しても元のエラーを返す。 */ }
+        throw new Error(t("imagine.copy_failed", { detail: error?.message ?? String(error) }), { cause: error });
     }
+    fs.closeSync(fd);
 }
 /**
  * 受け入れたセッション画像をワークスペースの出力先へ複製する。
  * 明示したファイル名が既にある場合は上書きしない。ディレクトリ指定の衝突は連番にする。
+ * 1 枚も保存していない間の失敗は例外にする。1 枚以上保存した後の失敗はそこで打ち切り、
+ * 保存済みを返して失敗の理由を failure に載せる（有効な画像が 1 枚でもあれば成功扱い）。
  */
 export function copySessionImages(accepted, destination, cwd) {
     const directory = containWorkspacePath(cwd, destination.directory);
@@ -281,22 +302,29 @@ export function copySessionImages(accepted, destination, cwd) {
         throw new Error(t("imagine.output_unusable", { path: directory }));
     const saved = [];
     for (let index = 0; index < accepted.length; index += 1) {
-        const source = fs.realpathSync(accepted[index]);
-        const base = destination.fileName ?? path.basename(source);
-        const explicit = Boolean(destination.fileName) && index === 0;
-        const target = explicit ? path.join(directory, destination.fileName) : uniquePath(directory, base);
-        if (explicit && path.extname(destination.fileName).toLowerCase() !== path.extname(source).toLowerCase()) {
-            throw new Error(t("imagine.extension_mismatch", { source: path.extname(source) || "(none)", output: path.extname(destination.fileName) || "(none)" }));
+        try {
+            const source = fs.realpathSync(accepted[index]);
+            const base = destination.fileName ?? path.basename(source);
+            const explicit = Boolean(destination.fileName) && index === 0;
+            const target = explicit ? path.join(directory, destination.fileName) : uniquePath(directory, base);
+            if (explicit && path.extname(destination.fileName).toLowerCase() !== path.extname(source).toLowerCase()) {
+                throw new Error(t("imagine.extension_mismatch", { source: path.extname(source) || "(none)", output: path.extname(destination.fileName) || "(none)" }));
+            }
+            if (explicit && pathOccupancy(target) === "present")
+                throw new Error(t("imagine.output_exists", { path: target }));
+            const size = fs.statSync(source).size;
+            if (size <= 0 || size > MAX_IMAGE_BYTES)
+                throw new Error(t("imagine.copy_failed", { detail: `${source} (${size} bytes)` }));
+            writeNewFile(source, target);
+            saved.push({ source, saved: target });
         }
-        if (explicit && pathOccupancy(target) === "present")
-            throw new Error(t("imagine.output_exists", { path: target }));
-        const size = fs.statSync(source).size;
-        if (size <= 0 || size > MAX_IMAGE_BYTES)
-            throw new Error(t("imagine.copy_failed", { detail: `${source} (${size} bytes)` }));
-        writeNewFile(source, target);
-        saved.push({ source, saved: target });
+        catch (error) {
+            if (!saved.length)
+                throw error;
+            return { saved, failure: error?.message ?? String(error) };
+        }
     }
-    return saved;
+    return { saved, failure: null };
 }
 /**
  * XAI_API_KEY があるときは API 従量課金として明示の同意が要る。

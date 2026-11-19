@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { installFakeGrok } from "./fake-grok-fixture.mjs";
 import { makeTempDir, removeTempFixture } from "./helpers.mjs";
-import { assertImagineAspect, extractGeneratedImagePaths, imagineBilling, isImageGenerationTool, isMissingImageEntitlement } from "../plugins/grok/scripts/lib/imagine.mjs";
+import { assertImagineAspect, copySessionImages, extractGeneratedImagePaths, imagineBilling, isImageGenerationTool, isMissingImageEntitlement } from "../plugins/grok/scripts/lib/imagine.mjs";
 process.env.GROK_PLUGIN_LANGUAGE = "en";
 const cli = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
 const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
@@ -22,6 +22,21 @@ function imageUpdates(file, text) {
         { sessionUpdate: "tool_call_update", toolCallId: "call-img", title: "imagine: red cube", status: "in_progress", rawInput: { variant: "ImageGen", prompt: "red cube", aspect_ratio: "1:1" } },
         { sessionUpdate: "tool_call_update", toolCallId: "call-img", status: "completed", content: [{ type: "content", content: { type: "text", text: text ?? JSON.stringify({ path: file, filename: path.basename(file), session_folder: "images" }) } }] }
     ];
+}
+/**
+ * ディレクトリのリンク。Windows は先例（runtime.test.mts、shell-allowlist.test.mts）どおり、
+ * 権限が要らず同じ意味を保てる junction を使う。
+ */
+function linkDirectory(target, link) {
+    fs.symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+}
+function unlinkLink(link) {
+    try {
+        fs.unlinkSync(link);
+    }
+    catch {
+        fs.rmdirSync(link);
+    }
 }
 function imagine(args, env, cwd) {
     return spawnSync(process.execPath, [cli, ...args], { cwd, env, encoding: "utf8", timeout: 15000 });
@@ -379,7 +394,7 @@ test("imagine copies the image when the working directory is a symlink to the wo
     const real = makeTempDir("grok-imagine-real-");
     const linkParent = makeTempDir("grok-imagine-link-");
     const cwd = path.join(linkParent, "cwd");
-    fs.symlinkSync(real, cwd, "dir");
+    linkDirectory(real, cwd);
     const env = { ...fake.env, HOME: home, USERPROFILE: home };
     delete env.XAI_API_KEY;
     try {
@@ -393,7 +408,7 @@ test("imagine copies the image when the working directory is a symlink to the wo
         assert.equal(fs.existsSync(path.join(real, "grok-imagine", "1.jpg")), true);
     }
     finally {
-        fs.unlinkSync(cwd);
+        unlinkLink(cwd);
         removeTempFixture(real, { recursive: true, force: true });
         removeTempFixture(linkParent, { recursive: true, force: true });
         removeTempFixture(home, { recursive: true, force: true });
@@ -424,7 +439,7 @@ test("an explicit output extension that differs from the generated image is reje
         removeTempFixture(fake.binDir, { recursive: true, force: true });
     }
 });
-test("a dangling output symlink is not followed", () => {
+test("a dangling output symlink is not followed", (t) => {
     const home = makeTempDir("grok-imagine-home-");
     const source = sessionImage(home);
     const fake = installFakeGrok({ replies: [{
@@ -437,10 +452,22 @@ test("a dangling output symlink is not followed", () => {
     const output = path.join(cwd, "grok-imagine");
     fs.mkdirSync(output);
     const dangling = path.join(output, "1.jpg");
-    fs.symlinkSync(path.join(outside, "planted.jpg"), dangling);
     const env = { ...fake.env, HOME: home, USERPROFILE: home };
     delete env.XAI_API_KEY;
+    let linked = false;
     try {
+        try {
+            // 切れたファイルリンクは junction で表せない。Windows の既定権限では作れないため、その場合だけ前提不足にする。
+            fs.symlinkSync(path.join(outside, "planted.jpg"), dangling);
+            linked = true;
+        }
+        catch (error) {
+            if (error.code === "EPERM" || error.code === "EACCES") {
+                t.skip("creating file symlinks requires elevated permissions on this platform");
+                return;
+            }
+            throw error;
+        }
         const result = imagine(["imagine", "--json", "cube"], env, cwd);
         assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
         const saved = JSON.parse(result.stdout).images[0].saved;
@@ -450,7 +477,8 @@ test("a dangling output symlink is not followed", () => {
         assert.equal(fs.readFileSync(saved).toString("hex"), jpeg.toString("hex"));
     }
     finally {
-        fs.unlinkSync(dangling);
+        if (linked)
+            fs.unlinkSync(dangling);
         removeTempFixture(cwd, { recursive: true, force: true });
         removeTempFixture(outside, { recursive: true, force: true });
         removeTempFixture(home, { recursive: true, force: true });
@@ -462,7 +490,7 @@ test("an output directory that is a symlink out of the workspace is refused", ()
     const cwd = makeTempDir("grok-imagine-cwd-");
     const outside = makeTempDir("grok-imagine-outside-");
     const link = path.join(cwd, "grok-imagine");
-    fs.symlinkSync(outside, link);
+    linkDirectory(outside, link);
     const env = { ...fake.env };
     delete env.XAI_API_KEY;
     try {
@@ -473,9 +501,82 @@ test("an output directory that is a symlink out of the workspace is refused", ()
         assert.equal(fs.readdirSync(outside).length, 0);
     }
     finally {
-        fs.unlinkSync(link);
+        unlinkLink(link);
         removeTempFixture(cwd, { recursive: true, force: true });
         removeTempFixture(outside, { recursive: true, force: true });
         removeTempFixture(fake.binDir, { recursive: true, force: true });
     }
 });
+// 失敗条件: 2 枚目以降のコピー失敗で、保存済みの 1 枚目が報告されず終了コード 1・JSON なしになること。
+for (const mode of ["json", "text"]) {
+    test(`imagine keeps the saved image and reports the failure when a later session image cannot be copied (${mode})`, () => {
+        const home = makeTempDir("grok-imagine-home-");
+        const first = sessionImage(home, "fake-session-1", "1.jpg");
+        const second = sessionImage(home, "fake-session-1", "2.jpg", Buffer.alloc(0));
+        const fake = installFakeGrok({ replies: [{
+                    requestPermissionFor: { title: "image_gen", kind: "other", rawInput: { prompt: "cube" } },
+                    updates: [
+                        ...imageUpdates(first),
+                        { sessionUpdate: "tool_call_update", toolCallId: "call-img", status: "completed", content: [{ type: "content", content: { type: "text", text: JSON.stringify({ path: second }) } }] }
+                    ],
+                    text: "saved"
+                }] });
+        const cwd = makeTempDir("grok-imagine-cwd-");
+        const env = { ...fake.env, HOME: home, USERPROFILE: home };
+        delete env.XAI_API_KEY;
+        try {
+            const result = imagine(["imagine", ...(mode === "json" ? ["--json"] : []), "cube"], env, cwd);
+            assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+            assert.equal(fs.readFileSync(path.join(cwd, "grok-imagine", "1.jpg")).toString("hex"), jpeg.toString("hex"));
+            assert.equal(fs.existsSync(path.join(cwd, "grok-imagine", "2.jpg")), false, "a failed copy must not leave an empty output");
+            if (mode === "json") {
+                const payload = JSON.parse(result.stdout);
+                assert.equal(payload.status, "completed");
+                assert.equal(payload.images.length, 1);
+                assert.match(payload.error.message, /Could not copy the generated image/);
+                assert.match(payload.error.guidance, /Saved 1 image/);
+            }
+            else {
+                assert.match(result.stdout, /1\.jpg/);
+                assert.match(result.stderr, /Saved 1 image\(s\), then stopped copying the rest/);
+            }
+        }
+        finally {
+            removeTempFixture(cwd, { recursive: true, force: true });
+            removeTempFixture(home, { recursive: true, force: true });
+            removeTempFixture(fake.binDir, { recursive: true, force: true });
+        }
+    });
+}
+// 失敗条件: 元の読込みや出力の書込みに失敗したとき、自分が作った不完全な出力ファイルが残る。
+// 実ファイルの読込み・書込み失敗は OS 依存で再現しにくいため、fs の該当呼出しだけを一時的に失敗させる。
+for (const failing of ["readFileSync", "writeSync"]) {
+    test(`copySessionImages leaves no output file when ${failing} fails`, () => {
+        const home = makeTempDir("grok-imagine-home-");
+        const cwd = makeTempDir("grok-imagine-cwd-");
+        const source = sessionImage(home);
+        const directory = path.join(cwd, "grok-imagine");
+        const original = fs[failing];
+        try {
+            fs[failing] = (...args) => {
+                if (failing === "readFileSync" && String(args[0]) !== fs.realpathSync(source))
+                    return original(...args);
+                if (failing === "writeSync" && args[1]?.length !== jpeg.length)
+                    return original(...args);
+                throw Object.assign(new Error(`injected ${failing} failure`), { code: "EIO" });
+            };
+            try {
+                assert.throws(() => copySessionImages([source], { directory, fileName: null }, cwd), /injected/);
+            }
+            finally {
+                fs[failing] = original;
+            }
+            assert.deepEqual(fs.existsSync(directory) ? fs.readdirSync(directory) : [], [], "no partial output may remain");
+        }
+        finally {
+            fs[failing] = original;
+            removeTempFixture(cwd, { recursive: true, force: true });
+            removeTempFixture(home, { recursive: true, force: true });
+        }
+    });
+}

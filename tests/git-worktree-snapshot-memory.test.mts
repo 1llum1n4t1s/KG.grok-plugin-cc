@@ -251,7 +251,8 @@ test("Worktree snapshot recovery: captured file includes the entire content", (t
 
 for (const autocrlf of ["true", "input"]) {
   const config = `core.filemode\nfalse\0core.autocrlf\n${autocrlf}\0`;
-  for (const content of ["base\n", "base\r\n", "base"]) {
+  const full = autocrlf === "true";
+  for (const content of (full ? ["base\n", "base\r\n", "base"] : ["base\r\n"])) {
     test(`Auto CRLF ${autocrlf}: ordinary LF/CRLF uses the Git clean form ${JSON.stringify(content)}`, (t) => {
       const unsafe = installMemoryGit(t, { config, content });
       const state = getWorkingTreeState(process.cwd());
@@ -259,42 +260,45 @@ for (const autocrlf of ["true", "input"]) {
       assert.deepEqual(unsafe, []);
     });
   }
-  test(`Auto CRLF ${autocrlf}: changed patch applies to the immutable LF blob`, (t) => {
-    const unsafe = installMemoryGit(t, { config, content: "変更\r\nsecond\r\n" });
-    const context = collectReviewContext(process.cwd(), { mode: "working-tree" });
-    const patch = context.content.split("## Unstaged Diff\n\n")[1].split("\n## Untracked Files")[0];
-    assert.equal(applyReplacementPatch("base\n", patch), "変更\nsecond\n");
-    assert.deepEqual(unsafe, []);
-  });
-  test(`Auto CRLF ${autocrlf}: newly indexed ordinary file compares to its own LF blob`, (t) => {
-    installMemoryGit(t, { config, head: "", content: "base\r\n" });
-    assert.deepEqual(getWorkingTreeState(process.cwd()), { staged: ["app.js"], unstaged: [], untracked: [], isDirty: true });
-  });
-  test(`Auto CRLF ${autocrlf}: untracked content has no index normalization`, (t) => {
-    installMemoryGit(t, { config, head: "", indexText: "", untracked: "notes.txt\0", untrackedContent: "new\r\n" });
-    const context = collectReviewContext(process.cwd(), { mode: "working-tree" });
-    assert.match(context.content, /\+new\r\n/);
-  });
-  test(`Auto CRLF ${autocrlf}: unset eol does not disable automatic text normalization`, (t) => {
-    installMemoryGit(t, { config, content: "base\r\n", attributes: "app.js\0eol\0unset\0" });
-    assert.equal(getWorkingTreeState(process.cwd()).isDirty, false);
-  });
-  for (const attribute of ["text", "crlf"]) {
-    test(`Auto CRLF ${autocrlf}: -${attribute} retains raw CRLF`, (t) => {
-      installMemoryGit(t, { config, content: "base\r\n", attributes: `app.js\0${attribute}\0unset\0` });
+  // git.mts は autocrlf の真偽だけを見るため、input 側は値の受理を示す代表 1 件と fail-closed 系だけを残す。
+  if (full) {
+    test(`Auto CRLF ${autocrlf}: changed patch applies to the immutable LF blob`, (t) => {
+      const unsafe = installMemoryGit(t, { config, content: "変更\r\nsecond\r\n" });
       const context = collectReviewContext(process.cwd(), { mode: "working-tree" });
       const patch = context.content.split("## Unstaged Diff\n\n")[1].split("\n## Untracked Files")[0];
-      assert.equal(applyReplacementPatch("base\n", patch), "base\r\n");
-    });
-  }
-  for (const content of [Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 255]), Buffer.from("base\r\n"), Buffer.from("日本語\n")]) {
-    test(`Auto CRLF ${autocrlf}: raw-identical index bytes prove clean without conversion ${content.toString("base64")}`, (t) => {
-      const sameOid = createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
-      const unsafe = installMemoryGit(t, { config, head: `100644 blob ${sameOid}\tapp.js\0`, indexContent: content, content, rejectBlobRead: true });
-      assert.equal(getWorkingTreeState(process.cwd()).isDirty, false);
-      assert.equal(collectReviewContext(process.cwd(), { mode: "working-tree" }).inputMode, "inline-diff");
+      assert.equal(applyReplacementPatch("base\n", patch), "変更\nsecond\n");
       assert.deepEqual(unsafe, []);
     });
+    test(`Auto CRLF ${autocrlf}: newly indexed ordinary file compares to its own LF blob`, (t) => {
+      installMemoryGit(t, { config, head: "", content: "base\r\n" });
+      assert.deepEqual(getWorkingTreeState(process.cwd()), { staged: ["app.js"], unstaged: [], untracked: [], isDirty: true });
+    });
+    test(`Auto CRLF ${autocrlf}: untracked content has no index normalization`, (t) => {
+      installMemoryGit(t, { config, head: "", indexText: "", untracked: "notes.txt\0", untrackedContent: "new\r\n" });
+      const context = collectReviewContext(process.cwd(), { mode: "working-tree" });
+      assert.match(context.content, /\+new\r\n/);
+    });
+    test(`Auto CRLF ${autocrlf}: unset eol does not disable automatic text normalization`, (t) => {
+      installMemoryGit(t, { config, content: "base\r\n", attributes: "app.js\0eol\0unset\0" });
+      assert.equal(getWorkingTreeState(process.cwd()).isDirty, false);
+    });
+    for (const attribute of ["text", "crlf"]) {
+      test(`Auto CRLF ${autocrlf}: -${attribute} retains raw CRLF`, (t) => {
+        installMemoryGit(t, { config, content: "base\r\n", attributes: `app.js\0${attribute}\0unset\0` });
+        const context = collectReviewContext(process.cwd(), { mode: "working-tree" });
+        const patch = context.content.split("## Unstaged Diff\n\n")[1].split("\n## Untracked Files")[0];
+        assert.equal(applyReplacementPatch("base\n", patch), "base\r\n");
+      });
+    }
+    for (const content of [Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 255]), Buffer.from("base\r\n"), Buffer.from("日本語\n")]) {
+      test(`Auto CRLF ${autocrlf}: raw-identical index bytes prove clean without conversion ${content.toString("base64")}`, (t) => {
+        const sameOid = createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
+        const unsafe = installMemoryGit(t, { config, head: `100644 blob ${sameOid}\tapp.js\0`, indexContent: content, content, rejectBlobRead: true });
+        assert.equal(getWorkingTreeState(process.cwd()).isDirty, false);
+        assert.equal(collectReviewContext(process.cwd(), { mode: "working-tree" }).inputMode, "inline-diff");
+        assert.deepEqual(unsafe, []);
+      });
+    }
   }
   test(`Auto CRLF ${autocrlf}: a changed PNG remains incomplete`, (t) => {
     const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 255]);

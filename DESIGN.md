@@ -36,7 +36,7 @@ Windows では `windows-agent.mjs` が Node.js の `process.arch` に対応す�
 
 ホストの入口から `grok-companion.mjs` を呼び、`grok.mjs` の `withGrok` を経て `GrokAcpClient.connectForeground` でローカルの `grok agent stdio` に接続する。ACP の初期化、新規セッション、プロンプト送信、結果受信、agent の終了を同じ呼出しが担当する。setup は新規セッションを作成して認証を確かめ、タスクのプロンプトは送らない。X 検索と rescue は `task` を利用する。imagine は同じ前景セッションを `imagine` サブコマンドから開始し、新しい接続方式は持たない。
 
-レビューでは `git.mjs` が差分またはリポジトリの対象情報を集め、`prompts/` のテンプレートと schema を載せて送信する。正常に終了した応答の JSON が壊れている場合だけ、同じセッションで一度再出力を求め、初回の権限拒否記録は保持する。task の入力は `--prompt-file`、位置引数、パイプ標準入力の順で選ぶ。JSON 出力ではレビューの原文を `reviewText`、タスクの最終応答を `finalMessage` に含め、通常出力ではレビューを描画し、タスクの応答を直接表示する。
+レビューでは `git.mjs` が差分またはリポジトリの対象情報を集め、`prompts/` のテンプレートと schema を載せて送信する。正常に終了した応答の JSON が壊れている場合だけ、同じセッションで一度再出力を求め、初回の権限拒否記録は保持する。task の入力は `--prompt-file`、位置引数、パイプ標準入力の順で選ぶ。読み取り専用の task（`--write` なし）は、依頼本文の後ろに区切りを置き、シェル許可リストと同じ判定に沿った調査の案内（`buildReadOnlyTaskPrompt`）を足して送る。`--write` の task・imagine・review の送信文は変えない。JSON 出力ではレビューの原文を `reviewText`、タスクの最終応答を `finalMessage` に含め、通常出力ではレビューを描画し、タスクの応答を直接表示する。
 
 Windows の作業ツリースナップショットでは、同梱 helper の `git-snapshot` が固定ローカルドライブのルートから各成分をハンドル相対で開き、reparse point や曖昧なパスを拒否する。ディレクトリとファイルのハンドルは応答の出力完了まで保持し、パスの差し替えによる境界外の読取りを防ぐ。`git.mjs` は応答の版・対象パス・内容・容量を検証し、安全な完全スナップショットを確立できなければ失敗させる。
 
@@ -44,7 +44,7 @@ Windows の作業ツリースナップショットでは、同梱 helper の `gi
 
 ## 重要な不変条件
 
-- レビュー・監査と読み取り専用タスクでは、companion は ACP のファイル要求のパスをワークスペースに照合し、権限要求を読み取り専用の許可リストで判定する。シェルの権限要求はコマンド内容を判定し、不明な操作と書込みを拒否する。編集依頼の task のみ `--write` によって書込みを許可する。imagine は `--write` を受け付けず、権限は画像生成・編集ツール（`image_gen` / `image_edit` と variant `ImageGen` / `ImageEdit`）の 1 回許可だけにする。表示名が `imagine:` で始まるだけでは許可しない。出力先の閉じ込めは作業ディレクトリと出力パスの実体同士で判定し、シンボリックリンクの作業ディレクトリでも同じ実体なら保存する。実体がワークスペースの外なら拒否する。動画ツールは拒否する。Grok は生成画像を自身のセッション `images` ディレクトリへ書き、完了した tool update の text にパスを載せる（JSON の `path`、または Windows の `Image generated and saved to ...`）。companion は今回の ACP `sessionId` 直下の `images` にある通常ファイルだけをワークスペース内の `grok-imagine/` または `--output` へ複製する。過去セッションやセッション外のパスはコピーしない。結果にそれらが混ざっていても、今回のセッション画像は保存し、それ以外は `ignoredPaths` に残す。有効なセッション画像が一つも無いときだけ失敗にする。Grok 組込みのファイル・シェル操作の実行は CLI が担い、companion は全 I/O を仲介しない。この制御は OS サンドボックスではなく、symlink 経由を含む完全なアクセス隔離は保証しない。
+- レビュー・監査と読み取り専用タスクでは、companion は ACP のファイル要求のパスをワークスペースに照合し、権限要求を読み取り専用の許可リストで判定する。シェルの権限要求はコマンド内容を判定し、不明な操作と書込みを拒否する。編集依頼の task のみ `--write` によって書込みを許可する。imagine は `--write` を受け付けず、権限は画像生成・編集ツール（`image_gen` / `image_edit` と variant `ImageGen` / `ImageEdit`）の 1 回許可だけにする。表示名が `imagine:` で始まるだけでは許可しない。出力先の閉じ込めは作業ディレクトリと出力パスの実体同士で判定し、シンボリックリンクの作業ディレクトリでも同じ実体なら保存する。実体がワークスペースの外なら拒否する。動画ツールは拒否する。Grok は生成画像を自身のセッション `images` ディレクトリへ書き、完了した tool update の text にパスを載せる（JSON の `path`、または Windows の `Image generated and saved to ...`）。companion は今回の ACP `sessionId` 直下の `images` にある通常ファイルだけをワークスペース内の `grok-imagine/` または `--output` へ複製する。過去セッションやセッション外のパスはコピーしない。結果にそれらが混ざっていても、今回のセッション画像は保存し、それ以外は `ignoredPaths` に残す。有効なセッション画像が一つも無いときだけ失敗にする。1 枚以上保存した後のコピー失敗は、そこで打ち切って保存済みを返し、理由を `error` 診断の `guidance` に載せる（成功扱い）。Grok 組込みのファイル・シェル操作の実行は CLI が担い、companion は全 I/O を仲介しない。この制御は OS サンドボックスではなく、symlink 経由を含む完全なアクセス隔離は保証しない。
 - レビューと task の正常終了には `completed` と `end_turn`、権限拒否がないこと、agent の終了確認が必要。レビューはさらに schema に沿う結果が必要で、失敗・不完全な出力を承認結果として扱わない。有効な構造化結果でも実行が不完全なら verdict を `incomplete` にする。
 - 結果受信後も agent を閉じ、終了未確認は `turnStopUnconfirmed` と非ゼロ終了コードで伝える。setup も終了未確認を成功扱いしない。
 - 表示言語は `GROK_PLUGIN_LANGUAGE`、`LC_ALL`、`LC_MESSAGES`、`LANG`、OS の表示言語、英語の順に判定する。9 言語の辞書はキー集合とプレースホルダーを一致させ、`tests/i18n.test.mts` で検証する。

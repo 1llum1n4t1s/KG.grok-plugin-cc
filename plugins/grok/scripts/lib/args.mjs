@@ -1,3 +1,4 @@
+import { t } from "./i18n.mjs";
 /**
  * `stopAtFirstPositional` を立てると、最初の非オプションが出た時点で
  * 解析を打ち切り、残りを丸ごと positionals にする。自由記述を受け取る
@@ -47,7 +48,7 @@ export function parseArgs(argv, config = {}) {
             if (valueOptions.has(key)) {
                 const nextValue = inlineValue ?? argv[index + 1];
                 if (nextValue === undefined) {
-                    throw new Error(`Missing value for --${rawKey}`);
+                    throw new Error(t("cli.missing_value", { option: `--${rawKey}` }));
                 }
                 options[key] = nextValue;
                 if (inlineValue === undefined) {
@@ -69,7 +70,7 @@ export function parseArgs(argv, config = {}) {
         if (valueOptions.has(key)) {
             const nextValue = argv[index + 1];
             if (nextValue === undefined) {
-                throw new Error(`Missing value for -${shortKey}`);
+                throw new Error(t("cli.missing_value", { option: `-${shortKey}` }));
             }
             options[key] = nextValue;
             index += 1;

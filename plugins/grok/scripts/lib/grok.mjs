@@ -5,7 +5,7 @@
  *
  *   - Codex の `thread/*` を ACP の `session/*` へ置き換えた。用語も thread → session
  *     に統一している（外向けの戻り値キーは sessionId）。
- *   - Codex には `review/start` という専用 API があったが、Grok には無い。
+ *   - Codex には `review/start` という専用 API があったが、Grok Build の ACP には無い。
  *     レビューは通常の `session/prompt` にレビュー指示と JSON Schema を載せて行い、
  *     読み取り専用の担保は ACP の権限応答側（書き込み系ツールを拒否）で取る。
  *   - Codex 版は `turn/start` が即座に返り、通知の流れから完了を推測して
@@ -59,19 +59,7 @@ function emitProgress(onProgress, message, phase = null, extra = {}) {
     if (typeof onProgress !== "function") {
         return;
     }
-    // job保存用の正規キーへそろえる。sessionIdは既存callbackとの互換用に残す。
-    onProgress({ message, phase, ...extra, ...(extra.sessionId ? { grokSessionId: extra.sessionId } : {}) });
-}
-function emitLogEvent(onProgress, options = {}) {
-    if (typeof onProgress !== "function") {
-        return;
-    }
-    onProgress({
-        message: options.message ?? "",
-        phase: options.phase ?? null,
-        logTitle: options.logTitle ?? null,
-        logBody: options.logBody ?? null
-    });
+    onProgress({ message, phase, ...extra });
 }
 /** 権限要求を読み取り専用の観点で判定する。 */
 function classifyToolCall(params, cwd) {
@@ -113,6 +101,7 @@ function classifyToolCall(params, cwd) {
  */
 function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => { }) {
     const readOnly = createReadOnlyPermissionResponder();
+    const deny = createReadOnlyPermissionResponder({ allowKinds: [] });
     return (params) => {
         const verdict = classifyToolCall(params, cwd);
         const permissionOptions = Array.isArray(params?.options) ? params.options : [];
@@ -123,13 +112,9 @@ function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => 
         const denial = `${reason}: ${shortenText(params?.toolCall?.title ?? "unknown tool", 60)}`;
         onDenied(denial);
         emitProgress(onProgress, `Denied during read-only review (${reason}): ${shortenText(params?.toolCall?.title ?? "unknown tool", 60)}`, "running");
-        const options = Array.isArray(params?.options) ? params.options : [];
-        const reject = options.find((option) => ["reject_once", "reject_always"].includes(option?.kind));
         // 拒否肢があれば選ぶ。ただし Grok Build は選択による拒否でも
         // permission_rejected としてターンを終了することがある。
-        return reject
-            ? { outcome: { outcome: "selected", optionId: reject.optionId } }
-            : { outcome: { outcome: "cancelled" } };
+        return deny(params);
     };
 }
 /**
@@ -138,6 +123,7 @@ function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => 
  */
 function createImaginePermissionHandler(onProgress, onDenied = (_reason) => { }) {
     const allow = createReadOnlyPermissionResponder();
+    const deny = createReadOnlyPermissionResponder({ allowKinds: [] });
     return (params) => {
         const tool = params?.toolCall;
         const permissionOptions = Array.isArray(params?.options) ? params.options : [];
@@ -149,16 +135,13 @@ function createImaginePermissionHandler(onProgress, onDenied = (_reason) => { })
         const title = tool?.title ?? "unknown tool";
         onDenied(`${reason}: ${shortenText(title, 60)}`);
         emitProgress(onProgress, `Denied during imagine (${reason}): ${shortenText(title, 60)}`, "running");
-        const reject = permissionOptions.find((option) => ["reject_once", "reject_always"].includes(option?.kind));
-        return reject
-            ? { outcome: { outcome: "selected", optionId: reject.optionId } }
-            : { outcome: { outcome: "cancelled" } };
+        return deny(params);
     };
 }
 /**
  * ターン中に流れてくる session/update を集約する。
  *
- * Grok 版の TurnCaptureState に相当するが、完了判定を stopReason に委ねられる
+ * Codex 版の TurnCaptureState に相当するが、完了判定を stopReason に委ねられる
  * ぶん単純化してある。
  */
 function createTurnCollector(sessionId, options = {}) {
@@ -717,16 +700,20 @@ function createPermissionDenialLog() {
     const onDenied = (reason) => permissionDenials.push(reason);
     return { permissionDenials, onDenied };
 }
+/** Grok Build の導入コマンド。未導入時の案内（setup と起動失敗）で共有する。 */
+export const GROK_INSTALL_COMMANDS = {
+    windows: "irm https://x.ai/cli/install.ps1 | iex",
+    unix: "curl -fsSL https://x.ai/cli/install.sh | bash"
+};
 function grokMissingMessage(availability) {
-    if (availability?.reason === "missing-agent-stdio") {
-        return "This Grok Build version does not expose `grok agent stdio`. Update it with `grok update`, then rerun `/grok:setup`.";
-    }
-    return "Grok Build is not installed. Install it with `irm https://x.ai/cli/install.ps1 | iex` (Windows) or `curl -fsSL https://x.ai/cli/install.sh | bash`, then rerun `/grok:setup`.";
+    if (availability?.reason === "missing-agent-stdio")
+        return t("err.grok_missing_agent_stdio");
+    return t("err.grok_not_installed", GROK_INSTALL_COMMANDS);
 }
 /**
  * 読み取り専用のコードレビューを実行する。
  *
- * Grok の `review/start` に相当する専用 API が Grok には無いため、
+ * Codex の `review/start` に相当する専用 API が Grok Build の ACP には無いため、
  * レビュー指示と（あれば）JSON Schema をプロンプトへ載せて実行し、
  * 書き込み系ツールは権限応答側で拒否して読み取り専用を担保する。
  */
@@ -763,7 +750,7 @@ export async function runGrokReview(cwd, options = {}) {
                 const retry = await runPrompt(client, sessionId, buildJsonRepairPrompt(attempt.parseError, options.outputSchema), promptOptions);
                 // 訂正に失敗しても最新の本文・終了理由・エラーを返す。
                 // 監査自体の思考サマリは初回のものを残し、JSON訂正の成否とは分ける。
-                // 初回 prompt は送信・終端済みなので、repair の未送信を job 全体の未送信にしない。
+                // 初回 prompt は送信・終端済みなので、repair の未送信を実行全体の未送信にしない。
                 turnState = { ...retry, reasoning: turnState.reasoning, promptNotSent: false };
                 repaired = !retry.error && retry.stopReason === "end_turn" && Boolean(retry.agentMessage) &&
                     !parseStructuredOutput(retry.agentMessage).parseError;
@@ -789,29 +776,47 @@ export async function runGrokReview(cwd, options = {}) {
         permissionHandler: createReviewPermissionHandler(cwd, options.onProgress, onDenied), onWriteDenied: onDenied });
 }
 /**
+ * レビューと読み取り専用 task が共有する、シェル許可リスト（shell-allowlist.mts）に沿った調査の作法。
+ * review のプロンプトはこの並びと文言をそのまま使うため、変えるとレビューの送信文も変わる。
+ */
+const READ_ONLY_SHELL_RULES = [
+    "- Prefer your built-in file-reading tools (read_file, list_dir, and grep). Simple read-only repository commands such as rg are also available. Do not modify files or run commands with side effects.\n",
+    "- The shell uses a command allowlist, not a judgment of whether a script looks read-only. Do not run Python (python/python3/py), Node.js, Bun, other interpreters, or shell wrappers (powershell/pwsh/bash/sh/cmd), including inline scripts with -c, -e, or -Command. Read JSON and verification evidence with read_file and inspect the returned text directly. For multiline files, read_file offset/limit select lines; they cannot split a single long line. If you cannot fully inspect the required content, report that evidence as unverified. Do not run a script to extract or summarize fields.\n",
+    "- Plain shell command names available for read-only inspection are: " + [...READ_ONLY_COMMANDS].join(", ") + ". Their arguments still undergo the read-only checks below. Git and Test-Path have separate restricted forms. If a command is unavailable on this OS, use built-in file tools instead of wrapping it in another shell. ACP file requests must stay within the repository; report evidence you cannot access as unverified.\n",
+    "- Every Git command must start with: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + ". Then use a supported read-only subcommand. For diff, log, show and whatchanged, put --no-ext-diff and --no-textconv immediately after the subcommand as its first two arguments (either order), before any other option, revision or -- path separator. Status and blame are denied. Diff must put --cached or --staged immediately after those two guards, or use an exact 40-digit SHA-1 OID..OID or 64-digit SHA-256 OID..OID there. For fixed ranges, only supported display flags may follow; put paths after -- and do not add revisions or use HEAD/branch names. Use the fixed comparison from collection guidance. Grep requires --cached first; --no-index and modified ls-files checks are denied. These flags suppress textconv/external diff; they do not establish an OS sandbox. Example: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + " diff --no-ext-diff --no-textconv --cached --stat. Use complete option names supported by that specific subcommand and separate short options; options from another subcommand, unknown options, custom pretty formats and --submodule=diff are denied. For example, grep --cached --text is supported, but cat-file --text is denied; use cat-file -p to read an object. Use file tools if a command is unsupported.\n",
+    "- For recent commit history, use --since=YYYY-MM-DD with git log and --oneline, not a custom percent-based format. Example: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + " log --no-ext-diff --no-textconv --since=2026-09-28 --oneline. Replace the example date with the requested starting date.\n",
+    "- Avoid PowerShell script blocks and variables, unquoted parentheses or leading @ (quote search patterns that contain parentheses), command substitution, backticks, redirection, and executable paths: the read-only shell policy rejects these even in a read-only command.\n"
+];
+/**
+ * 読み取り専用 task の末尾へ付ける案内。依頼本文は変えず、調査の作法だけを区切って足す。
+ * Grok Build は許可されない要求を 1 回でも出すとターンごと取り消すことがあるため、先に許可される形を伝える。
+ * 内容は shell-allowlist.mts の実判定と一致させる（パイプは各セグメントの先頭が許可コマンドなら通る）。
+ */
+function buildReadOnlyTaskPrompt(prompt) {
+    return (prompt +
+        "\n\n---\n\n## Read-only inspection rules\n" +
+        "This section only constrains how you inspect the repository. It does not change the request above, the output format it asks for, or the response language.\n" +
+        "- This run is read-only. Do not modify, create, delete or rename files, and do not run commands with side effects.\n" +
+        READ_ONLY_SHELL_RULES.join("") +
+        "- Commands may be joined with |, &&, || or ;, but the first word of every segment must itself be an allowed command from the list above (a pipe into an allowed command is fine). The only PowerShell cmdlet allowed is Test-Path -LiteralPath <path inside the repository>.\n" +
+        "- The command line is split at | ; && and || before quotes are considered, so these separators are also rejected inside quoted patterns and jq filters (for example rg \"a|b\" src, rg \"a && b\" src and jq \".scripts | keys\" package.json are denied). For alternatives use repeated -e options, such as rg -e foo -e bar src, or pipe separate allowed commands.\n" +
+        "- These characters are rejected even inside quotes: ^ { } < > a lone & (not &&), a $name variable, a %name% or !name! sequence (as in \"100% of 50%\") and a newline. Any argument or quoted text is rejected as a path outside the repository when it contains // or \\/, when \\\\ or a / follows the start, a space, =, a quote, \\ or another / (as in \"GET /api\"; /dev/null is the only exception), or when a single letter followed by a colon follows the start, a space, =, a quote, \\ or / (looks like a drive, as in \"x: number\" or \"\\d:\"). An argument may not mix quoted and unquoted text, and absolute paths, .. path segments, a leading ~ (home directory path) and path-qualified executables are rejected. Use --ignore-case, because a lone -i is rejected. Use sed only as sed -n N,Mp. find -exec/-delete and rg --pre are rejected, and a bare space-separated word tee is rejected even as a search term (quote it as \"tee\" to search for it).\n" +
+        "- To get the current commit OID, run git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + " rev-parse HEAD (use HEAD~1 and similar for earlier commits, or a branch name; do not use ^ or @{...}). This task has no collection guidance, so pick the full OIDs to compare yourself with rev-parse.\n" +
+        "- Subagent delegation is unavailable in this read-only runtime; do not call spawn_subagent or other delegation tools.\n" +
+        "- A permission denial can terminate the entire Grok turn, so choose a form that is allowed before making a request. State anything you could not verify as unverified in your answer instead of guessing.\n");
+}
+/**
  * レビュー用のプロンプトを組み立てる。
  *
- * Grok は `review/start` の target でレビュー対象（diff / commit / ブランチ）を
- * 指定できたが、Grok にはその概念が無いので、対象の説明と収集済みの diff を
- * 文章として渡す。
+ * レビュー対象（差分の収集結果と対象の説明）は companion がテンプレートへ埋め込んだ
+ * instructions に含まれているので、ここでは調査の作法（Ground rules）と出力形式を足す。
  */
 function buildReviewPrompt(options = {}) {
     const parts = [];
     parts.push(options.instructions?.trim() || "Review the code in this repository for defects.");
-    if (options.targetDescription) {
-        parts.push(`\n## Review target\n${options.targetDescription}`);
-    }
-    if (options.diff) {
-        parts.push(`\n## Diff under review\n\n\`\`\`diff\n${options.diff}\n\`\`\``);
-    }
     parts.push("\n## Ground rules\n" +
         "- Read whatever files you need from the working tree to judge the change in context.\n" +
-        "- Prefer your built-in file-reading tools (read_file, list_dir, and grep). Simple read-only repository commands such as rg are also available. Do not modify files or run commands with side effects.\n" +
-        "- The shell uses a command allowlist, not a judgment of whether a script looks read-only. Do not run Python (python/python3/py), Node.js, Bun, other interpreters, or shell wrappers (powershell/pwsh/bash/sh/cmd), including inline scripts with -c, -e, or -Command. Read JSON and verification evidence with read_file and inspect the returned text directly. For multiline files, read_file offset/limit select lines; they cannot split a single long line. If you cannot fully inspect the required content, report that evidence as unverified. Do not run a script to extract or summarize fields.\n" +
-        "- Plain shell command names available for read-only inspection are: " + [...READ_ONLY_COMMANDS].join(", ") + ". Their arguments still undergo the read-only checks below. Git and Test-Path have separate restricted forms. If a command is unavailable on this OS, use built-in file tools instead of wrapping it in another shell. ACP file requests must stay within the repository; report evidence you cannot access as unverified.\n" +
-        "- Every Git command must start with: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + ". Then use a supported read-only subcommand. For diff, log, show and whatchanged, put --no-ext-diff and --no-textconv immediately after the subcommand as its first two arguments (either order), before any other option, revision or -- path separator. Status and blame are denied. Diff must put --cached or --staged immediately after those two guards, or use an exact 40-digit SHA-1 OID..OID or 64-digit SHA-256 OID..OID there. For fixed ranges, only supported display flags may follow; put paths after -- and do not add revisions or use HEAD/branch names. Use the fixed comparison from collection guidance. Grep requires --cached first; --no-index and modified ls-files checks are denied. These flags suppress textconv/external diff; they do not establish an OS sandbox. Example: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + " diff --no-ext-diff --no-textconv --cached --stat. Use complete option names supported by that specific subcommand and separate short options; options from another subcommand, unknown options, custom pretty formats and --submodule=diff are denied. For example, grep --cached --text is supported, but cat-file --text is denied; use cat-file -p to read an object. Use file tools if a command is unsupported.\n" +
-        "- For recent commit history, use --since=YYYY-MM-DD with git log and --oneline, not a custom percent-based format. Example: git " + READ_ONLY_GIT_GLOBAL_ARGS.join(" ") + " log --no-ext-diff --no-textconv --since=2026-09-28 --oneline. Replace the example date with the requested starting date.\n" +
-        "- Avoid PowerShell script blocks and variables, unquoted parentheses or leading @ (quote search patterns that contain parentheses), command substitution, backticks, redirection, and executable paths: the read-only shell policy rejects these even in a read-only command.\n" +
+        READ_ONLY_SHELL_RULES.join("") +
         "- Perform all review perspectives yourself in this session. Subagent delegation is unavailable in this read-only runtime; do not call spawn_subagent or other delegation tools, even if repository instructions recommend parallel reviewers.\n" +
         "- A permission denial can terminate the entire Grok turn, so choose supported tools before making a request. If the turn continues after a denial, use supported read-only tools and report the limitation. Never claim approval for an incomplete inspection; use the incomplete verdict.\n" +
         "- Report only defects you can point to a specific file and line for.");
@@ -850,6 +855,25 @@ function buildJsonRepairPrompt(parseError, schema) {
         'Pay particular attention to escaping `"` and `\\` inside string values.\n\n' +
         `It must validate against this JSON Schema:\n\n${JSON.stringify(schema, null, 2)}`);
 }
+/** task と imagine が返す結果の共通部分。キーの並びは --json の出力順そのものなので変えない。 */
+function buildTurnResult(turnState, context) {
+    return {
+        status: buildResultStatus(turnState),
+        sessionId: context.sessionId,
+        model: reportedModel(context.session, context.model),
+        finalMessage: turnState.agentMessage,
+        permissionDenials: context.permissionDenials,
+        reasoningSummary: turnState.reasoning,
+        stopReason: turnState.stopReason,
+        usage: turnState.usage,
+        error: turnState.error,
+        turnStopUnconfirmed: turnState.turnStopUnconfirmed,
+        promptNotSent: turnState.promptNotSent,
+        stderr: cleanGrokStderr(context.client.stderr),
+        touchedFiles: [...turnState.touchedFiles],
+        commandExecutions: turnState.commandExecutions
+    };
+}
 /**
  * 任意のタスクを Grok に委任して 1 ターン実行する。
  * 書き込みを許すかどうかは options.readOnly で切り替える。
@@ -872,28 +896,8 @@ export async function runGrokTurn(cwd, options = {}) {
             client.setWriteDeniedHandler(onDenied);
             client.setPermissionHandler(createAllowAllPermissionResponder());
         }
-        const turnState = await runPrompt(client, sessionId, prompt, { onProgress: options.onProgress });
-        emitLogEvent(options.onProgress, {
-            phase: "completed",
-            logTitle: turnState.title ?? null,
-            logBody: null
-        });
-        return {
-            status: buildResultStatus(turnState),
-            sessionId,
-            model: reportedModel(session, model),
-            finalMessage: turnState.agentMessage,
-            permissionDenials,
-            reasoningSummary: turnState.reasoning,
-            stopReason: turnState.stopReason,
-            usage: turnState.usage,
-            error: turnState.error,
-            turnStopUnconfirmed: turnState.turnStopUnconfirmed,
-            promptNotSent: turnState.promptNotSent,
-            stderr: cleanGrokStderr(client.stderr),
-            touchedFiles: [...turnState.touchedFiles],
-            commandExecutions: turnState.commandExecutions
-        };
+        const turnState = await runPrompt(client, sessionId, options.readOnly ? buildReadOnlyTaskPrompt(prompt) : prompt, { onProgress: options.onProgress });
+        return buildTurnResult(turnState, { session, sessionId, model, permissionDenials, client });
     }, { grokBin: availability.bin, env, readOnly: Boolean(options.readOnly),
         ...(options.readOnly ? { permissionHandler: createReviewPermissionHandler(cwd, options.onProgress, onDenied), onWriteDenied: onDenied } : {}) });
 }
@@ -938,22 +942,8 @@ export async function runGrokImagine(cwd, options = {}) {
                 }
             }
         });
-        emitLogEvent(options.onProgress, { phase: "completed", logTitle: turnState.title ?? null, logBody: null });
         return {
-            status: buildResultStatus(turnState),
-            sessionId,
-            model: reportedModel(session, model),
-            finalMessage: turnState.agentMessage,
-            permissionDenials,
-            reasoningSummary: turnState.reasoning,
-            stopReason: turnState.stopReason,
-            usage: turnState.usage,
-            error: turnState.error,
-            turnStopUnconfirmed: turnState.turnStopUnconfirmed,
-            promptNotSent: turnState.promptNotSent,
-            stderr: cleanGrokStderr(client.stderr),
-            touchedFiles: [...turnState.touchedFiles],
-            commandExecutions: turnState.commandExecutions,
+            ...buildTurnResult(turnState, { session, sessionId, model, permissionDenials, client }),
             imagePaths: [...imagePaths],
             toolFailureText: failureTexts.join("\n")
         };

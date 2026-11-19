@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { SUPPORTED_LANGUAGES, detectLanguage, matchLanguageTag, t } from "../plugins/grok/scripts/lib/i18n.mjs";
+import { GROK_INSTALL_COMMANDS } from "../plugins/grok/scripts/lib/grok.mjs";
 import { renderReviewResult } from "../plugins/grok/scripts/lib/render.mjs";
 const scriptsDirectory = fileURLToPath(new URL("../plugins/grok/scripts/", import.meta.url));
 const localesDirectory = path.join(scriptsDirectory, "locales");
@@ -28,8 +30,8 @@ test("all dictionaries share the English key set and the same placeholders", () 
     }
 });
 test("keys referenced by the code exist in the dictionary and no dictionary key is unused", () => {
-    const sources = ["grok-companion.mts", "lib/render.mts", "lib/grok.mts", "lib/imagine.mts"].map(file => fs.readFileSync(path.join(scriptsDirectory, file), "utf8")).join("\n");
-    const used = new Set([...sources.matchAll(/"((?:cli|setup|diag|review|render|imagine)\.[a-z_.]+)"/g)].map(match => match[1]));
+    const sources = ["grok-companion.mts", "lib/render.mts", "lib/grok.mts", "lib/imagine.mts", "lib/args.mts", "lib/git.mts", "lib/language.mts"].map(file => fs.readFileSync(path.join(scriptsDirectory, file), "utf8")).join("\n");
+    const used = new Set([...sources.matchAll(/"((?:cli|setup|diag|review|render|imagine|err)\.[a-z_.]+)"/g)].map(match => match[1]));
     const keys = new Set(Object.keys(dictionary("en")));
     for (const key of used)
         assert.ok(keys.has(key), `code references missing key ${key}`);
@@ -100,4 +102,15 @@ test("the companion help follows the environment language and falls back to Engl
     assert.match(japanese.stdout, /^使い方: grok-companion\.mjs <setup\|review\|adversarial-review\|audit\|task\|imagine>/);
     assert.match(help({ LC_ALL: "fr_FR.UTF-8" }).stdout, /^Utilisation: grok-companion\.mjs/);
     assert.match(help({ GROK_PLUGIN_LANGUAGE: "it" }).stdout, /^Usage: grok-companion\.mjs/);
+});
+test("the missing-Grok startup error follows the display language and shares the install commands", () => {
+    const missing = path.join(scriptsDirectory, "no-such-grok-binary");
+    const run = (language) => spawnSync(process.execPath, [path.join(scriptsDirectory, "grok-companion.mjs"), "task", "inspect"], {
+        encoding: "utf8", timeout: 15000, cwd: os.tmpdir(), env: { ...process.env, GROK_PLUGIN_LANGUAGE: language, GROK_BIN: missing }
+    });
+    const japanese = run("ja");
+    assert.equal(japanese.status, 1, japanese.stderr);
+    assert.match(japanese.stderr, /Grok Build がインストールされていません/);
+    assert.ok(japanese.stderr.includes(GROK_INSTALL_COMMANDS.windows) && japanese.stderr.includes(GROK_INSTALL_COMMANDS.unix));
+    assert.match(run("en").stderr, /^Grok Build is not installed\. Install it with `irm https:\/\/x\.ai\/cli\/install\.ps1 \| iex` \(Windows\) or `curl -fsSL https:\/\/x\.ai\/cli\/install\.sh \| bash`, then rerun `\/grok:setup`\./m);
 });

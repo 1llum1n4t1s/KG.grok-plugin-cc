@@ -167,7 +167,10 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_ENV, `GROK_TEST_SHIM=${shim}\nGROK_GIT_NATIVE_FIXTURE_ROOT=${fixture}\n`);
           console.log(`Host fixture shim: ${shim}; distribution architecture: ${process.arch}`);
           NODE
+      # The ia32 job runs on the same x86_64 host image and Rust toolchain as windows-boundaries,
+      # whose scripts/run-tests.mts already runs these same host unit tests, so only arm64 needs them here.
       - name: Test native host helper units
+        if: matrix.expected-arch == 'arm64'
         run: rustup run 1.97.1 cargo test --locked --manifest-path plugins/grok/native/Cargo.toml --bin grok-windows-helper
       # Do not run build:native: these tests must execute the committed exe.
       - name: Test committed distribution process and Git boundaries
