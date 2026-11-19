@@ -41,6 +41,7 @@ function listSkills(relativePath) {
 const PUBLIC_WORKFLOWS = [
     "adversarial-review",
     "audit",
+    "imagine",
     "rescue",
     "review",
     "setup",
@@ -118,7 +119,7 @@ test("Claude-only helpers stay outside Codex skill discovery", () => {
     }
 });
 test("Claude workflows return the foreground output rather than retrieving a job", () => {
-    for (const name of ["review", "adversarial-review", "audit", "rescue", "x"]) {
+    for (const name of ["review", "adversarial-review", "audit", "rescue", "x", "imagine"]) {
         const source = read(`commands/${name}.md`);
         assert.match(source, /return completed stdout faithfully/i, `${name} must return its own output`);
         assert.doesNotMatch(source, /grok-companion\.mjs" (?:status|result|cancel)/i);
@@ -180,6 +181,19 @@ test("responses follow the sender's language dynamically", () => {
     // rescue 経路: 依頼文を英訳せず元の言語のまま転送する指示があること。
     assert.match(read("agents/grok-rescue.md"), /preserving its language/i);
     assert.match(read("skills/source-command-rescue/SKILL.md"), /preserve the task language/i);
+});
+test("imagine copies images only and requires an explicit API billing opt-in", () => {
+    const claude = read("commands/imagine.md");
+    const codex = read("skills/source-command-imagine/SKILL.md");
+    assert.match(claude, /grok-companion\.mjs" imagine once in the foreground/);
+    assert.match(claude, /do not pass `--write`/i);
+    assert.match(claude, /do not add `--allow-api-billing`/i);
+    assert.match(claude, /grok-imagine\//);
+    assert.match(codex, /grok-companion\.mjs imagine --json/);
+    assert.match(codex, /do not pass --write/i);
+    assert.match(codex, /do not add `--allow-api-billing`/i);
+    assert.match(codex, /image-entitlement-missing/);
+    assert.match(codex, /usage-balance-exhausted/);
 });
 test("rescue forwards one concrete task and grants write access only on request", () => {
     const rescue = read("commands/rescue.md");

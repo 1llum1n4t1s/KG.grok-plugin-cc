@@ -1,7 +1,7 @@
 {
   "name": "grok",
   "version": "1.1.12",
-  "description": "Use Grok Build from Claude Code or Codex to review code, audit repositories, search X, or delegate tasks.",
+  "description": "Use Grok Build from Claude Code or Codex to review code, audit repositories, search X, delegate tasks, or generate images.",
   "author": {
     "name": "Kagayoi",
     "url": "https://github.com/1llum1n4t1s"
@@ -20,8 +20,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Grok Build Companion",
-    "shortDescription": "Run Grok reviews, audits, searches, and delegated tasks",
-    "longDescription": "Use the locally installed Grok Build CLI from Codex for read-only code reviews, full-repository audits, X searches, and explicitly delegated investigation or implementation work.",
+    "shortDescription": "Run Grok reviews, audits, searches, tasks, and image generation",
+    "longDescription": "Use the locally installed Grok Build CLI from Codex for read-only code reviews, full-repository audits, X searches, explicitly delegated investigation or implementation work, and image generation that copies only the generated files into the workspace.",
     "developerName": "Kagayoi",
     "category": "Developer Tools",
     "capabilities": [

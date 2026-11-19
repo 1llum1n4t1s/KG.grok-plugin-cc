@@ -2,7 +2,7 @@
 
 # 适用于 Claude Code 和 Codex 的 Grok 插件
 
-在 Claude Code 或 Codex 中运行 Grok Build，用于代码审查、仓库审计、X 搜索和委派任务。本项目是 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) 的分支，详见 [NOTICE](NOTICE)。
+在 Claude Code 或 Codex 中运行 Grok Build，用于代码审查、仓库审计、X 搜索、委派任务和图像生成。本项目是 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) 的分支，详见 [NOTICE](NOTICE)。
 
 ## 要求与安装
 
@@ -34,7 +34,7 @@ codex plugin add grok@kagayoi-grok
 
 ## 命令
 
-Claude Code 提供 `/grok:review`、`/grok:adversarial-review`、`/grok:audit`、`/grok:rescue`、`/grok:x` 和 `/grok:setup`。在 Codex 中，请选择对应的 `grok:source-command-<name>` skill。审查和审计为只读；rescue 可以请求编辑，而 X 搜索保持只读。Setup 用于检查 Grok 的认证状态。
+Claude Code 提供 `/grok:review`、`/grok:adversarial-review`、`/grok:audit`、`/grok:imagine`、`/grok:rescue`、`/grok:x` 和 `/grok:setup`。在 Codex 中，请选择对应的 `grok:source-command-<name>` skill。审查和审计为只读；rescue 可以请求编辑，而 X 搜索保持只读。`/grok:imagine <description>` 让 Grok Build 生成图像，并复制到工作区的 `grok-imagine/`，或复制到仍位于工作区内的 `--output <path>`。它不会编辑仓库中的其他文件。使用 `grok login` 时，生成消耗订阅的共享每周用量池。设置了 `XAI_API_KEY` 时，命令会停下来，直到加上 `--allow-api-billing`：API 图像按 xAI 费率计费（`grok-imagine-image-2.0` 标价自 $0.04/img 起），而不是使用该用量池。Setup 用于检查 Grok 的认证状态。
 
 在 Windows 上，请使用 `/grok:review --scope working-tree` 审查本地更改。`auto` 和 `working-tree` 范围需要完整且安全的 Windows 快照，若无法获取则会失败。在 macOS/Linux 上，请显式使用 `/grok:review --scope branch` 或 `--base <ref>` 审查已提交的更改；未提交的更改不包含在比较差异中，但周边文件仍可能从工作树中读取。在任何平台上，都可以使用 `/grok:audit authentication` 将整个仓库的审计聚焦于特定主题，或使用 `/grok:rescue <task>` 委派任务。审查、对抗式审查和审计还接受 `--language <BCP 47 tag>`。当安装或认证失败时，请运行 `/grok:setup`，并按照其报告的错误和 Grok 的登录指引操作。
 
@@ -48,7 +48,7 @@ companion 自身的消息（setup 结果、审查标题、诊断信息和帮助�
 
 ## 故障排查
 
-如果某次调用报告 HTTP 402 及 `usage balance exhausted`，说明 Grok Build 的用量余额已耗尽。请在余额恢复后重试。超时、权限被拒绝、审查不完整或未确认 agent 已停止，均视为调用失败；请勿将部分输出当作已完成的审查或任务。
+如果某次调用报告 HTTP 402 及 `usage balance exhausted`，说明 Grok Build 的用量余额已耗尽。请在余额恢复后重试。订阅登录下的图像生成也使用同一个共享用量池。如果图像生成报告 Grok Build 的图像工具需要 SuperGrok 订阅，则此登录不包含 Imagine；请使用包含 Imagine 的方案，或使用带 `--allow-api-billing` 的 API 密钥。超时、权限被拒绝、审查不完整或未确认 agent 已停止，均视为调用失败；请勿将部分输出当作已完成的审查或任务。
 
 在只读审查期间，即使脚本仅用于读取文件，Python、Node.js、Bun 和 shell 包装器也会被拒绝。Grok Build 可能在权限被拒绝后以 `cancelled` 结束该轮。请使用内置文件工具检查 JSON 和其他证据；无法获取的证据仍视为未验证。审查提示词会在检查开始前提供这些限制。
 

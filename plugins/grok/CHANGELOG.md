@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added `/grok:imagine` and the Codex skill `grok:source-command-imagine`. The command starts one foreground Grok session, allows only the image tool, and copies the generated file from Grok's session images directory into `grok-imagine/` or `--output`. It does not edit the rest of the repository.
+- Subscription sign-in draws image generation from the shared weekly usage pool. When `XAI_API_KEY` is set, imagine stops until `--allow-api-billing` is passed and states that API images are billed at xAI rates (`grok-imagine-image-2.0` is listed from $0.04/img).
+- HTTP 402 with `usage balance exhausted` and a report that image tools need a SuperGrok subscription now include localized guidance.
+
 ## 1.1.12
 
 - Read-only tasks no longer deny `Test-Path` on a path inside the repository when it is written through a symlinked alias of the repository path, such as macOS `/var` for `/private/var`. Paths whose real location is outside the repository are still denied.

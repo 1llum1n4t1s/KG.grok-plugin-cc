@@ -2,7 +2,7 @@
 
 # Grok plugin for Claude Code and Codex
 
-Run Grok Build from Claude Code or Codex for code reviews, repository audits, X searches, and delegated tasks. This project is a fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc); see [NOTICE](NOTICE).
+Run Grok Build from Claude Code or Codex for code reviews, repository audits, X searches, delegated tasks, and image generation. This project is a fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc); see [NOTICE](NOTICE).
 
 ## Requirements and installation
 
@@ -34,7 +34,7 @@ For Codex, run `codex plugin marketplace upgrade kagayoi-grok` to refresh the ma
 
 ## Commands
 
-Claude Code exposes `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:rescue`, `/grok:x`, and `/grok:setup`. In Codex, select the corresponding `grok:source-command-<name>` skill. Review and audit are read-only; rescue can request edits, while X search stays read-only. Setup checks Grok authentication.
+Claude Code exposes `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:imagine`, `/grok:rescue`, `/grok:x`, and `/grok:setup`. In Codex, select the corresponding `grok:source-command-<name>` skill. Review and audit are read-only; rescue can request edits, while X search stays read-only. `/grok:imagine <description>` asks Grok Build to generate an image and copies it into `grok-imagine/` in the workspace, or into `--output <path>` when that path stays inside the workspace. It does not otherwise edit the repository. With `grok login`, generation uses the subscription's shared weekly usage pool. When `XAI_API_KEY` is set, the command stops until `--allow-api-billing` is passed: API images are billed at xAI rates (`grok-imagine-image-2.0` is listed from $0.04/img) instead of that pool. Setup checks Grok authentication.
 
 On Windows, use `/grok:review --scope working-tree` to review local changes. The `auto` and `working-tree` scopes require a complete safe Windows snapshot and fail if it cannot be collected. On macOS/Linux, explicitly use `/grok:review --scope branch` or `--base <ref>` to review committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use `/grok:audit authentication` to focus a whole-repository audit on any platform, or `/grok:rescue <task>` to delegate a task. Review, adversarial review, and audit also accept `--language <BCP 47 tag>`. Run `/grok:setup` when installation or authentication fails; follow its reported error and Grok’s login guidance.
 
@@ -48,7 +48,7 @@ The companion's own messages (setup results, review headings, diagnostics, and h
 
 ## Troubleshooting
 
-If an invocation reports HTTP 402 with `usage balance exhausted`, Grok Build's usage balance is exhausted. Retry after that balance recovers. A timeout, permission denial, incomplete review, or unconfirmed agent stop is a failed invocation; do not treat partial output as a completed review or task.
+If an invocation reports HTTP 402 with `usage balance exhausted`, Grok Build's usage balance is exhausted. Retry after that balance recovers. Subscription image generation draws from that same shared pool. If image generation reports that Grok Build's image tools need a SuperGrok subscription, this sign-in does not include Imagine; use a plan that includes it, or an API key with `--allow-api-billing`. A timeout, permission denial, incomplete review, or unconfirmed agent stop is a failed invocation; do not treat partial output as a completed review or task.
 
 During read-only reviews, Python, Node.js, Bun, and shell wrappers are denied even for scripts intended only to read files. Grok Build can end the turn with `cancelled` after a permission rejection. Use built-in file tools to inspect JSON and other evidence; unavailable evidence remains unverified. The review prompt supplies these restrictions before inspection starts.
 

@@ -2,7 +2,7 @@
 
 # Claude Code 및 Codex용 Grok 플러그인
 
-Claude Code 또는 Codex에서 Grok Build를 실행하여 코드 리뷰, 저장소 감사, X 검색, 위임 작업을 수행합니다. 이 프로젝트는 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)의 포크이며, 자세한 내용은 [NOTICE](NOTICE)를 참조하십시오.
+Claude Code 또는 Codex에서 Grok Build를 실행하여 코드 리뷰, 저장소 감사, X 검색, 위임 작업, 이미지 생성을 수행합니다. 이 프로젝트는 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)의 포크이며, 자세한 내용은 [NOTICE](NOTICE)를 참조하십시오.
 
 ## 요구 사항 및 설치
 
@@ -34,7 +34,7 @@ Codex에서는 `codex plugin marketplace upgrade kagayoi-grok`을 실행하여 �
 
 ## 명령어
 
-Claude Code에서는 `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:rescue`, `/grok:x`, `/grok:setup`을 사용할 수 있습니다. Codex에서는 대응하는 `grok:source-command-<name>` 스킬을 선택하십시오. 리뷰와 감사는 읽기 전용이고, rescue는 편집을 요청할 수 있으며, X 검색은 읽기 전용입니다. Setup은 Grok 인증을 확인합니다.
+Claude Code에서는 `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:imagine`, `/grok:rescue`, `/grok:x`, `/grok:setup`을 사용할 수 있습니다. Codex에서는 대응하는 `grok:source-command-<name>` 스킬을 선택하십시오. 리뷰와 감사는 읽기 전용이고, rescue는 편집을 요청할 수 있으며, X 검색은 읽기 전용입니다. `/grok:imagine <description>`은 Grok Build에 이미지를 생성하게 하고, 워크스페이스의 `grok-imagine/` 또는 워크스페이스 안에 있는 `--output <path>`로 복사합니다. 저장소의 다른 파일은 편집하지 않습니다. `grok login`에서는 생성이 구독의 공유 주간 사용량 풀에서 차감됩니다. `XAI_API_KEY`가 있으면 `--allow-api-billing`을 붙일 때까지 명령이 멈춥니다. API 이미지는 그 풀이 아니라 xAI 요금으로 청구됩니다(`grok-imagine-image-2.0`은 $0.04/img부터). Setup은 Grok 인증을 확인합니다.
 
 Windows에서는 `/grok:review --scope working-tree`로 로컬 변경 사항을 리뷰합니다. `auto` 및 `working-tree` 범위는 안전한 Windows 스냅샷 전체가 필요하며, 수집할 수 없으면 실패합니다. macOS/Linux에서는 커밋된 변경 사항을 리뷰하려면 `/grok:review --scope branch` 또는 `--base <ref>`를 명시적으로 사용하십시오. 커밋되지 않은 변경 사항은 비교 diff에서 제외되지만, 주변 파일은 작업 트리에서 읽을 수 있습니다. 어느 플랫폼에서나 `/grok:audit authentication`으로 저장소 전체 감사의 초점을 지정할 수 있고, `/grok:rescue <task>`로 작업을 위임할 수 있습니다. 리뷰, 적대적 리뷰, 감사는 `--language <BCP 47 tag>`도 지원합니다. 설치나 인증에 실패하면 `/grok:setup`을 실행하고, 보고된 오류와 Grok의 로그인 안내를 따르십시오.
 
@@ -48,7 +48,7 @@ Windows에서는 `/grok:review --scope working-tree`로 로컬 변경 사항을 
 
 ## 문제 해결
 
-호출 시 `usage balance exhausted`와 함께 HTTP 402가 보고되면 Grok Build의 사용 잔액이 소진된 것입니다. 잔액이 회복된 후 다시 시도하십시오. 타임아웃, 권한 거부, 불완전한 리뷰, 확인되지 않은 에이전트 중지는 실패한 호출입니다. 부분적인 출력을 완료된 리뷰나 작업으로 간주하지 마십시오.
+호출 시 `usage balance exhausted`와 함께 HTTP 402가 보고되면 Grok Build의 사용 잔액이 소진된 것입니다. 잔액이 회복된 후 다시 시도하십시오. 구독 로그인의 이미지 생성도 같은 공유 풀을 사용합니다. 이미지 도구에 SuperGrok 구독이 필요하다고 보고되면 이 로그인에는 Imagine이 포함되지 않은 것입니다. Imagine이 포함된 플랜을 쓰거나, `--allow-api-billing`을 붙인 API 키를 사용하십시오. 타임아웃, 권한 거부, 불완전한 리뷰, 확인되지 않은 에이전트 중지는 실패한 호출입니다. 부분적인 출력을 완료된 리뷰나 작업으로 간주하지 마십시오.
 
 읽기 전용 리뷰 중에는 파일을 읽기 위한 용도의 스크립트라 하더라도 Python, Node.js, Bun, 셸 래퍼가 거부됩니다. Grok Build는 권한이 거부된 후 `cancelled`로 턴을 종료할 수 있습니다. JSON 및 기타 증거를 확인하려면 내장 파일 도구를 사용하십시오. 확인할 수 없는 증거는 미검증 상태로 남습니다. 리뷰 프롬프트는 검사가 시작되기 전에 이러한 제한 사항을 제공합니다.
 
