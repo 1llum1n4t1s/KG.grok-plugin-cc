@@ -422,6 +422,8 @@ class AcpClientBase {
   /**
    * エージェントから渡されたパスをセッションの作業ディレクトリ内へ閉じ込める。
    * 外へ出るパスは null を返して呼び出し側で拒否させる。
+   * 作業フォルダーと対象が別名の経路でも、実在する祖先の実体が作業領域の実体内なら許可する。
+   * 未作成の末尾は、その祖先から解決した実体パスが領域内のときだけ許可する。
    */
   resolveWorkspacePath(target) {
     if (typeof target !== "string" || !target) {
@@ -429,12 +431,8 @@ class AcpClientBase {
     }
     const root = path.resolve(this.cwd);
     const resolved = path.resolve(root, target);
-    const relative = path.relative(root, resolved);
-    if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) {
-      return null;
-    }
 
-    const realRoot = fs.realpathSync(root);
+    const realRoot = fs.realpathSync.native(root);
     let existing = resolved;
     const missing = [];
     // 未作成のwrite先も、存在する最深の祖先までリンク先を確認する。
@@ -453,7 +451,7 @@ class AcpClientBase {
 
     let realExisting;
     try {
-      realExisting = fs.realpathSync(existing);
+      realExisting = fs.realpathSync.native(existing);
     } catch (error) {
       // dangling link は新規ファイルと区別して拒否する。
       if (error?.code === "ENOENT") return null;
