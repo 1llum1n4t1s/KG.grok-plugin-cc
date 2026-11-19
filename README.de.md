@@ -2,7 +2,7 @@
 
 # Grok-Plugin für Claude Code und Codex
 
-Führen Sie Grok Build aus Claude Code oder Codex heraus aus, um Code-Reviews, Repository-Audits, X-Suchen und delegierte Aufgaben durchzuführen. Dieses Projekt ist ein Fork von [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc); siehe [NOTICE](NOTICE).
+Führen Sie Grok Build aus Claude Code oder Codex heraus aus, um Code-Reviews, Repository-Audits, X-Suchen, delegierte Aufgaben und Bilderzeugung durchzuführen. Dieses Projekt ist ein Fork von [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc); siehe [NOTICE](NOTICE).
 
 ## Voraussetzungen und Installation
 
@@ -34,7 +34,7 @@ Führen Sie für Codex `codex plugin marketplace upgrade kagayoi-grok` aus, um d
 
 ## Befehle
 
-Claude Code stellt `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:rescue`, `/grok:x` und `/grok:setup` bereit. In Codex wählen Sie den entsprechenden Skill `grok:source-command-<name>`. Review und Audit sind schreibgeschützt; Rescue kann Änderungen anfordern, während die X-Suche schreibgeschützt bleibt. Setup prüft die Grok-Authentifizierung.
+Claude Code stellt `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:imagine`, `/grok:rescue`, `/grok:x` und `/grok:setup` bereit. In Codex wählen Sie den entsprechenden Skill `grok:source-command-<name>`. Review und Audit sind schreibgeschützt; Rescue kann Änderungen anfordern, während die X-Suche schreibgeschützt bleibt. `/grok:imagine <description>` lässt Grok Build ein Bild erzeugen und kopiert es nach `grok-imagine/` im Workspace oder nach `--output <path>`, wenn dieser Pfad im Workspace bleibt. Das übrige Repository wird nicht bearbeitet. Mit `grok login` wird die Erzeugung aus dem gemeinsamen wöchentlichen Nutzungsguthaben des Abonnements gezogen. Ist `XAI_API_KEY` gesetzt, stoppt der Befehl, bis `--allow-api-billing` übergeben wird: API-Bilder werden zu xAI-Preisen abgerechnet (`grok-imagine-image-2.0` ist ab $0.04/img gelistet), nicht aus diesem Guthaben. Setup prüft die Grok-Authentifizierung.
 
 Verwenden Sie unter Windows `/grok:review --scope working-tree`, um lokale Änderungen zu prüfen. Die Scopes `auto` und `working-tree` erfordern einen vollständigen, sicheren Windows-Snapshot und schlagen fehl, wenn dieser nicht erstellt werden kann. Verwenden Sie unter macOS/Linux ausdrücklich `/grok:review --scope branch` oder `--base <ref>`, um committete Änderungen zu prüfen; nicht committete Änderungen sind vom Vergleichs-Diff ausgeschlossen, umgebende Dateien können jedoch weiterhin aus dem Arbeitsverzeichnis gelesen werden. Verwenden Sie `/grok:audit authentication`, um ein Audit des gesamten Repositorys auf jeder Plattform auf ein Thema zu fokussieren, oder `/grok:rescue <task>`, um eine Aufgabe zu delegieren. Review, Adversarial Review und Audit akzeptieren außerdem `--language <BCP 47 tag>`. Führen Sie `/grok:setup` aus, wenn Installation oder Authentifizierung fehlschlägt; folgen Sie der gemeldeten Fehlermeldung und der Anmeldeanleitung von Grok.
 
@@ -48,7 +48,7 @@ Die eigenen Meldungen des Companions (Setup-Ergebnisse, Review-Überschriften, D
 
 ## Fehlerbehebung
 
-Meldet ein Aufruf HTTP 402 mit `usage balance exhausted`, ist das Nutzungsguthaben von Grok Build aufgebraucht. Versuchen Sie es erneut, sobald sich das Guthaben erholt hat. Ein Timeout, eine verweigerte Berechtigung, ein unvollständiges Review oder ein nicht bestätigter Agent-Stopp gilt als fehlgeschlagener Aufruf; behandeln Sie Teilausgaben nicht als abgeschlossenes Review oder abgeschlossene Aufgabe.
+Meldet ein Aufruf HTTP 402 mit `usage balance exhausted`, ist das Nutzungsguthaben von Grok Build aufgebraucht. Versuchen Sie es erneut, sobald sich das Guthaben erholt hat. Die Bilderzeugung per Abonnement nutzt dasselbe gemeinsame Guthaben. Meldet die Bilderzeugung, dass die Bildwerkzeuge von Grok Build ein SuperGrok-Abonnement benötigen, enthält diese Anmeldung Imagine nicht; verwenden Sie einen Tarif, der es enthält, oder einen API-Schlüssel mit `--allow-api-billing`. Ein Timeout, eine verweigerte Berechtigung, ein unvollständiges Review oder ein nicht bestätigter Agent-Stopp gilt als fehlgeschlagener Aufruf; behandeln Sie Teilausgaben nicht als abgeschlossenes Review oder abgeschlossene Aufgabe.
 
 Bei schreibgeschützten Reviews werden Python-, Node.js-, Bun- und Shell-Wrapper selbst dann verweigert, wenn die Skripte nur Dateien lesen sollen. Grok Build kann den Turn nach einer Berechtigungsablehnung mit `cancelled` beenden. Verwenden Sie die integrierten Dateiwerkzeuge, um JSON und andere Belege zu prüfen; nicht verfügbare Belege bleiben unverifiziert. Der Review-Prompt nennt diese Einschränkungen, bevor die Prüfung beginnt.
 

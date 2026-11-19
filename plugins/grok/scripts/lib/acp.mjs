@@ -149,6 +149,69 @@ export function createAllowAllPermissionResponder() {
         allowKinds: ["allow_always", "allow_once"]
     });
 }
+/** Windows の `\\?\` を外す。native realpath の戻りを path.resolve へ渡す前に必要。 */
+function withoutExtendedPrefix(value) {
+    if (value.startsWith("\\\\?\\UNC\\"))
+        return `\\\\${value.slice(8)}`;
+    if (value.startsWith("\\\\?\\"))
+        return value.slice(4);
+    return value;
+}
+/**
+ * ワークスペース配下に解決できるパスだけを返す。
+ * cwd と対象の両方を実パスで比べる。シンボリックリンクの作業ディレクトリ
+ * （macOS の /tmp や /var の別名を含む）と、既に解決済みの出力先が同じ実体なら許可する。
+ * 語彙上の相対が外に見えても、実体がワークスペース内なら同じ境界である。
+ * 実体が外のパス、ワークスペース外へのシンボリックリンク、切れたリンクは null。
+ * 未作成の末尾要素も、存在する祖先の実体がワークスペース内なら許可する。
+ * native realpath の `\\?\` は比較の前に外す。付けたまま未作成の子を足すと Windows で外に見える。
+ */
+export function containWorkspacePath(cwd, target) {
+    if (typeof target !== "string" || !target || typeof cwd !== "string" || !cwd)
+        return null;
+    const root = path.resolve(cwd);
+    let realRoot;
+    try {
+        realRoot = withoutExtendedPrefix(fs.realpathSync.native(root));
+    }
+    catch {
+        return null;
+    }
+    const resolved = path.resolve(root, target);
+    let existing = resolved;
+    const missing = [];
+    // 未作成の write 先も、存在する最深の祖先までリンク先を確認する。
+    while (true) {
+        try {
+            fs.lstatSync(existing);
+            break;
+        }
+        catch (error) {
+            if (error?.code !== "ENOENT")
+                throw error;
+            const parent = path.dirname(existing);
+            if (parent === existing)
+                return null;
+            missing.unshift(path.basename(existing));
+            existing = parent;
+        }
+    }
+    let realExisting;
+    try {
+        realExisting = withoutExtendedPrefix(fs.realpathSync.native(existing));
+    }
+    catch (error) {
+        // dangling link は新規ファイルと区別して拒否する。
+        if (error?.code === "ENOENT")
+            return null;
+        throw error;
+    }
+    const realTarget = path.resolve(realExisting, ...missing);
+    const realRelative = path.relative(realRoot, realTarget);
+    if (realRelative === ".." || realRelative.startsWith(".." + path.sep) || path.isAbsolute(realRelative))
+        return null;
+    return realTarget;
+}
 class AcpClientBase {
     constructor(cwd, options = {}) {
         this.cwd = cwd;
@@ -368,53 +431,10 @@ class AcpClientBase {
     }
     /**
      * エージェントから渡されたパスをセッションの作業ディレクトリ内へ閉じ込める。
-     * 外へ出るパスは null を返して呼び出し側で拒否させる。
+     * 判定は containWorkspacePath に一本化する。別名経路も実体で許可し、実体が外なら拒否する。
      */
     resolveWorkspacePath(target) {
-        if (typeof target !== "string" || !target) {
-            return null;
-        }
-        const root = path.resolve(this.cwd);
-        const resolved = path.resolve(root, target);
-        const relative = path.relative(root, resolved);
-        if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) {
-            return null;
-        }
-        const realRoot = fs.realpathSync(root);
-        let existing = resolved;
-        const missing = [];
-        // 未作成のwrite先も、存在する最深の祖先までリンク先を確認する。
-        while (true) {
-            try {
-                fs.lstatSync(existing);
-                break;
-            }
-            catch (error) {
-                if (error?.code !== "ENOENT")
-                    throw error;
-                const parent = path.dirname(existing);
-                if (parent === existing)
-                    return null;
-                missing.unshift(path.basename(existing));
-                existing = parent;
-            }
-        }
-        let realExisting;
-        try {
-            realExisting = fs.realpathSync(existing);
-        }
-        catch (error) {
-            // dangling link は新規ファイルと区別して拒否する。
-            if (error?.code === "ENOENT")
-                return null;
-            throw error;
-        }
-        const realTarget = path.resolve(realExisting, ...missing);
-        const realRelative = path.relative(realRoot, realTarget);
-        if (realRelative === ".." || realRelative.startsWith(".." + path.sep) || path.isAbsolute(realRelative)) {
-            return null;
-        }
-        return realTarget;
+        return containWorkspacePath(this.cwd, target);
     }
     handleExit(error, failed = error != null) {
         if (this.exitResolved) {

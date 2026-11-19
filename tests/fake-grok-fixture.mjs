@@ -133,9 +133,18 @@ function handle(message) {
     // LoadSessionResponse はモデル一覧を返さない。ACP v1 に合わせて
     // modes と configOptions だけを返す。
     case "session/load":
+      if (scenario.loadError) {
+        send({ jsonrpc: "2.0", id, error: { code: -32602, message: scenario.loadError } });
+        return;
+      }
       state.loads.push(params.sessionId);
       persist();
-      send({ jsonrpc: "2.0", id, result: { configOptions: scenario.configOptions ?? [] } });
+      {
+        const afterModel = state.models.length > 0 && Array.isArray(scenario.configOptionsAfterModel)
+          ? scenario.configOptionsAfterModel
+          : (scenario.configOptions ?? []);
+        send({ jsonrpc: "2.0", id, result: { configOptions: afterModel } });
+      }
       return;
 
     case "session/set_model":
@@ -227,6 +236,9 @@ function emitReply(id, sessionId, reply) {
   }
   for (const tool of reply.tools ?? []) {
     send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call", toolCallId: "t1", title: tool } } });
+  }
+  for (const update of reply.updates ?? []) {
+    send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update } });
   }
   // 本物と同じくトークン単位の断片で流す。
   for (const chunk of String(reply.text ?? "").match(/.{1,8}/gs) ?? []) {

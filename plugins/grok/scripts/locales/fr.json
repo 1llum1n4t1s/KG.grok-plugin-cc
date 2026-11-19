@@ -1,5 +1,5 @@
 {
-  "cli.usage": "Utilisation: grok-companion.mjs <setup|review|adversarial-review|audit|task> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nLes portées de revue auto et working-tree nécessitent Windows et échouent si un instantané sûr complet ne peut pas être collecté.\nSous macOS/Linux, utilisez --scope branch ou --base <ref> pour les changements validés ; les changements non validés sont exclus du diff de comparaison, mais les fichiers environnants peuvent tout de même être lus depuis l'arbre de travail. Utilisez audit pour tout le dépôt.\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nChaque commande lance une nouvelle session Grok au premier plan. Pour reprendre, utilisez la commande resume de Grok.",
+  "cli.usage": "Utilisation: grok-companion.mjs <setup|review|adversarial-review|audit|task|imagine> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nLes portées de revue auto et working-tree nécessitent Windows et échouent si un instantané sûr complet ne peut pas être collecté.\nSous macOS/Linux, utilisez --scope branch ou --base <ref> pour les changements validés ; les changements non validés sont exclus du diff de comparaison, mais les fichiers environnants peuvent tout de même être lus depuis l'arbre de travail. Utilisez audit pour tout le dépôt.\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nImagine: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --output <path> --aspect <ratio> --allow-api-billing --json\nChaque commande lance une nouvelle session Grok au premier plan. Pour reprendre, utilisez la commande resume de Grok.",
   "cli.disabled": "{name} n'est plus pris en charge. Utilisez les commandes propres à Grok pour reprendre ou gérer les sessions.",
   "cli.unknown_command": "Commande inconnue : {command}",
   "cli.unknown_setup_argument": "Argument setup inconnu : {argument}",
@@ -37,5 +37,19 @@
   "render.recommendation": "Recommandation : {value}",
   "render.permission_denials": "Autorisations refusées :",
   "render.next_steps": "Étapes suivantes :",
-  "render.reasoning": "Raisonnement :"
+  "render.reasoning": "Raisonnement :",
+  "diag.image_entitlement": "Les outils d'image de Grok Build ne sont pas disponibles pour cette connexion. Le compte a indiqué que ces outils nécessitent un abonnement SuperGrok. Avec The X Subscription, Imagine utilise le quota hebdomadaire partagé ; avec une clé d'API xAI, relancez avec --allow-api-billing seulement si vous acceptez la facturation par image.",
+  "imagine.api_billing_required": "La génération d'images avec XAI_API_KEY est facturée aux tarifs de l'API xAI ({model} est indiqué à partir de {price}), et non sur le quota d'abonnement. Relancez avec --allow-api-billing pour continuer.",
+  "imagine.api_billing_notice": "Connexion par clé d'API : la génération d'images est facturée aux tarifs de l'API xAI ({model} est indiqué à partir de {price}), et non sur le quota d'abonnement.",
+  "imagine.subscription_pool": "Connexion par abonnement : la génération d'images est prélevée sur le quota hebdomadaire partagé du compte, et non facturée par image via l'API.",
+  "imagine.saved": "Enregistré : {path}",
+  "imagine.no_image": "Grok n'a pas renvoyé d'image générée depuis le répertoire d'images de la session.",
+  "imagine.untrusted_path": "Copie refusée pour un chemin d'image signalé hors du répertoire d'images de session de Grok.",
+  "imagine.copy_failed": "Impossible de copier l'image générée : {detail}.",
+  "imagine.output_escapes": "Le chemin de sortie doit rester dans l'espace de travail : {path}.",
+  "imagine.output_exists": "Le fichier de sortie existe déjà : {path}.",
+  "imagine.output_unusable": "Le chemin de sortie n'est pas un répertoire utilisable : {path}.",
+  "imagine.bad_aspect": "Rapport d'aspect non pris en charge : {ratio}. Utilisez l'un de {ratios}.",
+  "imagine.no_repo_write": "imagine ne modifie pas le dépôt. Il copie seulement les images générées dans le répertoire de sortie.",
+  "imagine.extension_mismatch": "L'extension de sortie {output} ne correspond pas à l'extension de l'image générée {source}. Les octets ne sont pas convertis, donc l'extension n'est pas réécrite."
 }

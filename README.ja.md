@@ -2,7 +2,7 @@
 
 # Claude Code・Codex 向け Grok プラグイン
 
-Claude Code や Codex から Grok Build を使い、コードレビュー、リポジトリ監査、X 検索、タスクの委任を行えます。本プロジェクトは [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) のフォークです。詳細は [NOTICE](NOTICE) を参照してください。
+Claude Code や Codex から Grok Build を使い、コードレビュー、リポジトリ監査、X 検索、タスクの委任、画像生成を行えます。本プロジェクトは [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) のフォークです。詳細は [NOTICE](NOTICE) を参照してください。
 
 ## 必要環境とインストール
 
@@ -34,7 +34,7 @@ Codex では、`codex plugin marketplace upgrade kagayoi-grok` でマーケッ�
 
 ## コマンド
 
-Claude Code では `/grok:review`、`/grok:adversarial-review`、`/grok:audit`、`/grok:rescue`、`/grok:x`、`/grok:setup` を使います。Codex では対応する `grok:source-command-<name>` スキルを選びます。レビュー・監査と X 検索は読み取り専用です。rescue は編集も依頼できます。setup は Grok の認証を確認します。
+Claude Code では `/grok:review`、`/grok:adversarial-review`、`/grok:audit`、`/grok:imagine`、`/grok:rescue`、`/grok:x`、`/grok:setup` を使います。Codex では対応する `grok:source-command-<name>` スキルを選びます。レビュー・監査と X 検索は読み取り専用です。rescue は編集も依頼できます。`/grok:imagine <description>` は Grok Build に画像を生成させ、ワークスペース内の `grok-imagine/`、またはワークスペース内に収まる `--output <path>` へコピーします。リポジトリの他のファイルは編集しません。`grok login` では、生成はサブスクリプションの共有週間利用枠から消費されます。`XAI_API_KEY` があるときは、`--allow-api-billing` を付けるまでコマンドは止まります。API の画像は共有枠ではなく xAI の従量料金（`grok-imagine-image-2.0` は $0.04/img から）です。setup は Grok の認証を確認します。
 
 Windows では `/grok:review --scope working-tree` でローカル変更をレビューできます。`auto` と `working-tree` は Windows の安全なスナップショットを完全に取得できることが条件で、取得できなければ失敗します。macOS/Linux では `/grok:review --scope branch` または `--base <ref>` を明示してコミット済みの変更をレビューしてください。未コミット変更は比較差分には含まれませんが、周辺ファイルは作業ツリーから読み取られる場合があります。全 OS で `/grok:audit authentication` によりリポジトリ全体の監査を認証に絞り、`/grok:rescue <task>` でタスクを委任できます。レビュー・敵対的レビュー・監査には `--language <BCP 47 tag>` も指定できます。起動や認証に失敗したら `/grok:setup` を実行し、表示されたエラーと Grok のログイン案内を確認してください。
 
@@ -48,7 +48,7 @@ companion 自身のメッセージ（setup の結果、レビューの見出し�
 
 ## トラブルシュート
 
-HTTP 402 と `usage balance exhausted` が表示された場合は、Grok Build の利用枠が不足しています。利用枠の回復後に再実行してください。タイムアウト、権限拒否、不完全なレビュー、agent の終了未確認は実行失敗です。途中の出力を完了したレビューやタスクとして扱わないでください。
+HTTP 402 と `usage balance exhausted` が表示された場合は、Grok Build の利用枠が不足しています。利用枠の回復後に再実行してください。サブスクリプションの画像生成も同じ共有枠を使います。画像ツールに SuperGrok のサブスクリプションが必要だと返った場合、そのサインインには Imagine が含まれていません。Imagine を含むプランを使うか、`--allow-api-billing` を付けた API キーを使ってください。タイムアウト、権限拒否、不完全なレビュー、agent の終了未確認は実行失敗です。途中の出力を完了したレビューやタスクとして扱わないでください。
 
 読み取り専用レビューでは、読取りだけを意図したスクリプトでも Python・Node.js・Bun・別シェル経由の実行は拒否します。Grok Build は権限拒否後に `cancelled` でターンを終了することがあります。JSON などの証拠は組込みのファイル読取りツールで確認し、アクセスできない証拠は未検証とします。レビュー開始時のプロンプトにも、この制約を渡します。
 

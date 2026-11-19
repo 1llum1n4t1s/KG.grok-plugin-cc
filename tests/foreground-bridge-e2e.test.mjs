@@ -92,7 +92,7 @@ GrokAcpClient.connectForeground = async (...args) => {
             GROK_PLUGIN_LANGUAGE: "ja" };
         const failureArgs = process.versions.bun ? ["--no-env-file", "--preload", failurePreload, cli] : [cli];
         const invokeFailure = (args, envOverride = failureEnv) => spawnSync(process.execPath, [...failureArgs, ...args], { cwd: workspace, env: envOverride, encoding: "utf8", timeout: 15000 });
-        for (const args of [["audit"], ["task", "inspect"]]) {
+        for (const args of [["audit"], ["task", "inspect"], ["imagine", "--allow-api-billing", "a red cube"]]) {
             const response = invokeFailure(args);
             assert.equal(response.status, 1);
             assert.match(response.stderr, /Grok の利用枠が不足しています（HTTP 402）/);

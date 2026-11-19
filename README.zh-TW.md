@@ -2,7 +2,7 @@
 
 # 適用於 Claude Code 與 Codex 的 Grok 外掛程式
 
-在 Claude Code 或 Codex 中執行 Grok Build，用於程式碼審查、儲存庫稽核、X 搜尋與委派任務。本專案是 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) 的分支（fork），詳見 [NOTICE](NOTICE)。
+在 Claude Code 或 Codex 中執行 Grok Build，用於程式碼審查、儲存庫稽核、X 搜尋、委派任務與影像產生。本專案是 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) 的分支（fork），詳見 [NOTICE](NOTICE)。
 
 ## 系統需求與安裝
 
@@ -34,7 +34,7 @@ codex plugin add grok@kagayoi-grok
 
 ## 指令
 
-Claude Code 提供 `/grok:review`、`/grok:adversarial-review`、`/grok:audit`、`/grok:rescue`、`/grok:x` 與 `/grok:setup`。在 Codex 中，請選取對應的 `grok:source-command-<name>` 技能。審查與稽核為唯讀；rescue 可以要求進行編輯，而 X 搜尋則維持唯讀。Setup 會檢查 Grok 的驗證狀態。
+Claude Code 提供 `/grok:review`、`/grok:adversarial-review`、`/grok:audit`、`/grok:imagine`、`/grok:rescue`、`/grok:x` 與 `/grok:setup`。在 Codex 中，請選取對應的 `grok:source-command-<name>` 技能。審查與稽核為唯讀；rescue 可以要求進行編輯，而 X 搜尋則維持唯讀。`/grok:imagine <description>` 會請 Grok Build 產生影像，並複製到工作區的 `grok-imagine/`，或複製到仍位於工作區內的 `--output <path>`。它不會編輯儲存庫中的其他檔案。使用 `grok login` 時，產生會消耗訂閱的共享每週用量額度。設定了 `XAI_API_KEY` 時，指令會停下，直到加上 `--allow-api-billing`：API 影像依 xAI 費率計費（`grok-imagine-image-2.0` 標價自 $0.04/img 起），而不是使用該額度。Setup 會檢查 Grok 的驗證狀態。
 
 在 Windows 上，請使用 `/grok:review --scope working-tree` 審查本機變更。`auto` 與 `working-tree` 範圍需要取得完整且安全的 Windows 快照，若無法取得則會失敗。在 macOS/Linux 上，請明確使用 `/grok:review --scope branch` 或 `--base <ref>` 來審查已提交的變更；未提交的變更不會納入比較用的 diff，但周邊檔案仍可能從工作目錄讀取。在任何平台上，皆可使用 `/grok:audit authentication` 將整個儲存庫的稽核聚焦於特定主題，或使用 `/grok:rescue <task>` 委派任務。審查、對抗式審查與稽核也接受 `--language <BCP 47 tag>`。當安裝或驗證失敗時，請執行 `/grok:setup`；並依照其回報的錯誤與 Grok 的登入指引處理。
 
@@ -48,7 +48,7 @@ Companion 自身的訊息（setup 結果、審查標題、診斷資訊與說明�
 
 ## 疑難排解
 
-若呼叫回報 HTTP 402 與 `usage balance exhausted`，代表 Grok Build 的使用額度已用盡。請待額度恢復後再重試。逾時、權限遭拒、審查未完成，或未能確認 agent 已停止，皆視為呼叫失敗；請勿將部分輸出視為已完成的審查或任務。
+若呼叫回報 HTTP 402 與 `usage balance exhausted`，代表 Grok Build 的使用額度已用盡。請待額度恢復後再重試。訂閱登入下的影像產生也使用同一個共享額度。若影像產生回報 Grok Build 的影像工具需要 SuperGrok 訂閱，則此登入不包含 Imagine；請使用包含 Imagine 的方案，或使用帶 `--allow-api-billing` 的 API 金鑰。逾時、權限遭拒、審查未完成，或未能確認 agent 已停止，皆視為呼叫失敗；請勿將部分輸出視為已完成的審查或任務。
 
 在唯讀審查期間，即使 Python、Node.js、Bun 與 shell 包裝程式僅用於讀取檔案，也會被拒絕。Grok Build 可能在權限遭拒後以 `cancelled` 結束該回合。請使用內建的檔案工具檢視 JSON 與其他佐證資料；無法取得的佐證仍視為未經驗證。審查提示詞會在檢視開始前說明這些限制。
 

@@ -1,5 +1,5 @@
 {
-  "cli.usage": "使い方: grok-companion.mjs <setup|review|adversarial-review|audit|task> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nレビュー範囲 auto と working-tree は Windows が必要で、安全なスナップショットを完全に取得できない場合は失敗します。\nmacOS/Linux ではコミット済みの変更に --scope branch または --base <ref> を使います。未コミット変更は比較差分に含まれませんが、周辺ファイルは作業ツリーから読み取られる場合があります。リポジトリ全体には audit を使います。\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\n各コマンドは新しい Grok セッションを前景で実行します。再開には Grok 自身の resume コマンドを使ってください。",
+  "cli.usage": "使い方: grok-companion.mjs <setup|review|adversarial-review|audit|task|imagine> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nレビュー範囲 auto と working-tree は Windows が必要で、安全なスナップショットを完全に取得できない場合は失敗します。\nmacOS/Linux ではコミット済みの変更に --scope branch または --base <ref> を使います。未コミット変更は比較差分に含まれませんが、周辺ファイルは作業ツリーから読み取られる場合があります。リポジトリ全体には audit を使います。\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nImagine: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --output <path> --aspect <ratio> --allow-api-billing --json\n各コマンドは新しい Grok セッションを前景で実行します。再開には Grok 自身の resume コマンドを使ってください。",
   "cli.disabled": "{name} は利用できなくなりました。再開やセッション管理には Grok 自身のコマンドを使ってください。",
   "cli.unknown_command": "不明なコマンドです: {command}",
   "cli.unknown_setup_argument": "不明な setup 引数です: {argument}",
@@ -37,5 +37,19 @@
   "render.recommendation": "推奨: {value}",
   "render.permission_denials": "権限拒否:",
   "render.next_steps": "次の手順:",
-  "render.reasoning": "推論:"
+  "render.reasoning": "推論:",
+  "diag.image_entitlement": "このサインインでは Grok Build の画像ツールを使えません。アカウントは、これらのツールに SuperGrok のサブスクリプションが必要だと返しました。The X Subscription では Imagine は共有の週間利用枠を使います。xAI API キーで従量課金する場合は、課金を受け入れるときだけ --allow-api-billing を付けて再実行してください。",
+  "imagine.api_billing_required": "XAI_API_KEY での画像生成は xAI API の料金で請求されます（{model} は {price} から）。サブスクリプションの利用枠ではありません。続けるには --allow-api-billing を付けて再実行してください。",
+  "imagine.api_billing_notice": "API キー認証: 画像生成は xAI API の料金で請求されます（{model} は {price} から）。サブスクリプションの利用枠ではありません。",
+  "imagine.subscription_pool": "サブスクリプション認証: 画像生成はアカウントの共有週間利用枠から消費され、画像ごとの API 課金ではありません。",
+  "imagine.saved": "保存しました: {path}",
+  "imagine.no_image": "Grok がセッションの画像ディレクトリから生成画像を返しませんでした。",
+  "imagine.untrusted_path": "Grok のセッション画像ディレクトリの外にあるパスは、コピーを拒否しました。",
+  "imagine.copy_failed": "生成画像をコピーできませんでした: {detail}。",
+  "imagine.output_escapes": "出力先はワークスペースの中に限られます: {path}。",
+  "imagine.output_exists": "出力ファイルは既に存在します: {path}。",
+  "imagine.output_unusable": "出力先は使えるディレクトリではありません: {path}。",
+  "imagine.bad_aspect": "未対応のアスペクト比です: {ratio}。次のいずれかを指定してください: {ratios}。",
+  "imagine.no_repo_write": "imagine はリポジトリを編集しません。生成画像を出力ディレクトリへコピーするだけです。",
+  "imagine.extension_mismatch": "出力の拡張子 {output} は生成画像の拡張子 {source} と一致しません。中身は変換しないため、拡張子は変えません。"
 }

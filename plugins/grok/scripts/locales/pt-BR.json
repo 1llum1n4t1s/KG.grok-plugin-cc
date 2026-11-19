@@ -1,5 +1,5 @@
 {
-  "cli.usage": "Uso: grok-companion.mjs <setup|review|adversarial-review|audit|task> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nOs escopos de revisão auto e working-tree exigem Windows e falham se não for possível coletar um snapshot seguro completo.\nNo macOS/Linux, use --scope branch ou --base <ref> para alterações confirmadas; as alterações não confirmadas ficam fora do diff de comparação, mas os arquivos ao redor ainda podem ser lidos da árvore de trabalho. Use audit para o repositório inteiro.\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nCada comando executa uma nova sessão do Grok em primeiro plano. Para retomar, use o comando resume do próprio Grok.",
+  "cli.usage": "Uso: grok-companion.mjs <setup|review|adversarial-review|audit|task|imagine> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nOs escopos de revisão auto e working-tree exigem Windows e falham se não for possível coletar um snapshot seguro completo.\nNo macOS/Linux, use --scope branch ou --base <ref> para alterações confirmadas; as alterações não confirmadas ficam fora do diff de comparação, mas os arquivos ao redor ainda podem ser lidos da árvore de trabalho. Use audit para o repositório inteiro.\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nImagine: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --output <path> --aspect <ratio> --allow-api-billing --json\nCada comando executa uma nova sessão do Grok em primeiro plano. Para retomar, use o comando resume do próprio Grok.",
   "cli.disabled": "{name} não é mais compatível. Use os comandos do próprio Grok para retomar ou gerenciar sessões.",
   "cli.unknown_command": "Comando desconhecido: {command}",
   "cli.unknown_setup_argument": "Argumento de setup desconhecido: {argument}",
@@ -37,5 +37,19 @@
   "render.recommendation": "Recomendação: {value}",
   "render.permission_denials": "Permissões negadas:",
   "render.next_steps": "Próximos passos:",
-  "render.reasoning": "Raciocínio:"
+  "render.reasoning": "Raciocínio:",
+  "diag.image_entitlement": "As ferramentas de imagem do Grok Build não estão disponíveis neste login. A conta informou que essas ferramentas precisam de uma assinatura SuperGrok. Na The X Subscription, o Imagine usa o saldo semanal compartilhado; com uma chave de API da xAI, execute novamente com --allow-api-billing somente se você aceitar a cobrança por imagem.",
+  "imagine.api_billing_required": "A geração de imagens com XAI_API_KEY é cobrada pelas tarifas da API da xAI ({model} está listado a partir de {price}), e não pelo saldo da assinatura. Execute novamente com --allow-api-billing para continuar.",
+  "imagine.api_billing_notice": "Login com chave de API: a geração de imagens é cobrada pelas tarifas da API da xAI ({model} está listado a partir de {price}), e não pelo saldo da assinatura.",
+  "imagine.subscription_pool": "Login por assinatura: a geração de imagens usa o saldo semanal compartilhado da conta, e não a cobrança da API por imagem.",
+  "imagine.saved": "Salvo: {path}",
+  "imagine.no_image": "O Grok não retornou uma imagem gerada do diretório de imagens da sessão.",
+  "imagine.untrusted_path": "A cópia de um caminho de imagem informado fora do diretório de imagens da sessão do Grok foi recusada.",
+  "imagine.copy_failed": "Não foi possível copiar a imagem gerada: {detail}.",
+  "imagine.output_escapes": "O caminho de saída deve permanecer dentro do workspace: {path}.",
+  "imagine.output_exists": "O arquivo de saída já existe: {path}.",
+  "imagine.output_unusable": "O caminho de saída não é um diretório utilizável: {path}.",
+  "imagine.bad_aspect": "Proporção não compatível: {ratio}. Use uma de {ratios}.",
+  "imagine.no_repo_write": "imagine não edita o repositório. Ele apenas copia as imagens geradas para o diretório de saída.",
+  "imagine.extension_mismatch": "A extensão de saída {output} não corresponde à extensão da imagem gerada {source}. Os bytes não são convertidos, então a extensão não é reescrita."
 }

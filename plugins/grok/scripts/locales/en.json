@@ -1,5 +1,5 @@
 {
-  "cli.usage": "Usage: grok-companion.mjs <setup|review|adversarial-review|audit|task> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nReview scopes auto and working-tree require Windows and fail if a complete safe snapshot cannot be collected.\nOn macOS/Linux, use --scope branch or --base <ref> for committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use audit for the whole repository.\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nEach command runs a new foreground Grok session. For resuming, use Grok's own resume command.",
+  "cli.usage": "Usage: grok-companion.mjs <setup|review|adversarial-review|audit|task|imagine> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nReview scopes auto and working-tree require Windows and fail if a complete safe snapshot cannot be collected.\nOn macOS/Linux, use --scope branch or --base <ref> for committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree. Use audit for the whole repository.\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nImagine: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --output <path> --aspect <ratio> --allow-api-billing --json\nEach command runs a new foreground Grok session. For resuming, use Grok's own resume command.",
   "cli.disabled": "{name} is no longer supported. Use Grok's own commands to resume or manage sessions.",
   "cli.unknown_command": "Unknown command: {command}",
   "cli.unknown_setup_argument": "Unknown setup argument: {argument}",
@@ -37,5 +37,19 @@
   "render.recommendation": "Recommendation: {value}",
   "render.permission_denials": "Permission denials:",
   "render.next_steps": "Next steps:",
-  "render.reasoning": "Reasoning:"
+  "render.reasoning": "Reasoning:",
+  "diag.image_entitlement": "Grok Build's image tools are not available for this sign-in. The account reported that these tools need a SuperGrok subscription. On The X Subscription, Imagine uses the shared weekly usage pool; with an xAI API key, re-run with --allow-api-billing only if you accept per-image API billing.",
+  "imagine.api_billing_required": "Image generation with XAI_API_KEY is billed at xAI API rates ({model} is listed from {price}), not from the subscription usage pool. Re-run with --allow-api-billing to continue.",
+  "imagine.api_billing_notice": "API key sign-in: image generation is billed at xAI API rates ({model} is listed from {price}), not from the subscription usage pool.",
+  "imagine.subscription_pool": "Subscription sign-in: image generation draws from the account's shared weekly usage pool, not per-image API billing.",
+  "imagine.saved": "Saved: {path}",
+  "imagine.no_image": "Grok did not return a generated image from its session images directory.",
+  "imagine.untrusted_path": "Refused to copy a reported image path outside Grok's session images directory.",
+  "imagine.copy_failed": "Could not copy the generated image: {detail}.",
+  "imagine.output_escapes": "The output path must stay inside the workspace: {path}.",
+  "imagine.output_exists": "The output file already exists: {path}.",
+  "imagine.output_unusable": "The output path is not a usable directory: {path}.",
+  "imagine.bad_aspect": "Unsupported aspect ratio: {ratio}. Use one of {ratios}.",
+  "imagine.no_repo_write": "imagine does not edit the repository. It only copies generated images into the output directory.",
+  "imagine.extension_mismatch": "The output extension {output} does not match the generated image extension {source}. The bytes are not converted, so the extension is left unchanged."
 }

@@ -28,6 +28,10 @@ export interface FakeGrokScenario {
   configOptions?: Record<string, unknown>[];
   /** set_config_option の応答に載せる切替え後の configOptions。キーは "<configId>=<value>"。 */
   configOptionsAfter?: Record<string, Record<string, unknown>[]>;
+  /** session/load をこのメッセージで失敗させる。推論深度の取得失敗がターンを止めないことの確認用。 */
+  loadError?: string;
+  /** session/set_model 成功後の session/load が返す configOptions。未指定なら session/new と同じ。 */
+  configOptionsAfterModel?: Record<string, unknown>[];
   sessions?: Record<string, unknown>[];
   setModelUnsupported?: boolean;
   holdPrompt?: boolean;
@@ -151,9 +155,18 @@ function handle(message) {
     // LoadSessionResponse はモデル一覧を返さない。ACP v1 に合わせて
     // modes と configOptions だけを返す。
     case "session/load":
+      if (scenario.loadError) {
+        send({ jsonrpc: "2.0", id, error: { code: -32602, message: scenario.loadError } });
+        return;
+      }
       state.loads.push(params.sessionId);
       persist();
-      send({ jsonrpc: "2.0", id, result: { configOptions: scenario.configOptions ?? [] } });
+      {
+        const afterModel = state.models.length > 0 && Array.isArray(scenario.configOptionsAfterModel)
+          ? scenario.configOptionsAfterModel
+          : (scenario.configOptions ?? []);
+        send({ jsonrpc: "2.0", id, result: { configOptions: afterModel } });
+      }
       return;
 
     case "session/set_model":
@@ -245,6 +258,9 @@ function emitReply(id, sessionId, reply) {
   }
   for (const tool of reply.tools ?? []) {
     send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call", toolCallId: "t1", title: tool } } });
+  }
+  for (const update of reply.updates ?? []) {
+    send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update } });
   }
   // 本物と同じくトークン単位の断片で流す。
   for (const chunk of String(reply.text ?? "").match(/.{1,8}/gs) ?? []) {

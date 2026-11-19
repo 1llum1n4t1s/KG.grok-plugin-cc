@@ -2,7 +2,7 @@
 
 # Plugin Grok pour Claude Code et Codex
 
-Exécutez Grok Build depuis Claude Code ou Codex pour des revues de code, des audits de dépôt, des recherches sur X et des tâches déléguées. Ce projet est un fork de [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) ; voir [NOTICE](NOTICE).
+Exécutez Grok Build depuis Claude Code ou Codex pour des revues de code, des audits de dépôt, des recherches sur X, des tâches déléguées et la génération d'images. Ce projet est un fork de [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) ; voir [NOTICE](NOTICE).
 
 ## Prérequis et installation
 
@@ -34,7 +34,7 @@ Pour Codex, exécutez `codex plugin marketplace upgrade kagayoi-grok` pour actua
 
 ## Commandes
 
-Claude Code expose `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:rescue`, `/grok:x` et `/grok:setup`. Dans Codex, sélectionnez le skill `grok:source-command-<name>` correspondant. La revue et l'audit sont en lecture seule ; rescue peut demander des modifications, tandis que la recherche sur X reste en lecture seule. Setup vérifie l'authentification de Grok.
+Claude Code expose `/grok:review`, `/grok:adversarial-review`, `/grok:audit`, `/grok:imagine`, `/grok:rescue`, `/grok:x` et `/grok:setup`. Dans Codex, sélectionnez le skill `grok:source-command-<name>` correspondant. La revue et l'audit sont en lecture seule ; rescue peut demander des modifications, tandis que la recherche sur X reste en lecture seule. `/grok:imagine <description>` demande à Grok Build de générer une image et la copie dans `grok-imagine/` dans l'espace de travail, ou dans `--output <path>` lorsque ce chemin reste dans l'espace de travail. Il ne modifie pas le reste du dépôt. Avec `grok login`, la génération utilise le quota hebdomadaire partagé de l'abonnement. Si `XAI_API_KEY` est défini, la commande s'arrête tant que `--allow-api-billing` n'est pas passé : les images d'API sont facturées aux tarifs xAI (`grok-imagine-image-2.0` est indiqué à partir de $0.04/img) et non sur ce quota. Setup vérifie l'authentification de Grok.
 
 Sous Windows, utilisez `/grok:review --scope working-tree` pour examiner les modifications locales. Les portées `auto` et `working-tree` exigent un instantané Windows sûr et complet, et échouent s'il ne peut pas être collecté. Sous macOS/Linux, utilisez explicitement `/grok:review --scope branch` ou `--base <ref>` pour examiner les modifications validées ; les modifications non validées sont exclues du diff de comparaison, mais les fichiers environnants peuvent tout de même être lus depuis l'arborescence de travail. Utilisez `/grok:audit authentication` pour centrer un audit de l'ensemble du dépôt sur un sujet, quelle que soit la plateforme, ou `/grok:rescue <task>` pour déléguer une tâche. La revue, la revue contradictoire et l'audit acceptent également `--language <BCP 47 tag>`. Exécutez `/grok:setup` lorsque l'installation ou l'authentification échoue ; suivez l'erreur signalée et les instructions de connexion de Grok.
 
@@ -48,7 +48,7 @@ Les messages propres au companion (résultats de setup, titres de revue, diagnos
 
 ## Dépannage
 
-Si une invocation signale une erreur HTTP 402 avec `usage balance exhausted`, le solde d'utilisation de Grok Build est épuisé. Réessayez une fois ce solde rétabli. Un délai d'attente dépassé, un refus de permission, une revue incomplète ou un arrêt non confirmé de l'agent constituent une invocation en échec ; ne considérez pas une sortie partielle comme une revue ou une tâche terminée.
+Si une invocation signale une erreur HTTP 402 avec `usage balance exhausted`, le solde d'utilisation de Grok Build est épuisé. Réessayez une fois ce solde rétabli. La génération d'images par abonnement utilise ce même quota partagé. Si la génération indique que les outils d'image de Grok Build nécessitent un abonnement SuperGrok, cette connexion n'inclut pas Imagine ; utilisez une offre qui l'inclut, ou une clé d'API avec `--allow-api-billing`. Un délai d'attente dépassé, un refus de permission, une revue incomplète ou un arrêt non confirmé de l'agent constituent une invocation en échec ; ne considérez pas une sortie partielle comme une revue ou une tâche terminée.
 
 Pendant les revues en lecture seule, les wrappers Python, Node.js, Bun et shell sont refusés, même pour des scripts destinés uniquement à lire des fichiers. Grok Build peut mettre fin au tour avec `cancelled` après un rejet de permission. Utilisez les outils de fichiers intégrés pour inspecter le JSON et les autres éléments de preuve ; les preuves indisponibles restent non vérifiées. Le prompt de revue fournit ces restrictions avant le début de l'inspection.
 
