@@ -9,7 +9,7 @@ import { removeTempFixture } from "./helpers.mjs";
 
 const cli = fileURLToPath(new URL("../plugins/grok/scripts/grok-companion.mjs", import.meta.url));
 
-test("setup explains installation, update, authentication and actual check failures", { skip: process.platform === "win32" }, () => {
+test("setup explains installation, update, and actual check failures", { skip: process.platform === "win32" }, () => {
   const fake = installFakeGrok();
   try {
     const invoke = (env, json = false) => spawnSync(process.execPath, [cli, "setup", ...(json ? ["--json"] : [])], { env, encoding: "utf8", timeout: 15000 });
