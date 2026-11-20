@@ -61,7 +61,7 @@ test("both hosts permit Bun and Node on Windows macOS and Linux", () => {
         assert.match(command, /Node\.js 22 or later/i);
         assert.match(read(`codex-skills/source-command-${name}/SKILL.md`), /shared runtime contract/i);
     }
-    for (const name of ["references/codex-runtime.md", "claude-skills/grok-cli-runtime/SKILL.md"]) {
+    for (const name of ["references/codex-runtime.md", "claude-skills/grok-cli-runtime/SKILL.md", "claude-skills/grok-imagine-runtime/SKILL.md"]) {
         const runtime = read(name);
         assert.match(runtime, /Windows.*`bun --no-env-file` instead of `node`/i);
         assert.match(runtime, /Windows, macOS, and Linux.*Bun 1\.4\.4 or later.*Node\.js 22 or later/i);
@@ -99,7 +99,7 @@ test("Codex exposes the same workflows as native skills", () => {
     assert.match(audit, /review-only/i);
 });
 test("Claude-only helpers stay outside Codex skill discovery", () => {
-    const helperNames = ["grok-cli-runtime", "grok-prompting"];
+    const helperNames = ["grok-cli-runtime", "grok-imagine-runtime", "grok-prompting"];
     const claudeManifest = JSON.parse(read(".claude-plugin/plugin.json"));
     assert.equal(claudeManifest.skills, "./claude-skills/");
     assert.deepEqual(listSkills("claude-skills"), helperNames);
@@ -195,6 +195,21 @@ test("imagine copies images only and requires an explicit API billing opt-in", (
     assert.match(codex, /do not add `--allow-api-billing`/i);
     assert.match(codex, /image-entitlement-missing/);
     assert.match(codex, /usage-balance-exhausted/);
+});
+test("the Claude imagine helper keeps the command contract for model-driven callers", () => {
+    const helper = read("claude-skills/grok-imagine-runtime/SKILL.md");
+    assert.match(helper, /grok-companion\.mjs" imagine once in the foreground/i);
+    assert.match(helper, /at least 600000 ms/i);
+    assert.match(helper, /options before the description, then `--`/i);
+    assert.match(helper, /multiline text.*--prompt-file/i);
+    assert.match(helper, /prefer `--json`.*`images\[\]\.saved`/i);
+    assert.match(helper, /do not pass `--write`/i);
+    assert.match(helper, /do not add `--allow-api-billing` unless the user explicitly accepted/i);
+    for (const classification of ["usage-balance-exhausted", "image-entitlement-missing", "api-billing-required"]) {
+        assert.match(helper, new RegExp(classification));
+    }
+    assert.match(helper, /do not claim an image was saved/i);
+    assert.match(helper, /\$\{CLAUDE_PLUGIN_ROOT\}/);
 });
 test("Claude task entries return stderr diagnostics such as the unapplied effort notice", () => {
     for (const file of ["commands/rescue.md", "agents/grok-rescue.md", "claude-skills/grok-cli-runtime/SKILL.md"]) {

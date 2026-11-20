@@ -4,6 +4,8 @@ Git のバージョン記録・コミット差分と既存の変更履歴をも�
 
 ## 未リリース
 
+- Claude Code 専用の helper スキル `grok-imagine-runtime` を追加しました。他のスキルの工程から、`/grok:imagine` と同じ契約（前景で 1 回、`--write` なし、課金の確認は `--allow-api-billing` を利用者が明示的に受け入れた場合だけ）で画像を生成できます。`/grok:imagine` と `codex-skills/` は変えていません。
+
 ## [1.2.0] — 2026-11-20
 
 - `task`・imagine で `--effort` を明示したのに適用できなかったとき、`--json` なしなら理由を標準エラーに 1 行出すようにしました。Claude Code の task 入口は、この行を含む標準エラーの診断も返します。

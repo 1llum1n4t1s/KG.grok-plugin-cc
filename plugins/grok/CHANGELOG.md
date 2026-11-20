@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added the Claude Code-only helper skill `grok-imagine-runtime`. Other skills can generate an image from their own steps under the same contract as `/grok:imagine`: one foreground run, no `--write`, and `--allow-api-billing` only when the user explicitly accepted the charge. `/grok:imagine` and `codex-skills/` are unchanged.
+
 ## 1.2.0
 
 - Plain-text `task` and imagine print one stderr line explaining why an explicit `--effort` could not be applied. The Claude Code task entry points also return stderr diagnostics.
