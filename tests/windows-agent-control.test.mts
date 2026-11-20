@@ -8,6 +8,8 @@ import { getProcessSnapshot, type runCommand } from "../plugins/grok/scripts/lib
 import { spawnWindowsAgent } from "../plugins/grok/scripts/lib/windows-agent.mjs";
 import { windowsHelperPath } from "../plugins/grok/scripts/lib/windows-helper.mjs";
 
+process.env.GROK_PLUGIN_LANGUAGE = "en";
+
 test("Windows process identity accepts only a precise FILETIME response", () => {
   const filetime = "134000000000000001";
   for (const stdout of [filetime, filetime + "\n", filetime + "\r\n", "", "0", "-1", "1.5", "win32-filetime:" + filetime,

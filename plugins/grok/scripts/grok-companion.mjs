@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, resolveReviewTarget } from "./lib/git.mjs";
-import { GROK_INSTALL_COMMANDS, getGrokAuthStatus, parseStructuredOutput, readOutputSchema, runGrokImagine, runGrokReview, runGrokTurn } from "./lib/grok.mjs";
+import { EFFORT_NOT_APPLIED, GROK_INSTALL_COMMANDS, getGrokAuthStatus, parseStructuredOutput, readOutputSchema, runGrokImagine, runGrokReview, runGrokTurn } from "./lib/grok.mjs";
 import { assertImagineAspect, copySessionImages, imagineBilling, isMissingImageEntitlement, partitionSessionImages, resolveImagineOutput } from "./lib/imagine.mjs";
 import { t } from "./lib/i18n.mjs";
 import { normalizeLanguageTag } from "./lib/language.mjs";
@@ -90,6 +90,22 @@ function reportTurnDiagnostics(diagnostic, result, { explainIncomplete = false, 
     if (result.permissionDenials.length)
         console.error(t("diag.permission_denied", { count: result.permissionDenials.length }));
 }
+// 明示した --effort が適用できなかったときの理由だけを、非 JSON 時に stderr へ 1 行出す。
+// 他の進捗は出さない。セッション開始時に出るため、本文や reportTurnDiagnostics より前になる。
+function effortNoticeReporter(json) {
+    if (json)
+        return undefined;
+    return (update) => { if (typeof update === "object" && update?.kind === EFFORT_NOT_APPLIED)
+        console.error(update.message); };
+}
+// target.label は AI 向けプロンプト（英語固定）に入る。利用者向けの見出しは mode と baseRef から表示言語で作る。
+function displayTargetLabel(target) {
+    if (target.mode === "repo")
+        return t("review.target.repo");
+    if (target.mode === "branch")
+        return t("review.target.branch", { base: target.baseRef });
+    return t("review.target.working_tree");
+}
 function languageRule(language, focus) {
     const fields = "every human-readable field (summary, finding titles and bodies, recommendations, next steps)";
     if (language) {
@@ -143,7 +159,7 @@ async function main() {
         if (incomplete && parsed.parsed && !parsed.parseError)
             parsed.parsed.verdict = "incomplete";
         const diagnostic = errorDiagnostic(result.error);
-        console.log(options.json ? JSON.stringify({ ...result, error: diagnostic, result: parsed.parseError ? null : parsed.parsed, parseError: parsed.parseError }, null, 2) : renderReviewResult(parsed, { reviewLabel, targetLabel: target.label, reasoningSummary: result.reasoningSummary }));
+        console.log(options.json ? JSON.stringify({ ...result, error: diagnostic, result: parsed.parseError ? null : parsed.parsed, parseError: parsed.parseError }, null, 2) : renderReviewResult(parsed, { reviewLabel, targetLabel: displayTargetLabel(target), reasoningSummary: result.reasoningSummary }));
         if (!options.json)
             reportTurnDiagnostics(diagnostic, result);
         if (incomplete)
@@ -158,7 +174,7 @@ async function main() {
         const cwd = path.resolve(options.cwd ?? process.cwd());
         assertEffort(options);
         const prompt = await readRunPrompt(options, positionals, cwd);
-        const result = await runGrokTurn(cwd, { prompt, model: model(options.model), effort: options.effort, readOnly: !options.write });
+        const result = await runGrokTurn(cwd, { prompt, model: model(options.model), effort: options.effort, readOnly: !options.write, onProgress: effortNoticeReporter(options.json) });
         const diagnostic = errorDiagnostic(result.error);
         console.log(options.json ? JSON.stringify({ ...result, error: diagnostic }, null, 2) : result.finalMessage || result.error?.message || result.stderr || t("cli.no_output"));
         if (!options.json)
@@ -194,7 +210,7 @@ async function main() {
             ? `Set aspect_ratio to "${options.aspect}" on the image tool.`
             : "Set aspect_ratio only when the user request names one.";
         const prompt = interpolateTemplate(loadPromptTemplate(root, "imagine"), { USER_REQUEST: request, ASPECT_INSTRUCTION: aspectInstruction });
-        const result = await runGrokImagine(cwd, { prompt, model: model(options.model), effort: options.effort });
+        const result = await runGrokImagine(cwd, { prompt, model: model(options.model), effort: options.effort, onProgress: effortNoticeReporter(options.json) });
         const entitlementText = [result.error?.message, result.toolFailureText].filter(Boolean).join("\n");
         const entitlement = isMissingImageEntitlement(entitlementText);
         let diagnostic = errorDiagnostic(result.error);

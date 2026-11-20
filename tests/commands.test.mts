@@ -227,6 +227,14 @@ test("imagine copies images only and requires an explicit API billing opt-in", (
   assert.match(codex, /usage-balance-exhausted/);
 });
 
+test("Claude task entries return stderr diagnostics such as the unapplied effort notice", () => {
+  for (const file of ["commands/rescue.md", "agents/grok-rescue.md", "claude-skills/grok-cli-runtime/SKILL.md"]) {
+    assert.match(read(file), /diagnostic lines from stderr/i, `${file} must return stderr diagnostics`);
+  }
+  // Codex は常に --json で呼ぶため stderr の通知は対象外。
+  assert.match(read("codex-skills/source-command-rescue/SKILL.md"), /grok-companion\.mjs task --json/);
+});
+
 test("rescue forwards one concrete task and grants write access only on request", () => {
   const rescue = read("commands/rescue.md");
   assert.match(rescue, /require a concrete task/i);

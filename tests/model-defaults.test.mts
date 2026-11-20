@@ -9,6 +9,8 @@ import { runGrokReview, runGrokTurn } from "../plugins/grok/scripts/lib/grok.mjs
 import { installFakeGrok, type FakeGrokScenario } from "./fake-grok-fixture.mjs";
 import { makeTempDir, removeTempFixture } from "./helpers.mjs";
 
+process.env.GROK_PLUGIN_LANGUAGE = "en";
+
 const FAST = "grok-4.7-build-fast";
 const WITH_FAST = ["grok-fake-nonreasoning", "grok-4.7", FAST, "grok-4.6", "grok-4.5"];
 const WITHOUT_FAST = ["grok-fake-nonreasoning", "grok-4.6", "grok-4.5", "grok-4.7"];

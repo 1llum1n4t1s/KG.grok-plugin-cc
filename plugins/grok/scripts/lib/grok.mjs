@@ -69,7 +69,7 @@ function classifyToolCall(params, cwd) {
     if (call.kind === "fetch" && rawInput?.variant === "WebFetch") {
         if (Object.keys(rawInput).some((key) => !["variant", "url"].includes(key)) ||
             typeof rawInput.url !== "string") {
-            return { allowed: false, reason: "WebFetch requires only a URL" };
+            return { allowed: false, reason: t("err.perm_webfetch_url_only") };
         }
         try {
             const url = new URL(rawInput.url);
@@ -80,7 +80,7 @@ function classifyToolCall(params, cwd) {
         catch {
             // 不正な URL は許可しない。
         }
-        return { allowed: false, reason: "WebFetch requires an HTTP(S) URL without credentials" };
+        return { allowed: false, reason: t("err.perm_webfetch_http") };
     }
     const command = typeof rawInput === "object" && rawInput ? rawInput.command ?? rawInput.cmd : null;
     if (typeof command === "string") {
@@ -88,9 +88,9 @@ function classifyToolCall(params, cwd) {
     }
     const name = [call.title, call.kind].filter(Boolean).join(" ");
     if (MUTATING_TOOL_PATTERN.test(name)) {
-        return { allowed: false, reason: "the tool modifies files" };
+        return { allowed: false, reason: t("err.perm_tool_modifies_files") };
     }
-    return { allowed: false, reason: "the tool is not explicitly known to be read-only" };
+    return { allowed: false, reason: t("err.perm_tool_unknown") };
 }
 /**
  * 読み取り専用セッション用の権限応答器。
@@ -108,10 +108,10 @@ function createReviewPermissionHandler(cwd, onProgress, onDenied = (_reason) => 
         if (verdict.allowed && permissionOptions.some((option) => option?.kind === "allow_once")) {
             return readOnly(params);
         }
-        const reason = verdict.reason ?? "no one-time read-only permission option is available";
-        const denial = `${reason}: ${shortenText(params?.toolCall?.title ?? "unknown tool", 60)}`;
+        const reason = verdict.reason ?? t("err.perm_no_allow_option");
+        const denial = `${reason}: ${shortenText(params?.toolCall?.title ?? t("err.perm_unknown_tool"), 60)}`;
         onDenied(denial);
-        emitProgress(onProgress, `Denied during read-only review (${reason}): ${shortenText(params?.toolCall?.title ?? "unknown tool", 60)}`, "running");
+        emitProgress(onProgress, `Denied during read-only review (${reason}): ${shortenText(params?.toolCall?.title ?? t("err.perm_unknown_tool"), 60)}`, "running");
         // 拒否肢があれば選ぶ。ただし Grok Build は選択による拒否でも
         // permission_rejected としてターンを終了することがある。
         return deny(params);
@@ -130,9 +130,9 @@ function createImaginePermissionHandler(onProgress, onDenied = (_reason) => { })
         if (isImageGenerationTool(tool) && permissionOptions.some((option) => option?.kind === "allow_once"))
             return allow(params);
         const reason = isImageGenerationTool(tool)
-            ? "no one-time permission option is available for image generation"
-            : "imagine only allows the image generation tool";
-        const title = tool?.title ?? "unknown tool";
+            ? t("err.perm_imagine_no_option")
+            : t("err.perm_imagine_only");
+        const title = tool?.title ?? t("err.perm_unknown_tool");
         onDenied(`${reason}: ${shortenText(title, 60)}`);
         emitProgress(onProgress, `Denied during imagine (${reason}): ${shortenText(title, 60)}`, "running");
         return deny(params);
@@ -287,7 +287,7 @@ async function withGrok(cwd, handler, options = {}) {
             result.turnStopUnconfirmed = true;
         }
         else {
-            throw Object.assign(new Error("Direct Grok agent stop could not be confirmed."), { turnStopUnconfirmed: true });
+            throw Object.assign(new Error(t("err.stop_unconfirmed_direct")), { turnStopUnconfirmed: true });
         }
     }
     if (failed)
@@ -333,7 +333,7 @@ async function applySessionConfigOption(client, sessionId, option, wanted) {
         null;
     if (!value) {
         const detail = available.length ? `not offered (available: ${available.join(", ")})` : "no selectable values";
-        return { applied: false, value: null, reason: detail, configOptions: null };
+        return { applied: false, value: null, reason: detail, available, configOptions: null };
     }
     let configOptions = null;
     if (option.currentValue !== value) {
@@ -437,24 +437,28 @@ async function applyRequestedModel(client, response, options, cwd) {
  * 選択項目や high が無いモデルでは黙って流す。明示指定のときだけ理由を進捗へ出す。
  * 反映可否は本題（レビューや委任タスク）の成否と無関係なので、
  * 失敗しても turn を止めない。判定は切替え後の configOptions（state）で行う。
+ * 理由の進捗には kind（EFFORT_NOT_APPLIED）を付け、companion が非 JSON 時だけ stderr へ 1 行出す。
  */
+export const EFFORT_NOT_APPLIED = "effort-not-applied";
 async function applyRequestedEffort(client, state, options) {
     const explicit = options.effort ?? null;
     const requested = explicit ?? DEFAULT_REASONING_EFFORT;
     const report = (message) => {
         if (explicit) {
-            emitProgress(options.onProgress, message, "starting");
+            emitProgress(options.onProgress, message, "starting", { kind: EFFORT_NOT_APPLIED });
         }
     };
     const option = findSessionConfigOption({ configOptions: state.configOptions }, "thought_level");
     if (!option) {
-        report(`This Grok build exposes no reasoning effort selector; --effort ${requested} was not applied.`);
+        report(t("diag.effort_no_selector", { effort: requested }));
         return null;
     }
     try {
         const result = await applySessionConfigOption(client, state.sessionId, option, requested);
         if (!result.applied) {
-            report(`Reasoning effort ${requested} is ${result.reason}; leaving it unchanged.`);
+            report(result.available?.length
+                ? t("diag.effort_not_offered", { effort: requested, available: result.available.join(", ") })
+                : t("diag.effort_no_values", { effort: requested }));
             return null;
         }
         if (explicit || option.currentValue !== result.value) {
@@ -463,7 +467,7 @@ async function applyRequestedEffort(client, state, options) {
         return result.value;
     }
     catch (error) {
-        report(`Could not set reasoning effort ${requested}: ${error?.message ?? error}`);
+        report(t("diag.effort_failed", { effort: requested, detail: error?.message ?? String(error) }));
         return null;
     }
 }
@@ -498,16 +502,16 @@ async function runPrompt(client, sessionId, promptText, options = {}) {
         const response = await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: promptText }] });
         const evidence = getAcpPromptSuccessEvidence(response, client);
         if (!evidence || evidence.method !== "session/prompt" || evidence.requestId !== promptRequestId) {
-            throw Object.assign(new Error("The prompt response could not be verified against the issued request."), { turnStopUnconfirmed: true });
+            throw Object.assign(new Error(t("err.prompt_unverified")), { turnStopUnconfirmed: true });
         }
         stopReason = evidence.stopReason;
         if (typeof stopReason !== "string" || !["end_turn", "cancelled", "refusal", "max_tokens", "max_turn_requests"].includes(stopReason)) {
-            throw Object.assign(new Error("The prompt response did not contain a recognized terminal reason."), { turnStopUnconfirmed: true });
+            throw Object.assign(new Error(t("err.prompt_no_terminal")), { turnStopUnconfirmed: true });
         }
     }
     catch (caught) {
         originalFailure = caught;
-        error = caught instanceof Error ? caught : new Error("The prompt failed with a non-Error value.", { cause: caught });
+        error = caught instanceof Error ? caught : new Error(t("err.prompt_non_error"), { cause: caught });
     }
     finally {
         client.setNotificationHandler(null);
@@ -957,7 +961,7 @@ export function parseStructuredOutput(rawOutput, fallback = {}) {
     if (!rawOutput) {
         return {
             parsed: null,
-            parseError: String(fallback.failureMessage ?? "").trim() || "Grok did not return a final structured message.",
+            parseError: String(fallback.failureMessage ?? "").trim() || t("err.review_no_final_message"),
             rawOutput: rawOutput ?? "",
             ...fallback
         };

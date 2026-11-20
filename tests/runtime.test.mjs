@@ -540,6 +540,17 @@ ${result.stderr}`);
     const state = fake.readState();
     assert.deepEqual(state.models, ["grok-4.7"]);
 });
+test("review shows a localized target label while the prompt keeps the English label", () => {
+    const { fake, repo, env } = setupWorkspace({
+        availableModels: ["grok-fake-nonreasoning", "grok-4.7"],
+        replies: [{ text: REVIEW_JSON }]
+    });
+    const result = reviewCompanion(["review", "--wait"], { repo, env: { ...env, GROK_PLUGIN_LANGUAGE: "ja" } });
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /^対象: .*(?:とのブランチ差分|作業ツリーの差分)/m);
+    assert.doesNotMatch(result.stdout, /branch diff against|working tree diff/);
+    assert.match(fake.readState().prompts[0], /Target: (?:branch diff against \S+|working tree diff)/);
+});
 test("review joins streamed thought chunks into readable sentences", () => {
     // 思考ストリームは診断目的でパース失敗時にだけ描画されるので、失敗経路で確認する。
     const { repo, env } = setupWorkspace({
@@ -1398,6 +1409,34 @@ test("task applies --effort through session/set_config_option", () => {
     const result = companion(["task", "--effort", "low", "do a thing"], { repo, env });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(fake.readState().configs, [{ configId: "thought-level", value: "low" }]);
+});
+test("an explicit --effort that cannot be applied prints one stderr line in text mode only", () => {
+    const { repo, env } = setupWorkspace({ replies: [{ text: "done" }], configOptions: [] });
+    const notice = "This Grok build exposes no reasoning effort selector; --effort low was not applied.";
+    const text = companion(["task", "--effort", "low", "do a thing"], { repo, env });
+    assert.equal(text.status, 0, text.stderr);
+    assert.equal(text.stdout.trim(), "done");
+    assert.equal(text.stderr.trim(), notice);
+    const localized = companion(["task", "--effort", "low", "do a thing"], { repo, env: { ...env, GROK_PLUGIN_LANGUAGE: "ja" } });
+    assert.match(localized.stderr.trim(), /^この Grok ビルドには推論深度の選択項目がないため、--effort low は適用されませんでした。$/);
+    const json = companion(["task", "--json", "--effort", "low", "do a thing"], { repo, env });
+    assert.equal(json.status, 0, json.stderr);
+    assert.equal(JSON.parse(json.stdout).finalMessage, "done");
+    assert.doesNotMatch(json.stderr, /effort/i);
+});
+test("the effort notice is not printed for the implicit default or when --effort was applied", () => {
+    const none = setupWorkspace({ replies: [{ text: "done" }], configOptions: [] });
+    const implicit = companion(["task", "do a thing"], { repo: none.repo, env: none.env });
+    assert.equal(implicit.status, 0, implicit.stderr);
+    assert.doesNotMatch(implicit.stderr, /effort/i);
+    const applied = setupWorkspace({ replies: [{ text: "done" }], configOptions: [THOUGHT_LEVEL_OPTION] });
+    const explicit = companion(["task", "--effort", "low", "do a thing"], { repo: applied.repo, env: applied.env });
+    assert.equal(explicit.status, 0, explicit.stderr);
+    assert.doesNotMatch(explicit.stderr, /effort/i);
+    const notOffered = setupWorkspace({ replies: [{ text: "done" }],
+        configOptions: [{ ...THOUGHT_LEVEL_OPTION, options: THOUGHT_LEVEL_OPTION.options.filter((entry) => entry.value !== "low") }] });
+    const missing = companion(["task", "--effort", "low", "do a thing"], { repo: notOffered.repo, env: notOffered.env });
+    assert.equal(missing.stderr.trim(), "Reasoning effort low is not offered (available: medium, high); leaving it unchanged.");
 });
 test("task falls back to set_config_option when session/set_model is gone", () => {
     const { fake, repo, env } = setupWorkspace({

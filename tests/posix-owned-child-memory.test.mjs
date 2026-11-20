@@ -4,6 +4,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 import { EventEmitter } from "node:events";
 import { Duplex, PassThrough } from "node:stream";
+import { t } from "../plugins/grok/scripts/lib/i18n.mjs";
 const source = fs.readFileSync(new URL("../plugins/grok/scripts/lib/acp.mjs", import.meta.url), "utf8");
 const direct = source.slice(source.indexOf("class SpawnedAcpClient"), source.indexOf("export class GrokAcpClient"));
 function fixture({ spawnFailure = false, remainingGroup = false, groupDenied = false, inherited = false } = {}) {
@@ -21,7 +22,7 @@ function fixture({ spawnFailure = false, remainingGroup = false, groupDenied = f
         kill() { unexpectedSignals += 1; return true; }, unref() { } });
     child.on("close", () => { if (!remainingGroup)
         groupPresent = false; });
-    const context = vm.createContext({ POSIX_AGENT_SUPERVISOR: "/supervisor.mjs", process: { platform: "linux", execPath: "/node", versions: process.versions, env: {}, kill(pid, signal) {
+    const context = vm.createContext({ POSIX_AGENT_SUPERVISOR: "/supervisor.mjs", t, process: { platform: "linux", execPath: "/node", versions: process.versions, env: {}, kill(pid, signal) {
                 if (pid !== -123 || signal !== 0) {
                     unexpectedSignals += 1;
                     return true;

@@ -6,6 +6,8 @@ import test from "node:test";
 
 import { readWindowsWorkingTreeFiles } from "../plugins/grok/scripts/lib/git.mjs";
 
+process.env.GROK_PLUGIN_LANGUAGE = "en";
+
 // 先に固定する条件: missing-parent は欠落、reparse/共有違反は欠落にしない。
 // 明示された専用fixture親のみ使う。削除は行わず、呼出元がPrunletで清掃する。
 const parent = process.env.GROK_GIT_NATIVE_FIXTURE_ROOT;

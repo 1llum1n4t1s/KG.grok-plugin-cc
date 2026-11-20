@@ -4,6 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import { readWindowsWorkingTreeFiles } from "../plugins/grok/scripts/lib/git.mjs";
 import { windowsHelperPath } from "../plugins/grok/scripts/lib/windows-helper.mjs";
+process.env.GROK_PLUGIN_LANGUAGE = "en";
 // 先に固定する失敗条件: 不正path、helper実行エラー、不正JSON、欠落/重複/順序違い、
 // 不正base64、サイズ超過。実Git・ファイル生成・削除は使わない。
 function helper(t, result, rawStdout) {

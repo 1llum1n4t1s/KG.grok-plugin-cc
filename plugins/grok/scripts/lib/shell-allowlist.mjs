@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { READ_ONLY_GIT_GLOBAL_ARGS } from "./git.mjs";
+import { t } from "./i18n.mjs";
 /**
  * 読み取り専用として許可するコマンド。
  * git はサブコマンドまで見て、履歴や作業ツリーを変えないものだけ通す。
@@ -226,63 +227,63 @@ function isSafeTestPath(target, cwd) {
 export function classifyShellCommand(command, cwd = null) {
     const text = String(command ?? "").trim();
     if (!text) {
-        return { allowed: false, reason: "empty command" };
+        return { allowed: false, reason: t("err.perm_empty_command") };
     }
     if (WRITE_SIDE_EFFECT_PATTERN.test(text)) {
-        return { allowed: false, reason: "writes to a file or edits in place" };
+        return { allowed: false, reason: t("err.perm_writes_file") };
     }
     // 置換の中身は先頭トークンの判定が届かないので、セグメント分割より前に弾く。
     if (COMMAND_SUBSTITUTION_PATTERN.test(text)) {
-        return { allowed: false, reason: "uses command substitution" };
+        return { allowed: false, reason: t("err.perm_command_substitution") };
     }
     // PowerShell は Unicode の引用符（‘ ’ ‚ ‛ “ ” „）も ASCII の引用符と同じ文字列境界に使う。
     // ASCII で開いてスマート引用符で閉じると、下の tokenizer が引用内とみなした括弧式が
     // PowerShell では引用外として評価されるため、これらの文字は位置を問わず拒否する。
     if (UNICODE_QUOTE_PATTERN.test(text)) {
-        return { allowed: false, reason: "uses Unicode quotation marks that some shells treat as string delimiters" };
+        return { allowed: false, reason: t("err.perm_unicode_quotes") };
     }
     if (UNSAFE_CONTROL_CHARACTER_PATTERN.test(text)) {
-        return { allowed: false, reason: "uses control or format characters that shells may split differently" };
+        return { allowed: false, reason: t("err.perm_control_chars") };
     }
     if (UNSAFE_SHELL_SYNTAX_PATTERN.test(text)) {
-        return { allowed: false, reason: "uses unsupported shell control or expansion syntax" };
+        return { allowed: false, reason: t("err.perm_shell_syntax") };
     }
     const segments = text.split(/\|\||&&|[;|]/).map((segment) => segment.trim()).filter(Boolean);
     for (const segment of segments) {
         const tokens = tokenizeCommand(segment);
         if (!tokens) {
-            return { allowed: false, reason: "uses unsupported shell quoting or unquoted expression syntax" };
+            return { allowed: false, reason: t("err.perm_shell_quoting") };
         }
         // 環境変数で Git や検索ツールの実行内容を変えられるため、前置きは許可しない。
         if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? "")) {
-            return { allowed: false, reason: "sets an environment variable" };
+            return { allowed: false, reason: t("err.perm_sets_env") };
         }
         // パス付き実行ファイルは任意の同名バイナリへ差し替えられる。
         if (/[\\/]/.test(tokens[0] ?? "") || /^[A-Za-z]:/.test(tokens[0] ?? "")) {
-            return { allowed: false, reason: "uses an executable path outside the command allowlist" };
+            return { allowed: false, reason: t("err.perm_executable_path") };
         }
         const head = (tokens[0] ?? "").replace(/\.(exe|cmd|bat)$/i, "").toLowerCase();
         if (!head) {
-            return { allowed: false, reason: `could not parse "${segment}"` };
+            return { allowed: false, reason: t("err.perm_parse_failed", { segment }) };
         }
         if (tokens[0].toLowerCase() === "test-path") {
             if (tokens.length !== 3 || tokens[1].toLowerCase() !== "-literalpath" ||
                 !isSafeTestPath(tokens[2], cwd)) {
-                return { allowed: false, reason: "Test-Path requires one literal path within the repository" };
+                return { allowed: false, reason: t("err.perm_test_path") };
             }
             continue;
         }
         if (tokens.slice(1).some((token) => OUTSIDE_PATH_PATTERN.test(` ${token}`))) {
-            return { allowed: false, reason: "uses an absolute path or a path that may leave the repository" };
+            return { allowed: false, reason: t("err.perm_path_escape") };
         }
         if (head === "git") {
             if (!READ_ONLY_GIT_GLOBAL_ARGS.every((arg, index) => tokens[index + 1] === arg)) {
-                return { allowed: false, reason: "git requires the explicit read-only global options shown in the review instructions" };
+                return { allowed: false, reason: t("err.perm_git_global_options") };
             }
             const subIndex = READ_ONLY_GIT_GLOBAL_ARGS.length + 1;
             const sub = tokens[subIndex] ?? "";
             if (!READ_ONLY_GIT_SUBCOMMANDS.has(sub)) {
-                return { allowed: false, reason: `git ${sub || "(no subcommand)"} is not read-only` };
+                return { allowed: false, reason: t("err.perm_git_not_read_only", { sub: sub || t("err.perm_no_subcommand") }) };
             }
             const args = tokens.slice(subIndex + 1);
             const separator = args.indexOf("--");
@@ -290,38 +291,38 @@ export function classifyShellCommand(command, cwd = null) {
             // Git は作業ツリー照合中に clean/process filter を起動し得る。
             // インデックス上のデータに限定できない呼び出しは許可しない。
             if (sub === "status" || sub === "blame") {
-                return { allowed: false, reason: `git ${sub} cannot be safely restricted to repository objects` };
+                return { allowed: false, reason: t("err.perm_git_unrestricted", { sub }) };
             }
             if (sub === "diff" && ((!["--cached", "--staged"].includes(args[2]) && !isSafeFixedObjectDiff(args)) || options.includes("--no-index"))) {
-                return { allowed: false, reason: "git diff requires --cached, --staged or an exact OID..OID range immediately after the read-only diff options; fixed ranges require explicit -- before paths" };
+                return { allowed: false, reason: t("err.perm_git_diff_range") };
             }
             if (sub === "grep" && (args[0] !== "--cached" || options.includes("--no-index"))) {
-                return { allowed: false, reason: "git grep requires --cached as its first argument" };
+                return { allowed: false, reason: t("err.perm_git_grep_cached") };
             }
             if (sub === "ls-files" && options.some((arg) => arg === "--modified" || arg === "-m")) {
-                return { allowed: false, reason: "git ls-files modified checks may invoke worktree filters" };
+                return { allowed: false, reason: t("err.perm_git_ls_files_modified") };
             }
             if (["diff", "show", "log", "whatchanged"].includes(sub) &&
                 !(args.slice(0, 2).includes("--no-ext-diff") && args.slice(0, 2).includes("--no-textconv"))) {
                 // -S 等の値に消費された同名トークンを、安全オプションとして数えない。
-                return { allowed: false, reason: "git diff/log/show/whatchanged require --no-ext-diff and --no-textconv as the first two subcommand arguments" };
+                return { allowed: false, reason: t("err.perm_git_no_textconv") };
             }
             if (options.some((arg) => !isSafeGitOption(arg, sub))) {
-                return { allowed: false, reason: "git uses an unsupported option, abbreviation or short-option combination" };
+                return { allowed: false, reason: t("err.perm_git_option") };
             }
             continue;
         }
         if (!READ_ONLY_COMMANDS.has(head)) {
-            return { allowed: false, reason: `${head} is not on the read-only allowlist` };
+            return { allowed: false, reason: t("err.perm_not_allowlisted", { head }) };
         }
         if (head === "sed" && !isSafeSedPrint(tokens)) {
-            return { allowed: false, reason: "sed script is not a line-range print" };
+            return { allowed: false, reason: t("err.perm_sed_script") };
         }
         if (head === "rg" && tokens.slice(1).some((token) => /^--(?:pre(?:-glob)?|hostname-bin)(?:=|$)/.test(token))) {
-            return { allowed: false, reason: "rg uses an external command" };
+            return { allowed: false, reason: t("err.perm_rg_external") };
         }
         if (head === "find" && tokens.slice(1).some((token) => UNSAFE_FIND_ARGUMENTS.has(token))) {
-            return { allowed: false, reason: `${head} is being used in a way that can write or run other commands` };
+            return { allowed: false, reason: t("err.perm_command_misuse", { head }) };
         }
     }
     return { allowed: true, reason: null };

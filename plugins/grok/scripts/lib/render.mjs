@@ -14,26 +14,26 @@ function formatLineRange(finding) {
 }
 export function validateReviewResultShape(data) {
     if (!data || typeof data !== "object" || Array.isArray(data)) {
-        return "Expected a top-level JSON object.";
+        return t("err.shape_not_object");
     }
     const resultFields = new Set(["verdict", "summary", "findings", "next_steps"]);
     if (Object.keys(data).some((field) => !resultFields.has(field))) {
-        return "Unexpected property in review result.";
+        return t("err.shape_unexpected_property");
     }
     if (typeof data.verdict !== "string" || !data.verdict.trim()) {
-        return "Missing string `verdict`.";
+        return t("err.shape_missing_verdict");
     }
     if (typeof data.summary !== "string" || !data.summary.trim()) {
-        return "Missing string `summary`.";
+        return t("err.shape_missing_summary");
     }
     if (!Array.isArray(data.findings)) {
-        return "Missing array `findings`.";
+        return t("err.shape_missing_findings");
     }
     if (!Array.isArray(data.next_steps)) {
-        return "Missing array `next_steps`.";
+        return t("err.shape_missing_next_steps");
     }
     if (!new Set(["approve", "needs-attention", "incomplete"]).has(data.verdict)) {
-        return "Invalid `verdict`.";
+        return t("err.shape_invalid_verdict");
     }
     const severities = new Set(["critical", "high", "medium", "low"]);
     const findingFields = new Set([
@@ -42,29 +42,29 @@ export function validateReviewResultShape(data) {
     for (let index = 0; index < data.findings.length; index += 1) {
         const finding = data.findings[index];
         if (!finding || typeof finding !== "object" || Array.isArray(finding)) {
-            return `Finding ${index + 1} must be an object.`;
+            return t("err.shape_finding_not_object", { index: index + 1 });
         }
         if (Object.keys(finding).some((field) => !findingFields.has(field))) {
-            return `Finding ${index + 1} has an unexpected property.`;
+            return t("err.shape_finding_property", { index: index + 1 });
         }
         for (const field of ["title", "body", "file", "recommendation"]) {
             if (typeof finding[field] !== "string" || (field !== "recommendation" && !finding[field].trim())) {
-                return `Finding ${index + 1} has invalid \`${field}\`.`;
+                return t("err.shape_finding_field", { index: index + 1, field });
             }
         }
         if (!severities.has(finding.severity)) {
-            return `Finding ${index + 1} has invalid \`severity\`.`;
+            return t("err.shape_finding_field", { index: index + 1, field: "severity" });
         }
         if (!Number.isInteger(finding.line_start) || finding.line_start < 1 ||
             !Number.isInteger(finding.line_end) || finding.line_end < finding.line_start) {
-            return `Finding ${index + 1} has invalid line range.`;
+            return t("err.shape_finding_range", { index: index + 1 });
         }
         if (typeof finding.confidence !== "number" || finding.confidence < 0 || finding.confidence > 1) {
-            return `Finding ${index + 1} has invalid \`confidence\`.`;
+            return t("err.shape_finding_field", { index: index + 1, field: "confidence" });
         }
     }
     if (data.next_steps.some((step) => typeof step !== "string" || !step.trim())) {
-        return "Invalid item in `next_steps`.";
+        return t("err.shape_next_steps_item");
     }
     return null;
 }

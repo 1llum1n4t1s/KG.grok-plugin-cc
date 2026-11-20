@@ -8,7 +8,9 @@ import { spawnSync } from "node:child_process";
 
 import { SUPPORTED_LANGUAGES, detectLanguage, matchLanguageTag, t } from "../plugins/grok/scripts/lib/i18n.mjs";
 import { GROK_INSTALL_COMMANDS } from "../plugins/grok/scripts/lib/grok.mjs";
-import { renderReviewResult } from "../plugins/grok/scripts/lib/render.mjs";
+import { readWindowsWorkingTreeFiles } from "../plugins/grok/scripts/lib/git.mjs";
+import { classifyShellCommand } from "../plugins/grok/scripts/lib/shell-allowlist.mjs";
+import { renderReviewResult, validateReviewResultShape } from "../plugins/grok/scripts/lib/render.mjs";
 
 const scriptsDirectory = fileURLToPath(new URL("../plugins/grok/scripts/", import.meta.url));
 const localesDirectory = path.join(scriptsDirectory, "locales");
@@ -35,7 +37,7 @@ test("all dictionaries share the English key set and the same placeholders", () 
 });
 
 test("keys referenced by the code exist in the dictionary and no dictionary key is unused", () => {
-  const sources = ["grok-companion.mts", "lib/render.mts", "lib/grok.mts", "lib/imagine.mts", "lib/args.mts", "lib/git.mts", "lib/language.mts"].map(file => fs.readFileSync(path.join(scriptsDirectory, file), "utf8")).join("\n");
+  const sources = ["grok-companion.mts", "lib/render.mts", "lib/grok.mts", "lib/imagine.mts", "lib/args.mts", "lib/git.mts", "lib/language.mts", "lib/acp.mts", "lib/windows-agent.mts", "lib/windows-helper.mts", "lib/shell-allowlist.mts"].map(file => fs.readFileSync(path.join(scriptsDirectory, file), "utf8")).join("\n");
   const used = new Set([...sources.matchAll(/"((?:cli|setup|diag|review|render|imagine|err)\.[a-z_.]+)"/g)].map(match => match[1]));
   const keys = new Set(Object.keys(dictionary("en")));
   for (const key of used) assert.ok(keys.has(key), `code references missing key ${key}`);
@@ -90,6 +92,25 @@ test("review rendering follows the display language without changing identifiers
     assert.match(output, /- \[high\] T \(a\.ts:1-2\)/);
     assert.match(output, /推奨: R/);
     assert.match(output, /次の手順:/);
+  } finally {
+    if (previous === undefined) delete process.env.GROK_PLUGIN_LANGUAGE; else process.env.GROK_PLUGIN_LANGUAGE = previous;
+  }
+});
+
+test("fixed user-facing errors follow the display language and keep external details verbatim", () => {
+  const previous = process.env.GROK_PLUGIN_LANGUAGE;
+  try {
+    process.env.GROK_PLUGIN_LANGUAGE = "ja";
+    assert.equal(validateReviewResultShape({ verdict: "approve", summary: "S", next_steps: [], findings: [{ severity: "high", title: "T", body: "B", file: "a", recommendation: "", line_start: 0, line_end: 0, confidence: 1 }] }), "指摘 1 の行範囲が不正です。");
+    assert.equal(validateReviewResultShape([]), "最上位は JSON オブジェクトである必要があります。");
+    assert.throws(() => readWindowsWorkingTreeFiles(os.tmpdir(), [""]), /^Error: レビューを完了できません: 作業ツリーのスナップショットを安全に読み取れません。/);
+    assert.equal(classifyShellCommand("").reason, "コマンドが空です");
+    assert.equal(classifyShellCommand("curl example.com").reason, "curl は読み取り専用の許可リストにありません");
+    process.env.GROK_PLUGIN_LANGUAGE = "en";
+    assert.equal(classifyShellCommand("").reason, "empty command");
+    assert.equal(classifyShellCommand("curl example.com").reason, "curl is not on the read-only allowlist");
+    assert.equal(validateReviewResultShape([]), "Expected a top-level JSON object.");
+    assert.throws(() => readWindowsWorkingTreeFiles(os.tmpdir(), [""]), /^Error: Review incomplete: cannot safely read the working tree snapshot\./);
   } finally {
     if (previous === undefined) delete process.env.GROK_PLUGIN_LANGUAGE; else process.env.GROK_PLUGIN_LANGUAGE = previous;
   }

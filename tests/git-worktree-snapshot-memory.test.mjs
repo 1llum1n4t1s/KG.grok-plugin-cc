@@ -7,6 +7,7 @@ import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import test from "node:test";
 import { collectWorkingTreeSnapshot, collectReviewContext, getWorkingTreeState, resolveReviewTarget } from "../plugins/grok/scripts/lib/git.mjs";
+process.env.GROK_PLUGIN_LANGUAGE = "en";
 // snapshot の実装前に固定する失敗条件。実 Git、作業ファイル、削除は使わない。
 // 外部変換、未対応の正規化、競合、gitlink、不完全な一覧を安全側へ閉じる。
 const baseline = Buffer.from("base\n");

@@ -10,6 +10,8 @@ import {
   resolveReviewTarget
 } from "../plugins/grok/scripts/lib/git.mjs";
 
+process.env.GROK_PLUGIN_LANGUAGE = "en";
+
 // 実 Git・攻撃用設定・fixture の作成と削除を使わず、spawn 境界だけを検証する。
 const commands = new Set(["rev-parse", "branch", "merge-base", "diff", "status", "ls-files", "ls-tree", "log", "symbolic-ref", "show-ref"]);
 

@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import childProcess from "node:child_process";
 import { spawnWindowsAgent } from "./windows-agent.mjs";
 import { JsonlFramer } from "./jsonl.mjs";
+import { t } from "./i18n.mjs";
 const PLUGIN_MANIFEST_URL = new URL("../../.codex-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
 const POSIX_AGENT_SUPERVISOR = fileURLToPath(new URL("./posix-agent-supervisor.mjs", import.meta.url));
@@ -57,7 +58,7 @@ function normalizeTransportError(value) {
         return error;
     }
     catch {
-        return new Error("Grok ACP transport failure.", { cause: value });
+        return new Error(t("err.acp_transport_failure"), { cause: value });
     }
 }
 async function waitForExitWithTimeout(exitPromise, timeoutMs = CLOSE_TIMEOUT_MS) {
@@ -74,7 +75,7 @@ async function waitForExitWithTimeout(exitPromise, timeoutMs = CLOSE_TIMEOUT_MS)
 }
 class HandshakeTimeoutError extends Error {
     constructor(ms) {
-        super(`Grok agent did not complete the ACP handshake within ${ms}ms.`);
+        super(t("err.acp_handshake_timeout", { ms }));
         this.name = "HandshakeTimeoutError";
     }
 }
@@ -244,7 +245,7 @@ class AcpClientBase {
     }
     request(method, params, options = {}) {
         if (this.closed) {
-            throw new Error("grok agent stdio client is closed.");
+            throw new Error(t("err.acp_client_closed"));
         }
         const signal = options.signal;
         if (signal?.aborted)
@@ -257,7 +258,7 @@ class AcpClientBase {
                 ? setTimeout(() => {
                     const pending = this.pending.get(id);
                     this.pending.delete(id);
-                    pending?.reject(new Error(`Grok ACP ${method} timed out after ${timeoutMs}ms.`));
+                    pending?.reject(new Error(t("err.acp_timeout", { method, ms: timeoutMs })));
                 }, timeoutMs)
                 : null;
             timer?.unref?.();
@@ -327,7 +328,7 @@ class AcpClientBase {
             message = JSON.parse(line);
         }
         catch (error) {
-            this.handleExit(createProtocolError(`Failed to parse grok agent JSONL: ${error.message}`, { line }));
+            this.handleExit(createProtocolError(t("err.acp_jsonl_parse", { detail: error.message }), { line }));
             return;
         }
         if (message.id !== undefined && message.method) {
@@ -341,7 +342,7 @@ class AcpClientBase {
             }
             this.pending.delete(message.id);
             if (message.error) {
-                const error = createProtocolError(message.error.message ?? `grok ${pending.method} failed.`, message.error);
+                const error = createProtocolError(message.error.message ?? t("err.acp_rpc_failed", { method: pending.method }), message.error);
                 error.rpcResponseReceived = true;
                 if (pending.method === "session/prompt") {
                     const terminal = "confirmed";
@@ -407,7 +408,7 @@ class AcpClientBase {
                 }
                 case "fs/write_text_file": {
                     if (this.options.readOnly || this.options.clientCapabilities?.fs?.writeTextFile !== true) {
-                        this.writeDeniedHandler?.("ACP file write request was denied");
+                        this.writeDeniedHandler?.(t("err.perm_acp_write_denied"));
                         fail(-32601, "Client file writes are not enabled for this session.");
                         return;
                     }
@@ -445,7 +446,7 @@ class AcpClientBase {
         this.framer.close();
         this.exitError = failed ? normalizeTransportError(error) : null;
         for (const pending of this.pending.values()) {
-            pending.reject(this.exitError ?? new Error("grok agent connection closed."));
+            pending.reject(this.exitError ?? new Error(t("err.acp_connection_closed")));
         }
         this.pending.clear();
         this.resolveExit(undefined);
@@ -555,7 +556,7 @@ class SpawnedAcpClient extends AcpClientBase {
                 child.once("close", () => {
                     childClosed = true;
                     this.#posixSpawnNeverStarted = Boolean(spawnError && !spawnObserved && (!Number.isInteger(child.pid) || child.pid <= 0));
-                    startedReject(spawnError ?? new Error("Grok supervisor closed before startup."));
+                    startedReject(spawnError ?? new Error(t("err.acp_supervisor_closed")));
                     resolve(undefined);
                 });
             });
@@ -585,7 +586,7 @@ class SpawnedAcpClient extends AcpClientBase {
             if (!child.stdin || !child.stdout || !child.stderr || !child.stdio?.[3]) {
                 // Bunのspawn失敗は全pipeがnullになり得る。元のspawn errorを優先する。
                 await withTimeout(started, DIRECT_HANDSHAKE_TIMEOUT_MS);
-                throw new Error("Grok supervisor did not provide all required stdio pipes.");
+                throw new Error(t("err.acp_pipes_missing"));
             }
             let exitData = "";
             child.stdio[3].setEncoding("utf8");
@@ -631,7 +632,10 @@ class SpawnedAcpClient extends AcpClientBase {
                 ({ code, signal } = this.#posixAgentExit);
             const detail = code === 0
                 ? null
-                : createProtocolError(`grok agent stdio exited unexpectedly (${signal ? `signal ${signal}` : `exit ${code}`}).${stderr ? `\n${stderr}` : ""}`);
+                : createProtocolError(t("err.acp_agent_exited", {
+                    cause: signal ? t("err.acp_exit_cause_signal", { signal }) : t("err.acp_exit_cause_code", { code: String(code) }),
+                    detail: stderr ? `\n${stderr}` : ""
+                }));
             this.handleExit(detail);
         });
         this.proc.stdout.on("data", (chunk) => this.handleChunk(chunk));

@@ -2,13 +2,14 @@ import net from "node:net";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import childProcess from "node:child_process";
+import { t } from "./i18n.mjs";
 import { windowsHelperPath } from "./windows-helper.mjs";
 import { buildShellCommand, getProcessSnapshot } from "./process.mjs";
 /** Windowsのdirect agent専用。workerや共有brokerをJobへ所属させない。 */
 export async function spawnWindowsAgent(cwd, command, args, options = {}) {
     const owner = (options.getProcessSnapshotImpl ?? getProcessSnapshot)(process.pid);
     if (!/^win32-filetime:[0-9]+$/.test(owner?.startKey ?? "")) {
-        throw new Error("Windows agent owner identity could not be pinned before startup.");
+        throw new Error(t("err.windows_owner_identity"));
     }
     const env = options.env ?? process.env;
     const windowsRoot = process.env.SystemRoot ?? "C:\\Windows";
@@ -152,10 +153,10 @@ export async function spawnWindowsAgent(cwd, command, args, options = {}) {
         proc.on("error", (error) => { failReady(error); procClosed = true; maybeFinished(); });
         proc.on("close", () => {
             procClosed = true;
-            failReady(new Error("Windows owned agent supervisor exited before startup was confirmed."));
+            failReady(new Error(t("err.windows_supervisor_exited")));
             maybeFinished();
         });
-        readyTimer = setTimeout(() => failReady(new Error("Windows owned agent supervisor startup timed out.")), 10000);
+        readyTimer = setTimeout(() => failReady(new Error(t("err.windows_supervisor_timeout"))), 10000);
         readyTimer.unref?.();
         server.on("error", failReady);
         // nonceをargv/envへ載せない。ready前はこの長さ付きbootstrap以外を送らない。

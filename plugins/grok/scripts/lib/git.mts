@@ -26,7 +26,7 @@ const MAX_REPO_LISTING_ENTRIES = 2000;
 const MAX_FINGERPRINT_TOTAL_BYTES = 8 * 1024 * 1024;
 
 function validateSnapshotPaths(relativePaths) {
-  const incomplete = () => incompleteSnapshot("cannot safely read the working tree snapshot.");
+  const incomplete = () => incompleteSnapshot("err.snapshot_unreadable");
   if (!Array.isArray(relativePaths) || relativePaths.length > MAX_REPO_LISTING_ENTRIES) throw incomplete();
   const names = new Set();
   for (const name of relativePaths) {
@@ -41,7 +41,7 @@ function validateSnapshotPaths(relativePaths) {
 
 export function readWindowsWorkingTreeFiles(repoRoot, relativePaths, options: GitOptions = {}) {
   validateSnapshotPaths(relativePaths);
-  const incomplete = () => incompleteSnapshot("cannot safely read the working tree snapshot.");
+  const incomplete = () => incompleteSnapshot("err.snapshot_unreadable");
   const result = runCommand(windowsHelperPath(), ["git-snapshot"], {
     shell: false, input: JSON.stringify({ root: path.resolve(repoRoot), paths: relativePaths }),
     timeout: gitLookupTimeout(options, 15000), maxBuffer: 12 * 1024 * 1024
@@ -84,10 +84,10 @@ function readOnlyGitArgs(args, options: GitOptions = {}) {
   // 設定の事前検査は TOCTOU を防げないため、危険な呼出し自体を開始しない。
   if (command === "status" || (command === "diff" &&
       !rest.includes("--cached") && !rest.some((arg) => /^[a-f0-9]{40,64}\.\.[a-f0-9]{40,64}$/.test(arg)))) {
-    throw new Error("Review incomplete: cannot safely inspect the working tree because Git clean/process filters may execute external commands. Use an explicit branch comparison or repository scope.");
+    throw new Error(t("err.review_incomplete", { reason: t("err.review_worktree_filters") }));
   }
   if (rest.includes("--submodule=diff")) {
-    throw new Error("Review incomplete: inline submodule diffs may execute child Git textconv commands.");
+    throw new Error(t("err.review_incomplete", { reason: t("err.review_submodule_diff") }));
   }
   // object 間 / cached の比較は oid_valid な内容を読む。Git の
   // reuse_worktree_file(..., want_file=0) は would_convert_to_git 時に再利用を拒否する。
@@ -145,9 +145,9 @@ function assertGitStarted(result, cwd) {
       }
       throw new Error(t("err.git_not_installed"));
     }
-    throw new Error(`Unable to start Git${code ? ` (${code})` : ""}: ${result.error.message}`);
+    throw new Error(code ? t("err.git_start_failed_code", { code, detail: result.error.message }) : t("err.git_start_failed", { detail: result.error.message }));
   }
-  if (result.signal) throw new Error(`Git was terminated by ${result.signal}.`);
+  if (result.signal) throw new Error(t("err.git_terminated", { signal: result.signal }));
 }
 
 function gitLookupTimeout(options, fallback = options.timeout) {
@@ -169,7 +169,7 @@ function assertReadOnlyGitSupport(cwd, options: GitOptions = {}) {
     throw new Error(t("err.git_too_old"));
   }
   if (probe.error || probe.status !== 0 || !/^git version \S+/m.test(probe.stdout)) {
-    throw new Error(`Git capability check failed: ${formatCommandFailure(probe)}`);
+    throw new Error(t("err.git_capability_failed", { detail: formatCommandFailure(probe) }));
   }
 }
 
@@ -233,7 +233,7 @@ function buildBranchComparison(cwd, baseRef) {
   const head = gitChecked(cwd, ["rev-parse", "--verify", "HEAD^{commit}"]).stdout.trim();
   const mergeBase = gitChecked(cwd, ["merge-base", head, baseRef]).stdout.trim();
   if (!/^[a-f0-9]{40,64}$/.test(head) || !/^[a-f0-9]{40,64}$/.test(mergeBase)) {
-    throw new Error("Review incomplete: unable to resolve immutable branch comparison objects.");
+    throw new Error(t("err.review_incomplete", { reason: t("err.review_branch_objects") }));
   }
   return {
     mergeBase,
@@ -253,10 +253,10 @@ function assertCompleteBranchComparison(cwd, comparison) {
     if (!record) continue;
     const match = /^:(\d{6}) (\d{6}) [a-f0-9]+ [a-f0-9]+ [A-Z][0-9]*$/.exec(record);
     if (!match || records[index + 1] === undefined || !records[index + 1]) {
-      throw new Error("Review incomplete: unable to validate the branch comparison file modes.");
+      throw new Error(t("err.review_incomplete", { reason: t("err.review_branch_modes") }));
     }
     if (match[1] === "160000" || match[2] === "160000") {
-      throw new Error("Review incomplete: changed submodule contents cannot be safely collected without child Git textconv execution.");
+      throw new Error(t("err.review_incomplete", { reason: t("err.review_branch_submodule") }));
     }
   }
 }
@@ -264,14 +264,14 @@ function assertCompleteBranchComparison(cwd, comparison) {
 export function ensureGitRepository(cwd, options: GitOptions = {}) {
   const result = git(cwd, ["rev-parse", "--show-toplevel"], options);
   if (options.deadline !== undefined && performance.now() >= options.deadline) throw new Error("Git lookup deadline expired");
-  if (result.error) throw new Error(`Git repository lookup failed: ${formatCommandFailure(result)}`);
+  if (result.error) throw new Error(t("err.git_lookup_failed", { detail: formatCommandFailure(result) }));
   if (result.status !== 0) {
     assertReadOnlyGitSupport(cwd, options);
     if (options.deadline !== undefined && performance.now() >= options.deadline) throw new Error("Git lookup deadline expired");
     if (/^fatal: not a git repository(?:[ (:]|$)/m.test(result.stderr)) {
       throw Object.assign(new Error(t("err.git_not_a_repository")), { code: "GROK_NOT_GIT_REPOSITORY" });
     }
-    throw new Error(`Git repository lookup failed: ${formatCommandFailure(result)}`);
+    throw new Error(t("err.git_lookup_failed", { detail: formatCommandFailure(result) }));
   }
   return result.stdout.trim();
 }
@@ -308,66 +308,67 @@ export function getWorkingTreeState(cwd) {
   return collectWorkingTreeSnapshot(cwd).state;
 }
 
-function incompleteSnapshot(reason) {
-  const guidance = process.platform === "win32" ? "" : " Working-tree reviews are unavailable on this platform. Use --scope branch or --base to review committed changes; uncommitted changes are excluded from the comparison diff, but surrounding files may still be read from the working tree.";
-  return new Error(`Review incomplete: ${reason}${guidance}`);
+// reason は辞書キー（err.snapshot_*）のリテラルを渡す。i18n テストの走査がキー参照を拾えるようにするため。
+function incompleteSnapshot(reasonKey) {
+  const guidance = process.platform === "win32" ? "" : ` ${t("err.snapshot_guidance_non_windows")}`;
+  return new Error(`${t("err.review_incomplete", { reason: t(reasonKey) })}${guidance}`);
 }
 
 function nulRecords(output) {
-  if (output && (!output.endsWith("\0") || output.includes("\ufffd"))) throw incompleteSnapshot("invalid or truncated path metadata.");
+  if (output && (!output.endsWith("\0") || output.includes("\ufffd"))) throw incompleteSnapshot("err.snapshot_path_metadata");
   return output ? output.slice(0, -1).split("\0") : [];
 }
 
 function workingTreeMetadata(repoRoot, options: GitOptions = {}) {
   const listing = { ...options, maxBuffer: MAX_FILE_LISTING_BYTES };
   const head = git(repoRoot, ["rev-parse", "--verify", "HEAD"], options);
-  if (head.status !== 0 || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(head.stdout.trim())) throw incompleteSnapshot("unborn or unavailable HEAD is unsupported.");
+  if (head.status !== 0 || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(head.stdout.trim())) throw incompleteSnapshot("err.snapshot_head_unavailable");
   const objectFormat = gitChecked(repoRoot, ["rev-parse", "--show-object-format"], options).stdout.trim();
-  if (!["sha1", "sha256"].includes(objectFormat)) throw incompleteSnapshot("unsupported object format.");
+  if (!["sha1", "sha256"].includes(objectFormat)) throw incompleteSnapshot("err.snapshot_object_format");
   const indexText = gitChecked(repoRoot, ["ls-files", "--stage", "-v", "-z"], listing).stdout;
   const headText = gitChecked(repoRoot, ["ls-tree", "-r", "-z", "HEAD"], listing).stdout;
   const untrackedText = gitChecked(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"], listing).stdout;
   const config = git(repoRoot, ["config", "--null", "--get-regexp", "^core\\.(autocrlf|eol|filemode|symlinks|ignorestat)$"], listing);
-  if (config.status !== 0 && !(config.status === 1 && !config.stdout && !config.stderr)) throw incompleteSnapshot("configuration metadata lookup failed.");
+  if (config.status !== 0 && !(config.status === 1 && !config.stdout && !config.stderr)) throw incompleteSnapshot("err.snapshot_config_lookup");
   let fileModeDisabled = false;
   let autoCrlf = false;
   for (const record of nulRecords(config.stdout)) {
     const [key, value, extra] = record.split("\n");
-    if (extra !== undefined || value === undefined || !["core.autocrlf", "core.eol", "core.filemode", "core.symlinks", "core.ignorestat"].includes(key)) throw incompleteSnapshot("invalid configuration metadata.");
+    if (extra !== undefined || value === undefined || !["core.autocrlf", "core.eol", "core.filemode", "core.symlinks", "core.ignorestat"].includes(key)) throw incompleteSnapshot("err.snapshot_config_invalid");
     if ((key === "core.autocrlf" && !["false", "true", "input"].includes(value)) ||
       (key === "core.eol" && value !== "lf") ||
-      (["core.filemode", "core.ignorestat"].includes(key) && value !== "false")) throw incompleteSnapshot("unsupported working tree normalization or stat configuration.");
+      (["core.filemode", "core.ignorestat"].includes(key) && value !== "false")) throw incompleteSnapshot("err.snapshot_config_unsupported");
     if (key === "core.filemode" && value === "false") fileModeDisabled = true;
     if (key === "core.autocrlf") autoCrlf = value !== "false";
   }
-  if (!fileModeDisabled) throw incompleteSnapshot("core.filemode must be explicitly false because executable mode cannot be observed safely.");
+  if (!fileModeDisabled) throw incompleteSnapshot("err.snapshot_filemode");
   const index = new Map();
   for (const record of nulRecords(indexText)) {
     const match = /^H (100644|100755) ([a-f0-9]{40}|[a-f0-9]{64}) 0\t(.+)$/.exec(record);
-    if (!match || /^0+$/.test(match[2])) throw incompleteSnapshot("unsupported, unmerged, sparse, skip-worktree or submodule index entry.");
-    if (index.has(match[3])) throw incompleteSnapshot("duplicate index path.");
+    if (!match || /^0+$/.test(match[2])) throw incompleteSnapshot("err.snapshot_index_entry");
+    if (index.has(match[3])) throw incompleteSnapshot("err.snapshot_index_duplicate");
     index.set(match[3], { mode: match[1], oid: match[2] });
   }
   const headFiles = new Map();
   for (const record of nulRecords(headText)) {
     const match = /^(100644|100755) blob ([a-f0-9]{40}|[a-f0-9]{64})\t(.+)$/.exec(record);
-    if (!match || headFiles.has(match[3])) throw incompleteSnapshot("unsupported HEAD entry or submodule.");
+    if (!match || headFiles.has(match[3])) throw incompleteSnapshot("err.snapshot_head_entry");
     headFiles.set(match[3], { mode: match[1], oid: match[2] });
   }
   const untracked = nulRecords(untrackedText);
   const paths = listUniqueFiles([...index.keys()], untracked);
   validateSnapshotPaths(listUniqueFiles([...headFiles.keys()], paths));
-  if (paths.length > MAX_REPO_LISTING_ENTRIES || new Set(untracked).size !== untracked.length || untracked.some((name) => index.has(name))) throw incompleteSnapshot("incomplete file inventory.");
+  if (paths.length > MAX_REPO_LISTING_ENTRIES || new Set(untracked).size !== untracked.length || untracked.some((name) => index.has(name))) throw incompleteSnapshot("err.snapshot_inventory");
   const attributes = gitChecked(repoRoot, ["check-attr", "--all", "-z", "--stdin"], {
     ...listing, input: paths.length ? `${paths.join("\0")}\0` : ""
   }).stdout;
   const attributeRecords = nulRecords(attributes);
   const rawPaths = new Set();
-  if (attributeRecords.length % 3 !== 0) throw incompleteSnapshot("invalid attributes metadata.");
+  if (attributeRecords.length % 3 !== 0) throw incompleteSnapshot("err.snapshot_attributes_invalid");
   for (let offset = 0; offset < attributeRecords.length; offset += 3) {
     if (["text", "crlf"].includes(attributeRecords[offset + 1]) && attributeRecords[offset + 2] === "unset") rawPaths.add(attributeRecords[offset]);
     if (["filter", "diff", "text", "eol", "crlf", "ident", "working-tree-encoding"].includes(attributeRecords[offset + 1]) &&
-      !["unspecified", "unset"].includes(attributeRecords[offset + 2])) throw incompleteSnapshot("unsupported external conversion or normalization attribute.");
+      !["unspecified", "unset"].includes(attributeRecords[offset + 2])) throw incompleteSnapshot("err.snapshot_attributes_unsupported");
   }
   return { head: head.stdout.trim(), objectFormat, index, headFiles, untracked, paths, autoCrlf, rawPaths,
     indexIdentity: JSON.stringify([head.stdout, objectFormat, indexText, headText, config.stdout, attributes]),
@@ -380,8 +381,8 @@ function immutableBlob(repoRoot, oid, objectFormat, cache, options: GitOptions =
     ...options, maxBuffer: MAX_FINGERPRINT_TOTAL_BYTES + 1024
   }).stdout, "utf8");
   const actual = createHash(objectFormat).update(`blob ${content.length}\0`).update(content).digest("hex");
-  if (actual !== oid) throw incompleteSnapshot("blob content is not complete lossless UTF-8.");
-  if (cache.totalBytes + content.length > MAX_FINGERPRINT_TOTAL_BYTES) throw incompleteSnapshot("immutable blob evidence exceeds the snapshot size limit.");
+  if (actual !== oid) throw incompleteSnapshot("err.snapshot_blob_lossless");
+  if (cache.totalBytes + content.length > MAX_FINGERPRINT_TOTAL_BYTES) throw incompleteSnapshot("err.snapshot_blob_size");
   cache.entries.set(oid, content);
   cache.totalBytes += content.length;
   return content;
@@ -393,21 +394,21 @@ function cleanOrdinaryAutoCrlf(bytes, indexedBytes) {
   // convert_is_binary=false と証明できる。混在改行・bare CR・index CRLF は未対応にする。
   const ordinaryText = (content) => {
     const text = content.toString("utf8");
-    if (!Buffer.from(text, "utf8").equals(content) || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) throw incompleteSnapshot("unsupported binary or non-UTF-8 automatic line conversion.");
+    if (!Buffer.from(text, "utf8").equals(content) || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) throw incompleteSnapshot("err.snapshot_binary_conversion");
     return text;
   };
   const indexedText = ordinaryText(indexedBytes);
-  if (indexedText.includes("\r")) throw incompleteSnapshot("unsupported CR or CRLF content in the existing index blob.");
+  if (indexedText.includes("\r")) throw incompleteSnapshot("err.snapshot_crlf_index");
   const text = ordinaryText(bytes);
   const withoutPairs = text.replace(/\r\n/g, "");
-  if (withoutPairs.includes("\r") || (text.includes("\r\n") && withoutPairs.includes("\n"))) throw incompleteSnapshot("unsupported mixed or bare-CR automatic line conversion.");
+  if (withoutPairs.includes("\r") || (text.includes("\r\n") && withoutPairs.includes("\n"))) throw incompleteSnapshot("err.snapshot_mixed_eol");
   return text.includes("\r\n") ? Buffer.from(text.replace(/\r\n/g, "\n"), "utf8") : bytes;
 }
 
 function replacementPatch(name, before, after, oldMode = "100644", newMode = "100644") {
   if (before !== null && after !== null && before.equals(after) && oldMode === newMode) return "";
   for (const bytes of [before, after]) {
-    if (bytes && (bytes.includes(0) || !Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes))) throw incompleteSnapshot("changed binary or non-UTF-8 content cannot be reviewed completely.");
+    if (bytes && (bytes.includes(0) || !Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes))) throw incompleteSnapshot("err.snapshot_changed_binary");
   }
   const a = JSON.stringify(`a/${name}`);
   const b = JSON.stringify(`b/${name}`);
@@ -437,7 +438,7 @@ export function collectWorkingTreeSnapshot(cwd, options: GitOptions = {}) {
   const confirmation = readWindowsWorkingTreeFiles(repoRoot, metadata.paths, options);
   if (metadata.paths.some((name) => files.get(name) === null ? confirmation.get(name) !== null :
     confirmation.get(name) === null || !files.get(name).equals(confirmation.get(name))) || metadata.untracked.some((name) => files.get(name) === null) ||
-    workingTreeMetadata(repoRoot, options).identity !== metadata.identity) throw incompleteSnapshot("working tree or metadata changed during collection.");
+    workingTreeMetadata(repoRoot, options).identity !== metadata.identity) throw incompleteSnapshot("err.snapshot_changed_during");
   const staged = [];
   const unstaged = [];
   const blobs = { entries: new Map(), totalBytes: 0 };
@@ -507,7 +508,7 @@ function buildWorkingTreeReviewSnapshot(snapshot: ReturnType<typeof collectWorki
     replacementPatch(file.path, null, Buffer.from(file.content, "base64"), "100644", file.mode)).join("\n");
   const context = [formatSection("Staged Diff", stagedDiff), formatSection("Unstaged Diff", unstagedDiff),
     formatSection("Untracked Files", untracked)].join("\n");
-  if (Buffer.byteLength(context) > normalizeMaxInlineDiffBytes(options.maxInlineDiffBytes)) throw incompleteSnapshot("complete working tree evidence exceeds the inline size limit.");
+  if (Buffer.byteLength(context) > normalizeMaxInlineDiffBytes(options.maxInlineDiffBytes)) throw incompleteSnapshot("err.snapshot_inline_size");
   return { fingerprint: snapshot.fingerprint, context, complete: true, state: snapshot.state, files: snapshot.files };
 }
 

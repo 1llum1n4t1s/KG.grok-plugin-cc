@@ -8,6 +8,7 @@ import { performance } from "node:perf_hooks";
 import { getEventListeners } from "node:events";
 import { GrokAcpClient } from "../plugins/grok/scripts/lib/acp.mjs";
 import { grokFixtureEnv, removeTempFixture } from "./helpers.mjs";
+process.env.GROK_PLUGIN_LANGUAGE = "en";
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const content = bytes => "日🙂x".repeat(Math.ceil(bytes / 8));
 const digest = value => createHash("sha256").update(value).digest("hex");
