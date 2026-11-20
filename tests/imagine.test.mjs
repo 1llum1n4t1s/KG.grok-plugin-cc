@@ -580,3 +580,65 @@ for (const failing of ["readFileSync", "writeSync"]) {
         }
     });
 }
+function imageModelEnv(base, extra = {}) {
+    const env = { ...base, ...extra };
+    delete env.XAI_API_KEY;
+    for (const name of ["GROK_PLUGIN_IMAGE_MODEL", "GROK_PLUGIN_IMAGE_EDIT_MODEL", "GROK_IMAGE_GEN_MODEL_OVERRIDE", "GROK_IMAGE_EDIT_MODEL_OVERRIDE"]) {
+        if (!(name in extra))
+            delete env[name];
+    }
+    return env;
+}
+test("image model options reach the Grok process and are reported as requested", () => {
+    const cwd = makeTempDir("grok-imagine-cwd-");
+    const cases = [
+        { name: "flags", args: ["--image-model", "grok-imagine-image-x.1", "--image-edit-model", "edit_model-2"], extra: {}, gen: "grok-imagine-image-x.1", edit: "edit_model-2" },
+        { name: "plugin env", args: [], extra: { GROK_PLUGIN_IMAGE_MODEL: "env-gen", GROK_PLUGIN_IMAGE_EDIT_MODEL: "env-edit" }, gen: "env-gen", edit: "env-edit" },
+        { name: "flag beats plugin env, gen is not reused for edit", args: ["--image-model", "flag-gen"], extra: { GROK_PLUGIN_IMAGE_MODEL: "env-gen", GROK_PLUGIN_IMAGE_EDIT_MODEL: "env-edit" }, gen: "flag-gen", edit: "env-edit" },
+        { name: "user's own override passes through", args: [], extra: { GROK_IMAGE_GEN_MODEL_OVERRIDE: "mine-gen", GROK_IMAGE_EDIT_MODEL_OVERRIDE: "mine-edit" }, gen: "mine-gen", edit: "mine-edit" },
+        { name: "only gen requested leaves edit alone", args: ["--image-model", "only-gen"], extra: {}, gen: "only-gen", edit: "grok-imagine-image-2.0" },
+        { name: "nothing set defaults both to the highest quality model", args: [], extra: {}, gen: "grok-imagine-image-2.0", edit: "grok-imagine-image-2.0" },
+        { name: "auto leaves both to Grok", args: ["--image-model", "AUTO", "--image-edit-model", "auto"], extra: {}, gen: null, edit: null },
+        { name: "auto from plugin env leaves both to Grok", args: [], extra: { GROK_PLUGIN_IMAGE_MODEL: "Auto", GROK_PLUGIN_IMAGE_EDIT_MODEL: "auto" }, gen: null, edit: null },
+        { name: "auto keeps the user's own override", args: ["--image-model", "auto"], extra: { GROK_IMAGE_GEN_MODEL_OVERRIDE: "mine-gen" }, gen: "mine-gen", edit: "grok-imagine-image-2.0" }
+    ];
+    try {
+        for (const item of cases) {
+            const fake = installFakeGrok({ replies: [{ text: "no image" }] });
+            try {
+                const result = imagine(["imagine", "--json", ...item.args, "--", "a red cube"], imageModelEnv(fake.env, item.extra), cwd);
+                const payload = JSON.parse(result.stdout);
+                assert.deepEqual(payload.requestedImageModel, { gen: item.gen, edit: item.edit }, item.name);
+                assert.deepEqual(fake.readState().imageEnv, { gen: item.gen, edit: item.edit }, item.name);
+            }
+            finally {
+                removeTempFixture(fake.binDir, { recursive: true, force: true });
+            }
+        }
+    }
+    finally {
+        removeTempFixture(cwd, { recursive: true, force: true });
+    }
+});
+test("an invalid image model ID fails before Grok starts", () => {
+    const fake = installFakeGrok({ replies: [{ text: "should not run" }] });
+    const cwd = makeTempDir("grok-imagine-cwd-");
+    try {
+        for (const [args, extra, label] of [
+            [["--image-model", "bad id"], {}, "--image-model"],
+            [["--image-model", ""], {}, "--image-model"],
+            [["--image-edit-model", "x/../y"], {}, "--image-edit-model"],
+            [["--image-model", "-lead"], {}, "--image-model"],
+            [[], { GROK_PLUGIN_IMAGE_MODEL: "bad;id" }, "GROK_PLUGIN_IMAGE_MODEL"]
+        ]) {
+            const result = imagine(["imagine", ...args, "a red cube"], imageModelEnv(fake.env, extra), cwd);
+            assert.equal(result.status, 1, result.stdout);
+            assert.ok(result.stderr.includes(label) && /Invalid image model ID/.test(result.stderr), result.stderr);
+            assert.equal(fake.readState(), null);
+        }
+    }
+    finally {
+        removeTempFixture(cwd, { recursive: true, force: true });
+        removeTempFixture(fake.binDir, { recursive: true, force: true });
+    }
+});

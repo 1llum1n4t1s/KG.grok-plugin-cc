@@ -69,7 +69,7 @@ test("both hosts permit Bun and Node on Windows macOS and Linux", () => {
     assert.match(command, /Node\.js 22 or later/i);
     assert.match(read(`codex-skills/source-command-${name}/SKILL.md`), /shared runtime contract/i);
   }
-  for (const name of ["references/codex-runtime.md", "claude-skills/grok-cli-runtime/SKILL.md", "claude-skills/grok-imagine-runtime/SKILL.md"]) {
+  for (const name of ["references/codex-runtime.md", "claude-skills/grok-cli-runtime/SKILL.md", "claude-skills/grok-imagine-runtime/SKILL.md", "codex-skills/grok-imagine-runtime/SKILL.md"]) {
     const runtime = read(name);
     assert.match(runtime, /Windows.*`bun --no-env-file` instead of `node`/i);
     assert.match(runtime, /Windows, macOS, and Linux.*Bun 1\.4\.4 or later.*Node\.js 22 or later/i);
@@ -80,7 +80,8 @@ test("Codex exposes the same workflows as native skills", () => {
   const nativeSkillNames = PUBLIC_WORKFLOWS.map((name) => `source-command-${name}`);
 
   assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, "skills")), false);
-  assert.deepEqual(listSkills("codex-skills"), nativeSkillNames);
+  // grok-imagine-runtime is the only model-invoked Codex skill (see the imagine helper test).
+  assert.deepEqual(listSkills("codex-skills"), ["grok-imagine-runtime", ...nativeSkillNames]);
 
   const runtime = read("references/codex-runtime.md");
   assert.match(runtime, /once in the foreground with a new direct ACP connection/i);
@@ -120,7 +121,8 @@ test("Claude-only helpers stay outside Codex skill discovery", () => {
 
   assert.equal(claudeManifest.skills, "./claude-skills/");
   assert.deepEqual(listSkills("claude-skills"), helperNames);
-  assert.ok(helperNames.every((name) => !listSkills("codex-skills").includes(name)));
+  // Codex has its own grok-imagine-runtime with Codex-specific instructions; the other helpers stay Claude-only.
+  assert.ok(["grok-cli-runtime", "grok-prompting"].every((name) => !listSkills("codex-skills").includes(name)));
 
   for (const name of helperNames) {
     const source = read(`claude-skills/${name}/SKILL.md`);
@@ -225,6 +227,13 @@ test("imagine copies images only and requires an explicit API billing opt-in", (
   assert.match(codex, /do not add `--allow-api-billing`/i);
   assert.match(codex, /image-entitlement-missing/);
   assert.match(codex, /usage-balance-exhausted/);
+  // The image model options are forwarded only when the user names a model, and the generation ID is never reused for edits.
+  assert.match(claude, /argument-hint:.*--image-model <id>.*--image-edit-model <id>/);
+  assert.match(claude, /only when the user names an image model[\s\S]*never reuse the generation ID for edits/i);
+  assert.match(codex, /--image-model, and --image-edit-model[\s\S]*never invent an image model ID/i);
+  for (const name of ["claude-skills", "codex-skills"]) {
+    assert.match(read(`${name}/grok-imagine-runtime/SKILL.md`), /`--image-model <id>`[\s\S]*`--image-edit-model <id>`[\s\S]*only when the user or the workflow specifies an image model[\s\S]*requestedImageModel/);
+  }
 });
 
 test("the Claude imagine helper keeps the command contract for model-driven callers", () => {
@@ -241,6 +250,31 @@ test("the Claude imagine helper keeps the command contract for model-driven call
   }
   assert.match(helper, /do not claim an image was saved/i);
   assert.match(helper, /\$\{CLAUDE_PLUGIN_ROOT\}/);
+});
+
+test("the Codex imagine helper is model-invoked and keeps the command contract", () => {
+  const codexManifest = JSON.parse(read(".codex-plugin/plugin.json"));
+  const helper = read("codex-skills/grok-imagine-runtime/SKILL.md");
+  assert.equal(codexManifest.skills, "./codex-skills/");
+  assert.match(helper, /^---\r?\n/);
+  assert.match(helper, /^name: grok-imagine-runtime$/m);
+  assert.match(helper, /^description: .+$/m);
+  // Unlike source-command-*, Codex must be able to call this from another workflow.
+  assert.doesNotMatch(helper, /disable-model-invocation|user-invocable/);
+  assert.match(helper, /\(\.\.\/\.\.\/references\/codex-runtime\.md\)/);
+  assert.ok(fs.existsSync(path.join(PLUGIN_ROOT, "references", "codex-runtime.md")));
+  assert.match(helper, /grok-companion\.mjs imagine --json once in the foreground/i);
+  assert.match(helper, /at least 600 seconds/i);
+  assert.match(helper, /options before the description, then `--`/i);
+  assert.match(helper, /multiline text.*--prompt-file/i);
+  assert.match(helper, /`images\[\]\.saved`/);
+  assert.match(helper, /do not pass `--write`/i);
+  assert.match(helper, /do not add `--allow-api-billing` unless the user explicitly accepted/i);
+  for (const classification of ["usage-balance-exhausted", "image-entitlement-missing", "api-billing-required"]) {
+    assert.match(helper, new RegExp(classification));
+  }
+  assert.match(helper, /do not claim an image was saved/i);
+  assert.doesNotMatch(helper, /AskUserQuestion|run_in_background|CLAUDE_PLUGIN_ROOT/);
 });
 
 test("Claude task entries return stderr diagnostics such as the unapplied effort notice", () => {

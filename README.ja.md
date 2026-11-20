@@ -50,6 +50,8 @@ companion 自身のメッセージ（setup の結果、レビューの見出し�
 
 HTTP 402 と `usage balance exhausted` が表示された場合は、Grok Build の利用枠が不足しています。利用枠の回復後に再実行してください。サブスクリプションの画像生成も同じ共有枠を使います。画像ツールに SuperGrok のサブスクリプションが必要だと返った場合、そのサインインには Imagine が含まれていません。Imagine を含むプランを使うか、`--allow-api-billing` を付けた API キーを使ってください。タイムアウト、権限拒否、不完全なレビュー、agent の終了未確認は実行失敗です。途中の出力を完了したレビューやタスクとして扱わないでください。
 
+`/grok:imagine` の画像モデルを選ぶには `--image-model <id>`（または環境変数 `GROK_PLUGIN_IMAGE_MODEL`）を指定します。既存画像の編集には `--image-edit-model <id>`（または `GROK_PLUGIN_IMAGE_EDIT_MODEL`）を使い、生成用の ID を編集に流用することはありません。companion はその実行の間だけ Grok の `GROK_IMAGE_GEN_MODEL_OVERRIDE` / `GROK_IMAGE_EDIT_MODEL_OVERRIDE` を設定し、要求した ID を `--json` の `requestedImageModel` に載せます。これらを指定しないときの既定は `grok-imagine-image-2.0`（最高品質で、編集にも使えます）です。ただし利用者自身が `GROK_IMAGE_GEN_MODEL_OVERRIDE` / `GROK_IMAGE_EDIT_MODEL_OVERRIDE` を設定していれば、その値をそのまま Grok へ渡します。オプションや `GROK_PLUGIN_IMAGE_*` に `auto`（大文字小文字は区別しません）を指定すると Grok の既定に任せます。その場合プラグインは何も設定せず、利用者自身の上書きがあればそのまま渡し、無ければ `requestedImageModel` は `null` です。ID は文字種だけを検査し、アカウントで使えない ID は画像生成時に xAI が拒否します。`--effort` はチャットモデルの推論深度で、画像の品質ではありません。
+
 読み取り専用のレビューと task（`--write` なしの `task`）では、読取りだけを意図したスクリプトでも Python・Node.js・Bun・別シェル経由の実行は拒否します。Grok Build は権限拒否後に `cancelled` でターンを終了することがあります。JSON などの証拠は組込みのファイル読取りツールで確認し、アクセスできない証拠は未検証とします。レビューのプロンプトと、読み取り専用 task の依頼本文の後ろに足す案内の両方で、この制約を調査の開始前に渡します。
 
 ソースからのビルド、開発用コマンドと検証手順は [開発ガイド](CONTRIBUTING.md#日本語)、実行時の構造と境界は [DESIGN.md](DESIGN.md) を参照してください。

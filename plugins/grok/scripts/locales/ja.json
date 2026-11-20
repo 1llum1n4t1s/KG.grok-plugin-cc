@@ -1,5 +1,5 @@
 {
-  "cli.usage": "使い方: grok-companion.mjs <setup|review|adversarial-review|audit|task|imagine> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nレビュー範囲 auto と working-tree は Windows が必要で、安全なスナップショットを完全に取得できない場合は失敗します。\nmacOS/Linux ではコミット済みの変更に --scope branch または --base <ref> を使います。未コミット変更は比較差分に含まれませんが、周辺ファイルは作業ツリーから読み取られる場合があります。リポジトリ全体には audit を使います。\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nImagine: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --output <path> --aspect <ratio> --allow-api-billing --json\n各コマンドは新しい Grok セッションを前景で実行します。再開には Grok 自身の resume コマンドを使ってください。",
+  "cli.usage": "使い方: grok-companion.mjs <setup|review|adversarial-review|audit|task|imagine> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\nレビュー範囲 auto と working-tree は Windows が必要で、安全なスナップショットを完全に取得できない場合は失敗します。\nmacOS/Linux ではコミット済みの変更に --scope branch または --base <ref> を使います。未コミット変更は比較差分に含まれませんが、周辺ファイルは作業ツリーから読み取られる場合があります。リポジトリ全体には audit を使います。\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nImagine: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --output <path> --aspect <ratio> --image-model <id> --image-edit-model <id> --allow-api-billing --json\n各コマンドは新しい Grok セッションを前景で実行します。再開には Grok 自身の resume コマンドを使ってください。",
   "cli.disabled": "{name} は利用できなくなりました。再開やセッション管理には Grok 自身のコマンドを使ってください。",
   "cli.unknown_command": "不明なコマンドです: {command}",
   "cli.unknown_setup_argument": "不明な setup 引数です: {argument}",
@@ -54,6 +54,7 @@
   "imagine.output_exists": "出力ファイルは既に存在します: {path}。",
   "imagine.output_unusable": "出力先は使えるディレクトリではありません: {path}。",
   "imagine.bad_aspect": "未対応のアスペクト比です: {ratio}。次のいずれかを指定してください: {ratios}。",
+  "imagine.bad_image_model": "{option} の画像モデル ID が不正です: {value}。英数字と「.」「_」「-」だけを使い、先頭は英数字にしてください。",
   "imagine.no_repo_write": "imagine はリポジトリを編集しません。生成画像を出力ディレクトリへコピーするだけです。",
   "imagine.extension_mismatch": "出力の拡張子 {output} は生成画像の拡張子 {source} と一致しません。中身は変換しないため、拡張子は変えません。",
   "err.grok_missing_agent_stdio": "この版の Grok Build は `grok agent stdio` に対応していません。`grok update` で更新してから、`/grok:setup` をもう一度実行してください。",

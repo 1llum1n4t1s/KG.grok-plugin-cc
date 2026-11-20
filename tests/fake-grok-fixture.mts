@@ -72,7 +72,8 @@ if (!(argv[0] === "agent" && argv[1] === "stdio")) {
 }
 
 // 呼び出しの記録。テストから何が起きたか検証できるようにする。
-const state = { pid: process.pid, prompts: [], models: [], cancels: [], loads: [], configs: [], sessions: 0 };
+const state = { pid: process.pid, prompts: [], models: [], cancels: [], loads: [], configs: [], sessions: 0,
+  imageEnv: { gen: process.env.GROK_IMAGE_GEN_MODEL_OVERRIDE ?? null, edit: process.env.GROK_IMAGE_EDIT_MODEL_OVERRIDE ?? null } };
 function persist() {
   if (STATE_PATH) {
     const temporaryPath = STATE_PATH + "." + process.pid + ".tmp";

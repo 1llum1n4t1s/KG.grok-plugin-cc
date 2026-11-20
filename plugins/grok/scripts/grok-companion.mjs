@@ -6,7 +6,7 @@ import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, resolveReviewTarget } from "./lib/git.mjs";
 import { EFFORT_NOT_APPLIED, GROK_INSTALL_COMMANDS, getGrokAuthStatus, parseStructuredOutput, readOutputSchema, runGrokImagine, runGrokReview, runGrokTurn } from "./lib/grok.mjs";
-import { assertImagineAspect, copySessionImages, imagineBilling, isMissingImageEntitlement, partitionSessionImages, resolveImagineOutput } from "./lib/imagine.mjs";
+import { assertImagineAspect, copySessionImages, imagineBilling, isMissingImageEntitlement, partitionSessionImages, resolveImageModels, resolveImagineOutput, withImageModelEnv } from "./lib/imagine.mjs";
 import { t } from "./lib/i18n.mjs";
 import { normalizeLanguageTag } from "./lib/language.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
@@ -184,7 +184,7 @@ async function main() {
         return;
     }
     if (command === "imagine") {
-        const { options, positionals } = parse(argv, ["model", "effort", "cwd", "prompt-file", "output", "aspect"], ["json", "write", "allow-api-billing", "resume", "resume-last", "fresh", "stop-gate", "background", "wait"]);
+        const { options, positionals } = parse(argv, ["model", "effort", "cwd", "prompt-file", "output", "aspect", "image-model", "image-edit-model"], ["json", "write", "allow-api-billing", "resume", "resume-last", "fresh", "stop-gate", "background", "wait"]);
         for (const flag of ["resume", "resume-last", "stop-gate", "background"])
             if (options[flag])
                 disabled(`--${flag}`);
@@ -194,6 +194,7 @@ async function main() {
         assertEffort(options);
         if (options.aspect)
             assertImagineAspect(options.aspect);
+        const requestedImageModel = resolveImageModels(options, process.env);
         const request = await readRunPrompt(options, positionals, cwd);
         const destination = resolveImagineOutput(cwd, options.output);
         const billing = imagineBilling(process.env, Boolean(options["allow-api-billing"]));
@@ -210,7 +211,7 @@ async function main() {
             ? `Set aspect_ratio to "${options.aspect}" on the image tool.`
             : "Set aspect_ratio only when the user request names one.";
         const prompt = interpolateTemplate(loadPromptTemplate(root, "imagine"), { USER_REQUEST: request, ASPECT_INSTRUCTION: aspectInstruction });
-        const result = await runGrokImagine(cwd, { prompt, model: model(options.model), effort: options.effort, onProgress: effortNoticeReporter(options.json) });
+        const result = await runGrokImagine(cwd, { prompt, model: model(options.model), effort: options.effort, onProgress: effortNoticeReporter(options.json), env: withImageModelEnv(process.env, requestedImageModel) });
         const entitlementText = [result.error?.message, result.toolFailureText].filter(Boolean).join("\n");
         const entitlement = isMissingImageEntitlement(entitlementText);
         let diagnostic = errorDiagnostic(result.error);
@@ -241,7 +242,7 @@ async function main() {
         delete turn.imagePaths;
         delete turn.toolFailureText;
         if (options.json)
-            console.log(JSON.stringify({ ...turn, status, error: diagnostic, billing, images, ...(partitioned.rejected.length ? { ignoredPaths: partitioned.rejected } : {}) }, null, 2));
+            console.log(JSON.stringify({ ...turn, status, error: diagnostic, billing, requestedImageModel, images, ...(partitioned.rejected.length ? { ignoredPaths: partitioned.rejected } : {}) }, null, 2));
         else {
             const lines = [billing.notice];
             if (images.length)

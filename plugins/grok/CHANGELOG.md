@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Added the Claude Code-only helper skill `grok-imagine-runtime`. Other skills can generate an image from their own steps under the same contract as `/grok:imagine`: one foreground run, no `--write`, and `--allow-api-billing` only when the user explicitly accepted the charge. `/grok:imagine` and `codex-skills/` are unchanged.
+- Added the Claude Code-only helper skill `grok-imagine-runtime`. Other skills can generate an image from their own steps under the same contract as `/grok:imagine`: one foreground run, no `--write`, and `--allow-api-billing` only when the user explicitly accepted the charge. `/grok:imagine` is unchanged.
+- Added a Codex skill with the same name, `grok-imagine-runtime`. `source-command-imagine` runs only when the user selects it, so Codex workflows could not generate images from their own steps. The new skill is model-invoked and runs imagine once under the Codex runtime contract (`references/codex-runtime.md`) with the same contract as the Claude Code helper.
+- Imagine accepts `--image-model <id>` (env `GROK_PLUGIN_IMAGE_MODEL`) and `--image-edit-model <id>` (env `GROK_PLUGIN_IMAGE_EDIT_MODEL`). For that run only, they set Grok's `GROK_IMAGE_GEN_MODEL_OVERRIDE` / `GROK_IMAGE_EDIT_MODEL_OVERRIDE`; the generation ID is never reused for edits. Without them the default is `grok-imagine-image-2.0` (highest quality, also used for edits), unless the user set an override, which is passed through unchanged. `auto` sets nothing and leaves the choice to Grok (a user-set override is still passed through). IDs are checked for characters only, and an invalid one fails before Grok starts. `--json` reports the IDs as `requestedImageModel` (requested, not confirmed as used).
 
 ## 1.2.0
 

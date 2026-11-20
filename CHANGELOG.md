@@ -4,7 +4,9 @@ Git のバージョン記録・コミット差分と既存の変更履歴をも�
 
 ## 未リリース
 
-- Claude Code 専用の helper スキル `grok-imagine-runtime` を追加しました。他のスキルの工程から、`/grok:imagine` と同じ契約（前景で 1 回、`--write` なし、課金の確認は `--allow-api-billing` を利用者が明示的に受け入れた場合だけ）で画像を生成できます。`/grok:imagine` と `codex-skills/` は変えていません。
+- Claude Code 専用の helper スキル `grok-imagine-runtime` を追加しました。他のスキルの工程から、`/grok:imagine` と同じ契約（前景で 1 回、`--write` なし、課金の確認は `--allow-api-billing` を利用者が明示的に受け入れた場合だけ）で画像を生成できます。`/grok:imagine` は変えていません。
+- Codex にも同じ名前の `grok-imagine-runtime` スキルを追加しました。`source-command-imagine` は利用者が選んだときだけ動くため、Codex では他のスキルの工程から画像を生成できませんでした。新しいスキルは Codex のモデルが呼び出せ、Codex の実行契約（`references/codex-runtime.md`）に従って Claude Code 版と同じ契約で imagine を 1 回実行します。
+- imagine に `--image-model <id>`（環境変数 `GROK_PLUGIN_IMAGE_MODEL`）と `--image-edit-model <id>`（`GROK_PLUGIN_IMAGE_EDIT_MODEL`）を追加しました。その実行だけ Grok の `GROK_IMAGE_GEN_MODEL_OVERRIDE` / `GROK_IMAGE_EDIT_MODEL_OVERRIDE` を設定し、生成用の ID を編集用へ流用しません。どちらも未指定のときの既定は `grok-imagine-image-2.0`（最高品質、編集にも対応）で、利用者自身が設定した上書きがあればそれを優先して渡します。`auto` を指定すると上書きせず Grok の既定に任せます（利用者自身の上書きは素通し）。ID は文字種だけを検証し、不正なら Grok を起動せずに失敗します。`--json` の `requestedImageModel` に要求した ID を載せます（実際に使われたモデルではありません）。
 
 ## [1.2.0] — 2026-11-20
 

@@ -1,5 +1,5 @@
 {
-  "cli.usage": "用法: grok-companion.mjs <setup|review|adversarial-review|audit|task|imagine> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\n审查范围 auto 和 working-tree 需要 Windows；如果无法完整收集安全的快照，将会失败。\n在 macOS/Linux 上，对已提交的更改请使用 --scope branch 或 --base <ref>；未提交的更改不包含在对比差异中，但周边文件仍可能从工作树读取。审查整个仓库请使用 audit。\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nImagine: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --output <path> --aspect <ratio> --allow-api-billing --json\n每个命令都会在前台运行一个新的 Grok 会话。如需恢复，请使用 Grok 自带的 resume 命令。",
+  "cli.usage": "用法: grok-companion.mjs <setup|review|adversarial-review|audit|task|imagine> [options] [prompt]\nReview: --base <ref> --scope <auto|working-tree|branch> --language <tag> --model <model> --cwd <path> --json\n审查范围 auto 和 working-tree 需要 Windows；如果无法完整收集安全的快照，将会失败。\n在 macOS/Linux 上，对已提交的更改请使用 --scope branch 或 --base <ref>；未提交的更改不包含在对比差异中，但周边文件仍可能从工作树读取。审查整个仓库请使用 audit。\nTask: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --write --json\nImagine: --model <model> --effort <low|medium|high> --cwd <path> --prompt-file <path> --output <path> --aspect <ratio> --image-model <id> --image-edit-model <id> --allow-api-billing --json\n每个命令都会在前台运行一个新的 Grok 会话。如需恢复，请使用 Grok 自带的 resume 命令。",
   "cli.disabled": "{name} 已不再支持。请使用 Grok 自带的命令来恢复或管理会话。",
   "cli.unknown_command": "未知命令：{command}",
   "cli.unknown_setup_argument": "未知的 setup 参数：{argument}",
@@ -54,6 +54,7 @@
   "imagine.output_exists": "输出文件已存在：{path}。",
   "imagine.output_unusable": "输出路径不是可用的目录：{path}。",
   "imagine.bad_aspect": "不支持的宽高比：{ratio}。请使用以下之一：{ratios}。",
+  "imagine.bad_image_model": "{option} 的图像模型 ID 无效：{value}。仅可使用字母、数字以及“.”“_”“-”，且须以字母或数字开头。",
   "imagine.no_repo_write": "imagine 不会编辑仓库。它只会把生成的图像复制到输出目录。",
   "imagine.extension_mismatch": "输出扩展名 {output} 与生成图像的扩展名 {source} 不一致。内容不会被转换，因此不会改写扩展名。",
   "err.grok_missing_agent_stdio": "此版本的 Grok Build 不支持 `grok agent stdio`。请用 `grok update` 更新，然后重新运行 `/grok:setup`。",

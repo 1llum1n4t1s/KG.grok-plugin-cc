@@ -203,6 +203,46 @@ export function assertImagineAspect(ratio) {
         throw new Error(t("imagine.bad_aspect", { ratio, ratios: IMAGINE_ASPECT_RATIOS.join(", ") }));
     }
 }
+const IMAGE_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+function checkedImageModel(option, value) {
+    if (!IMAGE_MODEL_ID.test(value))
+        throw new Error(t("imagine.bad_image_model", { option, value }));
+    return value;
+}
+/** imagine の既定の画像モデル（公式の画像用途の推奨で、編集にも対応する最高品質）。生成・編集とも同じ ID を既定にする。 */
+export const DEFAULT_IMAGE_MODEL = "grok-imagine-image-2.0";
+/** この値を指定すると、プラグインは画像モデルを上書きせず Grok / xAI 側の既定に任せる。 */
+export const IMAGE_MODEL_AUTO = "auto";
+/**
+ * 画像モデルの要求値を決める。優先順は CLI 引数、GROK_PLUGIN_IMAGE_MODEL / GROK_PLUGIN_IMAGE_EDIT_MODEL、
+ * 利用者自身の GROK_IMAGE_GEN_MODEL_OVERRIDE / GROK_IMAGE_EDIT_MODEL_OVERRIDE、DEFAULT_IMAGE_MODEL。
+ * 明示指定の生成用 ID を編集用へ流用しない。`auto`（大文字小文字不問）は「プラグインとしては上書きしない」で、
+ * 利用者自身の GROK_IMAGE_*_MODEL_OVERRIDE があればそれを素通しし、無ければ null（Grok の既定）にする。
+ * ID は文字種だけ検証し、存在確認はしない（無効な ID は Grok 側が失敗させる）。
+ */
+export function resolveImageModels(options, env) {
+    const pick = (flag, pluginVar, grokVar) => {
+        const own = env[grokVar]?.trim() || null;
+        const explicit = options[flag];
+        const requested = explicit !== undefined ? checkedImageModel(`--${flag}`, explicit.trim()) : env[pluginVar]?.trim() ? checkedImageModel(pluginVar, env[pluginVar].trim()) : null;
+        if (requested === null)
+            return own ?? DEFAULT_IMAGE_MODEL;
+        return requested.toLowerCase() === IMAGE_MODEL_AUTO ? own : requested;
+    };
+    return {
+        gen: pick("image-model", "GROK_PLUGIN_IMAGE_MODEL", "GROK_IMAGE_GEN_MODEL_OVERRIDE"),
+        edit: pick("image-edit-model", "GROK_PLUGIN_IMAGE_EDIT_MODEL", "GROK_IMAGE_EDIT_MODEL_OVERRIDE")
+    };
+}
+/** process.env を書き換えず、要求された画像モデルを Grok 用の環境変数へ載せたコピーを返す。 */
+export function withImageModelEnv(env, models) {
+    const next = { ...env };
+    if (models.gen)
+        next.GROK_IMAGE_GEN_MODEL_OVERRIDE = models.gen;
+    if (models.edit)
+        next.GROK_IMAGE_EDIT_MODEL_OVERRIDE = models.edit;
+    return next;
+}
 /**
  * 出力先をワークスペース内のディレクトリと、指定されたファイル名に分ける。
  * 画像拡張子が付いていなければディレクトリ、付いていればそのファイル名で保存する。

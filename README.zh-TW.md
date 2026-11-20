@@ -50,6 +50,8 @@ Companion 自身的訊息（setup 結果、審查標題、診斷資訊與說明�
 
 若呼叫回報 HTTP 402 與 `usage balance exhausted`，代表 Grok Build 的使用額度已用盡。請待額度恢復後再重試。訂閱登入下的影像產生也使用同一個共享額度。若影像產生回報 Grok Build 的影像工具需要 SuperGrok 訂閱，則此登入不包含 Imagine；請使用包含 Imagine 的方案，或使用帶 `--allow-api-billing` 的 API 金鑰。逾時、權限遭拒、審查未完成，或未能確認 agent 已停止，皆視為呼叫失敗；請勿將部分輸出視為已完成的審查或任務。
 
+要為 `/grok:imagine` 選擇圖像模型，請傳入 `--image-model <id>`（或設定 `GROK_PLUGIN_IMAGE_MODEL`）。編輯既有圖像請使用 `--image-edit-model <id>`（或 `GROK_PLUGIN_IMAGE_EDIT_MODEL`），生成用的 ID 不會被沿用於編輯。companion 僅在該次執行中設定 Grok 的 `GROK_IMAGE_GEN_MODEL_OVERRIDE` / `GROK_IMAGE_EDIT_MODEL_OVERRIDE`，並在 `--json` 中以 `requestedImageModel` 回報所要求的 ID。未使用這些選項時，預設值為 `grok-imagine-image-2.0`（最高品質，也用於編輯）；若您自行設定了 `GROK_IMAGE_GEN_MODEL_OVERRIDE` / `GROK_IMAGE_EDIT_MODEL_OVERRIDE`，則原樣傳給 Grok。向任一選項或 `GROK_PLUGIN_IMAGE_*` 傳入 `auto`（不分大小寫）即交由 Grok 決定：外掛不設定任何值，您自行設定的覆寫值仍會原樣傳遞，否則 `requestedImageModel` 為 `null`。ID 只檢查字元，帳號無法使用的 ID 會在生成圖像時被 xAI 拒絕。`--effort` 設定的是聊天模型的推理深度，而不是圖像品質。
+
 在唯讀審查與唯讀任務（不帶 `--write` 的 `task`）期間，即使 Python、Node.js、Bun 與 shell 包裝程式僅用於讀取檔案，也會被拒絕。Grok Build 可能在權限遭拒後以 `cancelled` 結束該回合。請使用內建的檔案工具檢視 JSON 與其他佐證資料；無法取得的佐證仍視為未經驗證。審查提示詞，以及唯讀任務中附加在你的請求之後的說明，會在檢視開始前說明這些限制。
 
 關於從原始碼建置、開發指令與驗證，請參閱 [開發指南](CONTRIBUTING.md#english)。執行階段的結構與邊界說明於 [DESIGN.md](DESIGN.md)。

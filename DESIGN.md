@@ -13,7 +13,7 @@ Claude Code と Codex から既存の Grok Build CLI を呼び出す薄い橋渡
 | 構成 | 責務 |
 | --- | --- |
 | `plugins/grok/commands/`、`agents/`、`claude-skills/` | Claude Code の入口と専用 helper |
-| `plugins/grok/codex-skills/` | Codex の公開入口。Codex の manifest だけがこのディレクトリを指す。Claude Code は既定の `skills/` も読むうえ、プラグイン skill の `disable-model-invocation` を無視するため、Codex 用入口は既定の `skills/` に置かない。`disable-model-invocation: true` は Codex が自動呼出ししないための指定として残す |
+| `plugins/grok/codex-skills/` | Codex の公開入口。Codex の manifest だけがこのディレクトリを指す。Claude Code は既定の `skills/` も読むうえ、プラグイン skill の `disable-model-invocation` を無視するため、Codex 用入口は既定の `skills/` に置かない。`disable-model-invocation: true` は Codex が自動呼出ししないための指定として残す。例外の `grok-imagine-runtime` は他の工程から画像を生成するためにモデルが呼び出す skill で、この指定を持たず、Claude 専用 helper と同じ名前・契約を Codex の実行契約で記述する |
 | `plugins/grok/scripts/grok-companion.mjs` | CLI 引数、対象とプロンプト、前景実行と結果表示 |
 | `plugins/grok/scripts/lib/grok.mjs` と ACP 関連 | Grok の新規プロセスへの直接接続、権限と結果 |
 | `plugins/grok/scripts/lib/shell-allowlist.mjs` | 読み取り専用実行で許可するシェルコマンドの判定。セキュリティ境界の判定を実行本体から分け、`grok.mjs` は既存の公開名 `classifyShellCommand` を再 export する |
@@ -51,5 +51,6 @@ Windows の作業ツリースナップショットでは、同梱 helper の `gi
 - 実行モデルは `--model`（別名を含む）、環境変数 `GROK_PLUGIN_MODEL` の順で明示指定を決める。明示指定が一覧に無いときは既定候補へ置き換えず現在のモデルに留まる。指定が無いときだけ、セッションのモデル一覧にある最初の `grok-4.7-build-fast`、`grok-4.7` を使い、一覧が空なら最後の候補を直接要求する。API キー認証の `session/new` 既定は推論なしモデルでレビュー品質が落ちること、fast 版が無いアカウントでも失敗させないことから、バージョン名の決め打ちではなく一覧の有無で選ぶ。推論深度は `--effort` を優先し、無ければ `high` を狙う。適用可否は切替え後の `configOptions` で判定し、暗黙の `high` を適用できないモデルでは黙って省く。明示した `--effort`（task と imagine が受け付ける）が適用できないときだけ、理由を `kind` 付きの進捗として出し、companion が非 JSON 時に限り表示言語で stderr へ 1 行表示する。`--json` の出力は変えず、他の進捗は表示しない。結果の model には実際に使われたモデルを載せる。
 - RPC エラーはコードとデータを JSON 出力へ含める。HTTP 402 と `usage balance exhausted` が一致するときだけ利用枠不足に分類し、回復後の再実行を案内する。他の課金・接続エラーを同じ理由に決め付けない。画像ツールと SuperGrok の両方に触れる RPC エラー、または失敗したツール結果だけを画像権限の不足（`image-entitlement-missing`）に分類する。成功した最終応答の本文では分類せず、生成画像のコピーも止めない。
 - `XAI_API_KEY` がある imagine は、API の従量課金（案内に出す起点は `grok-imagine-image-2.0` の $0.04/img）であることを伝え、`--allow-api-billing` が無いときは Grok を起動しない。キーが無いときは `grok login` のサブスクリプションとして共有の週間利用枠から消費する旨を結果に載せる。同意の既定を警告だけにしないのは、ホストがコマンドを代行したときに画像ごとの請求へ進まないためである。
+- imagine の画像モデルは `--image-model`（無ければ環境変数 `GROK_PLUGIN_IMAGE_MODEL`）と `--image-edit-model`（無ければ `GROK_PLUGIN_IMAGE_EDIT_MODEL`）で指定する。指定値は `lib/imagine.mts` が文字種（英数字と `.` `_` `-`）だけを検証し、Grok の起動前に不正を拒否する。有効な ID の一覧はローカルで確認できないため、存在確認はしない（無効な ID は xAI が画像生成時に拒否する）。起動時は `process.env` を書き換えず、コピーへ `GROK_IMAGE_GEN_MODEL_OVERRIDE` / `GROK_IMAGE_EDIT_MODEL_OVERRIDE` を設定して `runGrokImagine` の `env` に渡す。生成用の ID を編集用へ流用しない。どちらも指定が無いときは、利用者が自分で設定した同名の環境変数をそのまま渡し、それも無ければ既定の `grok-imagine-image-2.0`（公式の画像用途の推奨で最高品質・編集にも対応、課金案内の `IMAGINE_API_IMAGE_MODEL` と同じ）を生成・編集の両方に設定する。`auto`（大文字小文字不問）は「プラグインとしては上書きしない」で、利用者自身の環境変数があればそれを素通しし、無ければ何も設定せず `null` を報告する。`--json` の `requestedImageModel`（`gen` / `edit`、未指定は `null`）は Grok に要求した値であり、実際に使われたモデルではない。画像の品質を選ぶ引数は image_gen に無く、`--effort` はチャットモデルの推論深度のままである。
 
 利用方法は [README.md](README.md)、Codex 入口の実行契約は [codex-runtime.md](plugins/grok/references/codex-runtime.md)、変更時の検証手順は [AGENTS.md](AGENTS.md) を参照する。

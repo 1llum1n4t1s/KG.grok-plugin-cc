@@ -50,6 +50,8 @@ Windows에서는 `/grok:review --scope working-tree`로 로컬 변경 사항을 
 
 호출 시 `usage balance exhausted`와 함께 HTTP 402가 보고되면 Grok Build의 사용 잔액이 소진된 것입니다. 잔액이 회복된 후 다시 시도하십시오. 구독 로그인의 이미지 생성도 같은 공유 풀을 사용합니다. 이미지 도구에 SuperGrok 구독이 필요하다고 보고되면 이 로그인에는 Imagine이 포함되지 않은 것입니다. Imagine이 포함된 플랜을 쓰거나, `--allow-api-billing`을 붙인 API 키를 사용하십시오. 타임아웃, 권한 거부, 불완전한 리뷰, 확인되지 않은 에이전트 중지는 실패한 호출입니다. 부분적인 출력을 완료된 리뷰나 작업으로 간주하지 마십시오.
 
+`/grok:imagine`의 이미지 모델을 고르려면 `--image-model <id>`를 전달하거나 `GROK_PLUGIN_IMAGE_MODEL`을 설정하세요. 기존 이미지를 편집할 때는 `--image-edit-model <id>`(또는 `GROK_PLUGIN_IMAGE_EDIT_MODEL`)를 사용하며, 생성용 ID를 편집에 재사용하지 않습니다. companion은 해당 실행 동안에만 Grok의 `GROK_IMAGE_GEN_MODEL_OVERRIDE` / `GROK_IMAGE_EDIT_MODEL_OVERRIDE`를 설정하고, 요청한 ID를 `--json`의 `requestedImageModel`로 보고합니다. 이 옵션이 없으면 기본값은 `grok-imagine-image-2.0`(최고 품질이며 편집에도 사용)입니다. 다만 사용자가 `GROK_IMAGE_GEN_MODEL_OVERRIDE` / `GROK_IMAGE_EDIT_MODEL_OVERRIDE`를 직접 설정했다면 그 값을 그대로 Grok에 전달합니다. 옵션이나 `GROK_PLUGIN_IMAGE_*`에 `auto`(대소문자 구분 없음)를 지정하면 Grok이 선택합니다. 이 경우 플러그인은 아무것도 설정하지 않고, 사용자가 직접 설정한 override가 있으면 그대로 전달하며, 없으면 `requestedImageModel`은 `null`입니다. ID는 문자만 검사하며, 계정에서 쓸 수 없는 ID는 이미지 생성 시 xAI가 거부합니다. `--effort`는 채팅 모델의 추론 깊이이며 이미지 품질이 아닙니다.
+
 읽기 전용 리뷰와 읽기 전용 작업(`--write` 없는 `task`) 중에는 파일을 읽기 위한 용도의 스크립트라 하더라도 Python, Node.js, Bun, 셸 래퍼가 거부됩니다. Grok Build는 권한이 거부된 후 `cancelled`로 턴을 종료할 수 있습니다. JSON 및 기타 증거를 확인하려면 내장 파일 도구를 사용하십시오. 확인할 수 없는 증거는 미검증 상태로 남습니다. 리뷰 프롬프트와 읽기 전용 작업에서 요청 뒤에 덧붙이는 안내가 검사가 시작되기 전에 이러한 제한 사항을 제공합니다.
 
 소스 빌드, 개발 명령, 검증에 대해서는 [개발](CONTRIBUTING.md#english)을 참조하십시오. 런타임 구조와 경계는 [DESIGN.md](DESIGN.md)에 설명되어 있습니다.
