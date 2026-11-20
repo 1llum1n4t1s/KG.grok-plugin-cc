@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.0
+
+- Plain-text `task` and imagine print one stderr line explaining why an explicit `--effort` could not be applied. The Claude Code task entry points also return stderr diagnostics.
+- Fixed user-facing messages (incomplete review reasons, Git and Grok connection or exit errors, review result shape problems, permission denial reasons, and review target headings) follow the display language in all 9 locales. Details received from Git, the OS, or Grok and text sent to Grok stay in English.
+
 ## 1.1.13
 
 - Read-only tasks (without `--write`) append inspection rules after the request that match the read-only shell allowlist, so a denied command cancels the turn less often. Review, imagine, and `--write` task prompts are unchanged.
