@@ -148,7 +148,7 @@ for (const [name, workflow] of [["review", "review"], ["adversarial-review", "re
         // name は英小文字とハイフンだけなので RegExp へそのまま埋め込める。
         assert.match(source, new RegExp(`grok-companion\\.mjs> ${name} <safely-quoted-known-flag-argv> -- <safely-quoted-focus1argv>`));
         assert.match(source, new RegExp(`Always run the ${workflow} in the foreground`, "i"));
-        assert.match(source, /`--background`[\s\S]*no longer supported/i);
+        assert.match(source, /`--background`[\s\S]*runs only in the foreground/i);
         assert.doesNotMatch(source, /run_in_background:\s*true/);
         assert.doesNotMatch(source, /AskUserQuestion/);
         // 監査は差分レビューではないことを利用者向けに明言していること。

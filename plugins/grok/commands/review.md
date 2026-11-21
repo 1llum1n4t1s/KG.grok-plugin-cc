@@ -17,8 +17,8 @@ Core constraint:
 
 Execution rules:
 - Always run the review in the foreground. Do not use a background task, `run_in_background`, or a detached process.
-- If the leading flags before the focus include `--background`, stop and say that background execution is no longer supported.
-- A legacy `--wait` flag before the focus is harmless and may be forwarded; inside focus it is literal text. Foreground is already the only mode.
+- If the leading flags before the focus include `--background`, stop and say that this command runs only in the foreground.
+- A `--wait` flag before the focus has no effect and may be forwarded; inside focus it is literal text.
 
 Argument handling:
 - Known value flags are `--base`, `--scope`, `--model`, `--cwd`, `--language` (aliases `-m` for model and `-C` for cwd); boolean flags are `--json`, `--wait`, `--background`. Preserve supported `--key=value` forms. Forward recognized options unchanged; the companion decides how they apply.
