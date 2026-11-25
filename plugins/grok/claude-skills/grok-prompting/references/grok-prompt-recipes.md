@@ -2,7 +2,7 @@
 
 Use these as starting templates for Grok task prompts.
 Copy the smallest recipe that fits the task, then trim anything you do not need.
-In `grok:grok-rescue`, run diagnosis and fix-oriented recipes in write mode by default unless the user explicitly asked for read-only behavior.
+In `grok:grok-rescue`, pass `--write` only when the user requested edits, and omit it for read-only work such as diagnosis, review, and research.
 
 ## Diagnosis
 
